@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // sv_game.c -- interface to the game dll
 
 #include "server.h"
+#include "sv_antilag.h"
 
 #include "../botlib/botlib.h"
 
@@ -459,10 +460,20 @@ static intptr_t SV_GameSystemCalls( intptr_t *args ) {
 	case G_ENTITY_CONTACTCAPSULE:
 		return SV_EntityContact( VMA(1), VMA(2), VMA(3), /*int capsule*/ qtrue );
 	case G_TRACE:
-		SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*int capsule*/ qfalse );
+		// Engine-side shadow antilag intercept.
+		// If the shooter is an active player with antilag enabled, this
+		// transparently rewinds all other clients to fire time, runs the
+		// trace, then restores everyone before returning to the QVM.
+		// The QVM never observes entities in a rewound state.
+		// Falls through to normal SV_Trace if intercept is not active.
+		if ( !SV_Antilag_InterceptTrace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], qfalse ) ) {
+			SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*int capsule*/ qfalse );
+		}
 		return 0;
 	case G_TRACECAPSULE:
-		SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*int capsule*/ qtrue );
+		if ( !SV_Antilag_InterceptTrace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], qtrue ) ) {
+			SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*int capsule*/ qtrue );
+		}
 		return 0;
 	case G_POINT_CONTENTS:
 		return SV_PointContents( VMA(1), args[2] );

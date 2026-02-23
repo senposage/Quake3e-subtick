@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "server.h"
+#include "sv_antilag.h"
 
 
 /*
@@ -961,6 +962,10 @@ void SV_Init( void )
 
 	// force initial check
 	SV_TrackCvarChanges();
+
+	// Initialize engine-side shadow antilag system.
+	// Registers sv_antilagEnable, sv_physicsScale, sv_antilagMaxMs cvars.
+	SV_Antilag_Init();
 
 	SV_InitChallenger();
 }
