@@ -18,6 +18,7 @@ server.h must be included before this header in each .c file.
 extern cvar_t *sv_antilagEnable;
 extern cvar_t *sv_physicsScale;
 extern cvar_t *sv_antilagMaxMs;
+extern cvar_t *sv_antilagDebug;
 
 // Called once at server init — registers cvars, resets state
 void        SV_Antilag_Init( void );

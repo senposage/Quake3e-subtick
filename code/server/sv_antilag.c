@@ -66,6 +66,7 @@ typedef struct {
 cvar_t *sv_antilagEnable;
 cvar_t *sv_physicsScale;
 cvar_t *sv_antilagMaxMs;
+cvar_t *sv_antilagDebug;     // 0=off 1=per-trace summary 2=verbose per-client rewind
 
 // ---------------------------------------------------------------------------
 // Per-client shadow history state
@@ -271,46 +272,131 @@ static int SV_Antilag_GetClientFireTime( int shooterNum ) {
 
 
 /*
+SV_Antilag_GetMostRecentPosition
+
+Gets the most recent shadow history position for a client.
+Used to override the QVM FIFO rewind before we apply our own.
+Returns qfalse if no history exists yet.
+*/
+static qboolean SV_Antilag_GetMostRecentPosition(
+    int     clientNum,
+    vec3_t  outOrigin,
+    vec3_t  outAbsmin,
+    vec3_t  outAbsmax
+) {
+    svShadowHistory_t   *hist;
+    svShadowPos_t       *slot;
+    int                 idx;
+
+    if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
+        return qfalse;
+
+    hist = &sv_shadowHistory[clientNum];
+    if ( hist->count == 0 )
+        return qfalse;
+
+    // Most recent slot is one behind head
+    idx = ( hist->head - 1 + SV_ANTILAG_MAX_HISTORY_SLOTS ) % sv_shadowHistorySlots;
+    slot = &hist->slots[idx];
+
+    if ( !slot->valid )
+        return qfalse;
+
+    VectorCopy( slot->origin, outOrigin );
+    VectorCopy( slot->absmin, outAbsmin );
+    VectorCopy( slot->absmax, outAbsmax );
+    return qtrue;
+}
+
+
+/*
 SV_Antilag_RewindAll
 
 Saves and rewinds all active non-shooter clients to targetTime.
-Returns number of clients rewound (used to decide if restore is needed).
+
+Critical: the QVM's G_TimeShiftAllClients has ALREADY run before this
+is called (it fires before trap_Trace in utTrace). Entities are currently
+at their 40Hz FIFO-rewound positions. We must:
+  1. Override FIFO state with our most recent shadow snapshot (true position)
+  2. Then rewind from that true position to targetTime via shadow history
+  3. Save the TRUE position (not the FIFO position) for restore
+
+This ensures our high-resolution shadow rewind takes full priority over
+the QVM FIFO system. The QVM's G_UnTimeShiftAllClients will fire after
+we return but restore from its own saved state — harmless since we
+restore first inside InterceptTrace before returning to the QVM.
+
 MUST be paired with SV_Antilag_RestoreAll.
 */
 static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
     int             i, rewound = 0;
     sharedEntity_t  *gent;
     client_t        *cl;
+    vec3_t          trueOrigin, trueAbsmin, trueAbsmax;
     vec3_t          rwOrigin, rwAbsmin, rwAbsmax;
 
     for ( i = 0; i < sv_maxclients->integer; i++ ) {
         cl = &svs.clients[i];
 
         // Skip shooter, free slots, spectators
-        if ( i == shooterNum )              continue;
-        if ( cl->state != CS_ACTIVE )       continue;
+        if ( i == shooterNum )          continue;
+        if ( cl->state != CS_ACTIVE )   continue;
 
         gent = SV_GentityNum( i );
-        if ( !gent || !gent->r.linked )     continue;
+        if ( !gent || !gent->r.linked ) continue;
 
-        // Save current state unconditionally — restore must always fire
-        sv_shadowSaved[i].saved = qtrue;
-        VectorCopy( gent->r.currentOrigin, sv_shadowSaved[i].origin );
-        VectorCopy( gent->r.absmin,        sv_shadowSaved[i].absmin );
-        VectorCopy( gent->r.absmax,        sv_shadowSaved[i].absmax );
+        // Step 1: Get the true current-frame position from shadow history.
+        // This overrides whatever the QVM FIFO has already done to this entity.
+        // If we have no shadow history yet, fall back to whatever is current.
+        if ( SV_Antilag_GetMostRecentPosition( i,
+                trueOrigin, trueAbsmin, trueAbsmax ) ) {
+            // Shadow history exists — use it as ground truth
+            // Save the TRUE position for restore (not the FIFO-shifted position)
+            sv_shadowSaved[i].saved = qtrue;
+            VectorCopy( trueOrigin, sv_shadowSaved[i].origin );
+            VectorCopy( trueAbsmin, sv_shadowSaved[i].absmin );
+            VectorCopy( trueAbsmax, sv_shadowSaved[i].absmax );
+        } else {
+            // No shadow history yet — save whatever is current
+            // (will be FIFO position but we have nothing better)
+            sv_shadowSaved[i].saved = qtrue;
+            VectorCopy( gent->r.currentOrigin, sv_shadowSaved[i].origin );
+            VectorCopy( gent->r.absmin,        sv_shadowSaved[i].absmin );
+            VectorCopy( gent->r.absmax,        sv_shadowSaved[i].absmax );
+        }
 
-        // Attempt shadow rewind
+        // Step 2: Apply our high-resolution shadow rewind to targetTime.
+        // This is the actual lag compensation — done at shadow Hz resolution.
         if ( SV_Antilag_GetPositionAtTime( i, targetTime,
                 rwOrigin, rwAbsmin, rwAbsmax ) ) {
+
+            if ( sv_antilagDebug && sv_antilagDebug->integer >= 2 ) {
+                vec3_t delta;
+                VectorSubtract( rwOrigin, sv_shadowSaved[i].origin, delta );
+                float dist = sqrt( delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2] );
+                Com_Printf( "  AL rewind cl[%d]: %.1f %.1f %.1f -> %.1f %.1f %.1f (moved %.1f units back)\n",
+                    i,
+                    sv_shadowSaved[i].origin[0], sv_shadowSaved[i].origin[1], sv_shadowSaved[i].origin[2],
+                    rwOrigin[0], rwOrigin[1], rwOrigin[2],
+                    dist );
+            }
 
             VectorCopy( rwOrigin, gent->r.currentOrigin );
             VectorCopy( rwAbsmin, gent->r.absmin );
             VectorCopy( rwAbsmax, gent->r.absmax );
             SV_LinkEntity( gent );
             rewound++;
+        } else {
+            // No history for targetTime — restore to true position
+            // so at minimum the QVM FIFO offset is neutralised
+            if ( sv_antilagDebug && sv_antilagDebug->integer >= 2 ) {
+                Com_Printf( "  AL rewind cl[%d]: no shadow history for t=%d, using true pos\n", i, targetTime );
+            }
+            VectorCopy( sv_shadowSaved[i].origin, gent->r.currentOrigin );
+            VectorCopy( sv_shadowSaved[i].absmin, gent->r.absmin );
+            VectorCopy( sv_shadowSaved[i].absmax, gent->r.absmax );
+            SV_LinkEntity( gent );
         }
-        // If no history available, entity stays at current position
-        // (still gets restored below — saved flag ensures that)
     }
 
     return rewound;
@@ -362,6 +448,7 @@ void SV_Antilag_Init( void ) {
     sv_antilagEnable = Cvar_Get( "sv_antilagEnable", "1",   CVAR_SERVERINFO );
     sv_physicsScale  = Cvar_Get( "sv_physicsScale",  "3",   CVAR_SERVERINFO );
     sv_antilagMaxMs  = Cvar_Get( "sv_antilagMaxMs",  "200", CVAR_SERVERINFO );
+    sv_antilagDebug  = Cvar_Get( "sv_antilagDebug",  "0",   CVAR_TEMP );
 
     Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
     Com_Memset( sv_shadowSaved,   0, sizeof( sv_shadowSaved ) );
@@ -370,10 +457,13 @@ void SV_Antilag_Init( void ) {
 
     SV_Antilag_ComputeConfig();
 
-    Com_Printf( "SV_Antilag: shadow Hz=%d, historySlots=%d, maxRewindMs=%d\n",
+    Com_Printf( "SV_Antilag: game=%dHz shadow=%dHz slots=%d covers~%dms maxRewind=%dms debug=%d\n",
+        sv_fps ? sv_fps->integer : 20,
         1000 / sv_shadowTickMs,
         sv_shadowHistorySlots,
-        sv_antilagMaxMs->integer );
+        sv_shadowHistorySlots * sv_shadowTickMs,
+        sv_antilagMaxMs->integer,
+        sv_antilagDebug ? sv_antilagDebug->integer : 0 );
 }
 
 
@@ -456,6 +546,13 @@ qboolean SV_Antilag_InterceptTrace(
     // Determine the rewind target time
     fireTime = SV_Antilag_GetClientFireTime( passEntityNum );
 
+    if ( sv_antilagDebug && sv_antilagDebug->integer >= 1 ) {
+        client_t *shooter = &svs.clients[ passEntityNum ];
+        int rewindMs = svs.time - fireTime;
+        Com_Printf( "AL shot cl[%d] ping=%d rewind=%dms (svs.time=%d fireTime=%d)\n",
+            passEntityNum, shooter->ping, rewindMs, svs.time, fireTime );
+    }
+
     // Rewind all other clients into shadow positions
     rewound = SV_Antilag_RewindAll( passEntityNum, fireTime );
 
@@ -466,7 +563,13 @@ qboolean SV_Antilag_InterceptTrace(
     // Unconditional restore — QVM sees a clean world after this returns
     SV_Antilag_RestoreAll( passEntityNum );
 
-    (void)rewound; // available for debug logging if needed
+    if ( sv_antilagDebug && sv_antilagDebug->integer >= 1 ) {
+        const char *hitStr = ( results->entityNum < MAX_CLIENTS ) ? "HIT PLAYER" :
+                             ( results->entityNum == ENTITYNUM_WORLD ) ? "hit world" :
+                             ( results->fraction >= 1.0f ) ? "miss" : "hit entity";
+        Com_Printf( "AL result: %s (ent=%d frac=%.3f) rewound=%d clients\n",
+            hitStr, results->entityNum, results->fraction, rewound );
+    }
 
     return qtrue; // we handled it, caller should not call SV_Trace again
 }
