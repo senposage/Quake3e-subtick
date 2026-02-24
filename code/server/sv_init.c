@@ -21,7 +21,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "server.h"
-#include "sv_antilag.h"
 
 
 /*
@@ -605,6 +604,8 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
 
 	// make sure that level time is not zero
 	sv.time = sv.time ? sv.time : 8;
+	sv.gameTime = sv.time;
+	sv.gameTimeResidual = 0;
 
 	// load and spawn all other entities
 	SV_InitGameProgs();
@@ -618,8 +619,9 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
 	for ( i = 0; i < 3; i++ )
 	{
 		sv.time += 100;
-		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
-		SV_BotFrame( sv.time );
+		sv.gameTime += 100;
+		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
+		SV_BotFrame( sv.gameTime );
 	}
 
 	// create a baseline for more efficient communications
@@ -680,8 +682,9 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
 
 	// run another frame to allow things to look at all the players
 	sv.time += 100;
-	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
-	SV_BotFrame( sv.time );
+	sv.gameTime += 100;
+	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
+	SV_BotFrame( sv.gameTime );
 	svs.time += 100;
 
 	// we need to touch the cgame and ui qvm because they could be in
@@ -879,9 +882,13 @@ void SV_Init( void )
     Cvar_SetDescription(sv_privatePassword, "Set password for private clients to login\nDefault: empty");
 
     sv_fps = Cvar_Get ("sv_fps", "20", CVAR_TEMP | CVAR_PROTECTED );
+
+    sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
+    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances (independent of sv_fps)\nDefault: 20");
+
+    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "40", CVAR_ARCHIVE | CVAR_SERVERINFO );
+    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients. Set >= sv_fps for full benefit.\nDefault: 40");
     Cvar_SetDescription(sv_fps, "Set the max frames per second the server sends the client\nDefault: 20");
-
-
 
     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
@@ -961,13 +968,11 @@ void SV_Init( void )
 	Cvar_SetGroup( sv_minRate, CVG_SERVER );
 	Cvar_SetGroup( sv_maxRate, CVG_SERVER );
 	Cvar_SetGroup( sv_fps, CVG_SERVER );
+	Cvar_SetGroup( sv_gameHz, CVG_SERVER );
+	Cvar_SetGroup( sv_snapshotFps, CVG_SERVER );
 
 	// force initial check
 	SV_TrackCvarChanges();
-
-	// Initialize engine-side shadow antilag system.
-	// Registers sv_antilagEnable, sv_physicsScale, sv_antilagMaxMs cvars.
-	SV_Antilag_Init();
 
 	SV_InitChallenger();
 }

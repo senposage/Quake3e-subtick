@@ -21,13 +21,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "server.h"
-#include "sv_antilag.h"
 
 serverStatic_t	svs;				// persistant server info
 server_t		sv;					// local server
 vm_t			*gvm = NULL;		// game virtual machine
 
 cvar_t	*sv_fps;				// time rate for running non-clients
+cvar_t	*sv_gameHz;				// rate at which level.time advances, independent of sv_fps
+cvar_t	*sv_snapshotFps;			// max snapshot send rate, independent of sv_fps
 cvar_t	*sv_timeout;			// seconds without any message
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
 cvar_t	*sv_rconPassword;		// password for remote server commands
@@ -1347,6 +1348,8 @@ static void SV_Restart( const char *reason ) {
 	}
 
 	sv.time = 0; // force level time reset
+	sv.gameTime = 0;
+	sv.gameTimeResidual = 0;
 	sv.restartTime = 0;
 	
 	Cvar_VariableStringBuffer( "mapname", mapName, sizeof( mapName ) );
@@ -1492,22 +1495,24 @@ void SV_Frame( int msec ) {
 		svs.time += frameMsec;
 		sv.time += frameMsec;
 
-		// --- Engine-side shadow antilag sub-ticks ---
-		if ( sv_antilagEnable && sv_antilagEnable->integer ) {
-			int _scale = sv_physicsScale ? sv_physicsScale->integer : 1;
-			int _s;
-			if ( _scale < 1 ) _scale = 1;
-			if ( _scale > 8 ) _scale = 8;
-			for ( _s = 0; _s < _scale; _s++ ) {
-				SV_Antilag_RecordPositions();
+		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
+		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
+		{
+			int _gameHz = sv_gameHz ? sv_gameHz->integer : sv_fps->integer;
+			int _gameMsec;
+			if ( _gameHz < 1 )               _gameHz = 1;
+			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
+			_gameMsec = 1000 / _gameHz;
+			sv.gameTimeResidual += frameMsec;
+			while ( sv.gameTimeResidual >= _gameMsec ) {
+				sv.gameTimeResidual -= _gameMsec;
+				sv.gameTime += _gameMsec;
+				VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
+#ifdef USE_MV
+				svs.emptyFrame = qfalse; // ok, run recorder
+#endif
 			}
 		}
-
-		// let everything in the world think and move
-		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
-#ifdef USE_MV
-		svs.emptyFrame = qfalse; // ok, run recorder
-#endif
 	}
 
 	if ( com_speeds->integer ) {

@@ -91,6 +91,8 @@ typedef struct {
 	int				restartTime;
 	int				time;
 
+	int				gameTime;			// QVM-facing level.time, advances at sv_gameHz
+	int				gameTimeResidual;	// accumulator for gameTime sub-tick
 
 	byte			baselineUsed[ MAX_GENTITIES ];
 } server_t;
@@ -340,6 +342,8 @@ extern	server_t		sv;					// cleared each map
 extern	vm_t			*gvm;				// game virtual machine
 
 extern	cvar_t	*sv_fps;
+extern	cvar_t	*sv_gameHz;
+extern	cvar_t	*sv_snapshotFps;
 extern	cvar_t	*sv_timeout;
 extern	cvar_t	*sv_zombietime;
 extern	cvar_t	*sv_rconPassword;

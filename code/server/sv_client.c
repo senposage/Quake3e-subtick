@@ -1773,7 +1773,7 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 
 	if ( cl->netchan.remoteAddress.type == NA_BOT ) {
 		cl->lastSnapshotTime = svs.time - 9999; // generate a snapshot immediately
-		cl->snapshotMsec = 1000 / sv_fps->integer;
+		cl->snapshotMsec = 1000 / (sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer);
 		cl->rate = 0;
 		return;
 	}
@@ -1807,13 +1807,13 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 	if ( val[0] && !NET_IsLocalAddress( &cl->netchan.remoteAddress ) )
 		i = atoi( val );
 	else
-		i = sv_fps->integer; // sync with server
+		i = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer; // sync with server snapshot rate
 
 	// range check
 	if ( i < 1 )
 		i = 1;
-	else if ( i > sv_fps->integer )
-		i = sv_fps->integer;
+	else if ( i > (sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer) )
+		i = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer;
 
 	i = 1000 / i; // from FPS to milliseconds
 
