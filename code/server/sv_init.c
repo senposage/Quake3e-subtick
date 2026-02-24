@@ -882,16 +882,16 @@ void SV_Init( void )
     sv_privatePassword = Cvar_Get ("sv_privatePassword", "", CVAR_TEMP );
     Cvar_SetDescription(sv_privatePassword, "Set password for private clients to login\nDefault: empty");
 
-    sv_fps = Cvar_Get ("sv_fps", "20", CVAR_TEMP | CVAR_PROTECTED );
+    sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED );
 
     sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances (independent of sv_fps)\nDefault: 20");
+    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nKeep at 20 to match UT4.3 timer expectations. Never set higher than sv_fps.\nDefault: 20");
 
-    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "40", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients. Set >= sv_fps for full benefit.\nDefault: 40");
+    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "60", CVAR_ARCHIVE | CVAR_SERVERINFO );
+    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients. Set equal to sv_fps for full benefit.\nDefault: 60");
 
-    sv_busyWait = Cvar_Get ("sv_busyWait", "4", CVAR_ARCHIVE );
-    Cvar_SetDescription(sv_busyWait, "Spin for last N milliseconds before each frame instead of sleeping.\nFixes stutter at high sv_fps. Costs ~1 CPU core. 0=disabled, 4=recommended.\nDefault: 4");
+    sv_busyWait = Cvar_Get ("sv_busyWait", "0", CVAR_ARCHIVE );
+    Cvar_SetDescription(sv_busyWait, "Spin for last N milliseconds before each frame instead of sleeping.\nEliminates OS scheduler jitter at the cost of ~1 CPU core at 100pct.\nThe timeResidual clamping fix makes this unnecessary in normal operation.\nOnly enable if you observe measurable frame timing jitter on your specific hardware.\nDefault: 0 (disabled)");
 
     sv_pmoveMsec = Cvar_Get ("sv_pmoveMsec", "8", CVAR_ARCHIVE | CVAR_SERVERINFO );
     Cvar_SetDescription(sv_pmoveMsec, "Maximum physics step size in milliseconds. Enforces consistent movement\nregardless of client framerate. 8=125fps equivalent. 0=disabled.\nDefault: 8");

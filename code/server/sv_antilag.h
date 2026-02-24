@@ -10,7 +10,7 @@ server.h must be included before this header in each .c file.
 #ifndef SV_ANTILAG_H
 #define SV_ANTILAG_H
 
-#define SV_ANTILAG_MAX_HISTORY_SLOTS    128
+#define SV_ANTILAG_MAX_HISTORY_SLOTS    256  // 256 slots: covers 200ms at up to 1000Hz shadow rate
 #define SV_ANTILAG_HISTORY_WINDOW_MS    300
 #define SV_ANTILAG_MAX_REWIND_MS        200
 
@@ -18,7 +18,8 @@ server.h must be included before this header in each .c file.
 extern cvar_t *sv_antilagEnable;
 extern cvar_t *sv_physicsScale;
 extern cvar_t *sv_antilagMaxMs;
-extern cvar_t *sv_antilagDebug;
+extern cvar_t *sv_antilagTraceLog;
+extern cvar_t *sv_snapRateLog;
 
 // Called once at server init — registers cvars, resets state
 void        SV_Antilag_Init( void );
@@ -27,6 +28,7 @@ void        SV_Antilag_Init( void );
 // Records all active client positions into engine-side shadow history.
 // Completely decoupled from level.time and QVM.
 void        SV_Antilag_RecordPositions( void );
+void        SV_Antilag_NoteSnapshot( int clientNum );
 
 // Called from G_TRACE / G_TRACECAPSULE syscall handler in sv_game.c.
 // Transparently rewinds clients to shooter's fire time, runs trace, restores all.

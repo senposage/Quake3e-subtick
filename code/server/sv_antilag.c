@@ -60,6 +60,24 @@ typedef struct {
 } svShadowSaved_t;
 
 // ---------------------------------------------------------------------------
+// Per-client observed rate tracking (for sv_antilagDebug 3)
+// ---------------------------------------------------------------------------
+
+#define SV_RATE_WINDOW_MS   2000    // measure over a 2-second rolling window
+#define SV_RATE_SAMPLES     32      // ring of snapshot-send timestamps
+
+typedef struct {
+    int     snapTimes[SV_RATE_SAMPLES]; // ring of svs.time when snapshot was sent
+    int     snapHead;                   // next write index
+    int     snapCount;                  // valid entries
+    int     lastSeq;                    // netchan outgoingSequence at last sample
+    int     lastSeqTime;                // svs.time when lastSeq was captured
+    int     reportTimer;                // next svs.time to print report
+} svRateTrack_t;
+
+static svRateTrack_t sv_rateTrack[MAX_CLIENTS];
+
+// ---------------------------------------------------------------------------
 // Cvars
 // ---------------------------------------------------------------------------
 
@@ -67,6 +85,7 @@ cvar_t *sv_antilagEnable;
 cvar_t *sv_physicsScale;
 cvar_t *sv_antilagMaxMs;
 cvar_t *sv_antilagDebug;     // 0=off 1=per-trace summary 2=verbose per-client rewind
+cvar_t *sv_antilagRateDebug; // 0=off 1=print per-client observed snap/packet rate every 5s
 
 // ---------------------------------------------------------------------------
 // Per-client shadow history state
@@ -448,22 +467,25 @@ void SV_Antilag_Init( void ) {
     sv_antilagEnable = Cvar_Get( "sv_antilagEnable", "1",   CVAR_SERVERINFO );
     sv_physicsScale  = Cvar_Get( "sv_physicsScale",  "3",   CVAR_SERVERINFO );
     sv_antilagMaxMs  = Cvar_Get( "sv_antilagMaxMs",  "200", CVAR_SERVERINFO );
-    sv_antilagDebug  = Cvar_Get( "sv_antilagDebug",  "0",   CVAR_TEMP );
+    sv_antilagDebug      = Cvar_Get( "sv_antilagDebug",      "0", CVAR_TEMP );
+    sv_antilagRateDebug  = Cvar_Get( "sv_antilagRateDebug",  "0", CVAR_TEMP );
 
     Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
     Com_Memset( sv_shadowSaved,   0, sizeof( sv_shadowSaved ) );
+    Com_Memset( sv_rateTrack,      0, sizeof( sv_rateTrack ) );
 
     sv_shadowAccumulator = 0;
 
     SV_Antilag_ComputeConfig();
 
-    Com_Printf( "SV_Antilag: game=%dHz shadow=%dHz slots=%d covers~%dms maxRewind=%dms debug=%d\n",
+    Com_Printf( "SV_Antilag: game=%dHz shadow=%dHz slots=%d covers~%dms maxRewind=%dms debug=%d rateDebug=%d\n",
         sv_fps ? sv_fps->integer : 20,
         1000 / sv_shadowTickMs,
         sv_shadowHistorySlots,
         sv_shadowHistorySlots * sv_shadowTickMs,
         sv_antilagMaxMs->integer,
-        sv_antilagDebug ? sv_antilagDebug->integer : 0 );
+        sv_antilagDebug ? sv_antilagDebug->integer : 0,
+        sv_antilagRateDebug ? sv_antilagRateDebug->integer : 0 );
 }
 
 
@@ -492,6 +514,96 @@ void SV_Antilag_RecordPositions( void ) {
         if ( cl->state != CS_ACTIVE ) continue;
         if ( cl->netchan.remoteAddress.type == NA_BOT ) continue;
         SV_Antilag_RecordClient( i, svs.time );
+    }
+}
+
+
+/*
+SV_Antilag_NoteSnapshot
+
+Called from sv_snapshot.c each time a snapshot is actually sent to a client.
+Records the send time into the rolling window for rate measurement.
+Only active when sv_antilagDebug >= 3.
+*/
+void SV_Antilag_NoteSnapshot( int clientNum ) {
+    svRateTrack_t   *rt;
+    client_t        *cl;
+    int             idx;
+    static qboolean s_noted = qfalse;
+
+    if ( !sv_antilagRateDebug || !sv_antilagRateDebug->integer ) {
+        s_noted = qfalse;   // reset so we log again if re-enabled
+        return;
+    }
+
+    // Print once when rate debug becomes active
+    if ( !s_noted ) {
+        s_noted = qtrue;
+        Com_Printf( "SV_Antilag: rate monitoring active (sv_antilagRateDebug 1) — reporting every 5s\n" );
+    }
+
+    if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
+        return;
+
+    rt = &sv_rateTrack[clientNum];
+    cl = &svs.clients[clientNum];
+
+    // Record snapshot send time
+    idx = rt->snapHead % SV_RATE_SAMPLES;
+    rt->snapTimes[idx] = svs.time;
+    rt->snapHead++;
+    if ( rt->snapCount < SV_RATE_SAMPLES )
+        rt->snapCount++;
+
+    // Periodic report: every 5 seconds per client
+    if ( svs.time < rt->reportTimer )
+        return;
+    rt->reportTimer = svs.time + 5000;
+
+    // Count snaps within the last WINDOW ms
+    {
+        int windowStart = svs.time - SV_RATE_WINDOW_MS;
+        int snapsSeen   = 0;
+        int oldest = svs.time, newest = 0;
+        int i;
+
+        for ( i = 0; i < rt->snapCount; i++ ) {
+            int t = rt->snapTimes[( rt->snapHead - 1 - i + SV_RATE_SAMPLES ) % SV_RATE_SAMPLES];
+            if ( t >= windowStart ) {
+                snapsSeen++;
+                if ( t < oldest ) oldest = t;
+                if ( t > newest ) newest = t;
+            }
+        }
+
+        // Observed snap rate over window
+        float obsHz = 0.0f;
+        if ( snapsSeen > 1 && newest > oldest ) {
+            obsHz = ( snapsSeen - 1 ) * 1000.0f / (float)( newest - oldest );
+        }
+
+        // Observed packet rate from netchan sequence
+        float pktHz = 0.0f;
+        if ( rt->lastSeqTime > 0 && svs.time > rt->lastSeqTime ) {
+            int seqDelta  = cl->netchan.outgoingSequence - rt->lastSeq;
+            int timeDelta = svs.time - rt->lastSeqTime;
+            pktHz = seqDelta * 1000.0f / (float)timeDelta;
+        }
+        rt->lastSeq     = cl->netchan.outgoingSequence;
+        rt->lastSeqTime = svs.time;
+
+        Com_Printf( "RATE cl[%2d] %-16s | snap: obs=%.1fHz target=%dHz (%dms) | pkt: %.1fHz | ping=%dms | %s\n",
+            clientNum,
+            cl->name,
+            obsHz,
+            1000 / ( cl->snapshotMsec > 0 ? cl->snapshotMsec : 1 ),
+            cl->snapshotMsec,
+            pktHz,
+            cl->ping,
+            ( obsHz > 0 && cl->snapshotMsec > 0 &&
+              obsHz < ( 1000.0f / cl->snapshotMsec ) * 0.85f )
+              ? "CHOKED" : "ok"
+        );
     }
 }
 
