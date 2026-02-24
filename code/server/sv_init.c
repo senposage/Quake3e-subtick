@@ -895,7 +895,7 @@ void SV_Init( void )
 
     sv_pmoveMsec = Cvar_Get ("sv_pmoveMsec", "8", CVAR_ARCHIVE | CVAR_SERVERINFO );
     Cvar_SetDescription(sv_pmoveMsec, "Maximum physics step size in milliseconds. Enforces consistent movement\nregardless of client framerate. 8=125fps equivalent. 0=disabled.\nDefault: 8");
-    Cvar_SetDescription(sv_fps, "Set the max frames per second the server sends the client\nDefault: 20");
+    Cvar_SetDescription(sv_fps, "Engine tick and input sampling rate (Hz). Higher values give finer input resolution.\nDefault: 60");
 
     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );

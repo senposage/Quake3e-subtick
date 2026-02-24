@@ -2208,19 +2208,49 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 
 		if ( delta > maxStep ) {
 			// Fire multiple clamped steps to consume the full delta.
-			// commandTime advances inside the QVM each call so we re-read it.
-			while ( realTime - SV_GameClientNum( clNum )->commandTime > maxStep ) {
-				cl->lastUsercmd.serverTime = SV_GameClientNum( clNum )->commandTime + maxStep;
+			// This ensures:
+			//   - Pmove always gets <= maxStep physics steps (correct movement)
+			//   - Per-call timers (bleed, bandage, inactivity) accumulate the
+			//     full real elapsed time across all steps.
+			//
+			// Safety: some QVM states (intermission, game paused) return from
+			// ClientThink_real without calling Pmove so commandTime never advances.
+			// Check BEFORE each call — if commandTime already won't change, skip
+			// the multi-step entirely so we never block the server for even one
+			// extra call. This keeps rcon and packet processing responsive.
+			{
+				int prevCmdTime = SV_GameClientNum( clNum )->commandTime;
+				cl->lastUsercmd.serverTime = prevCmdTime + maxStep;
 				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
 				if ( cl->state != CS_ACTIVE )
 					return; // kicked during think
+				// If commandTime did not advance the QVM is in a no-Pmove state
+				// (intermission, paused). Restore serverTime and fall through to
+				// the normal single call below — do NOT loop.
+				if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
+					cl->lastUsercmd.serverTime = realTime;
+					goto single_call;
+				}
+				// commandTime advanced — continue stepping through remaining delta
+				while ( realTime - SV_GameClientNum( clNum )->commandTime > maxStep ) {
+					prevCmdTime = SV_GameClientNum( clNum )->commandTime;
+					cl->lastUsercmd.serverTime = prevCmdTime + maxStep;
+					VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
+					if ( cl->state != CS_ACTIVE )
+						return;
+					if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
+						cl->lastUsercmd.serverTime = realTime;
+						goto single_call;
+					}
+				}
+				// Final partial step to reach the real serverTime
+				cl->lastUsercmd.serverTime = realTime;
+				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
+				return;
 			}
-			// Final partial step to reach the real serverTime
-			cl->lastUsercmd.serverTime = realTime;
-			VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
-			return;
 		}
 	}
+	single_call:
 
 	VM_Call( gvm, 1, GAME_CLIENT_THINK, cl - svs.clients );
 }

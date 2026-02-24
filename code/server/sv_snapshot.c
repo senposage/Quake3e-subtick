@@ -960,6 +960,28 @@ static void SV_BuildCommonSnapshot( void )
 	for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
 		//index %= svs.numSnapshotEntities;
 		svs.snapshotEntities[ index ] = list[ i ]->s;
+
+		// Velocity-based entity smoothing for player entities.
+		// BG_PlayerStateToEntityState() sets TR_INTERPOLATE (no velocity) for
+		// all players. At higher sv_fps, fast direction changes produce visible
+		// stutter because the client lerps straight lines between positions.
+		// Override to TR_LINEAR_STOP with velocity so the client can smooth the
+		// path between snapshots — equivalent to BG_PlayerStateToEntityStateExtraPolate
+		// which exists in the QVM but is never called.
+		// trDuration = snapshot interval in ms (how long this velocity is valid).
+		// Only applied to active players (ET_PLAYER), not spectators/dead (ET_INVISIBLE).
+		if ( svs.snapshotEntities[ index ].number < MAX_CLIENTS
+			&& svs.snapshotEntities[ index ].eType == ET_PLAYER
+			&& svs.snapshotEntities[ index ].pos.trType == TR_INTERPOLATE ) {
+			int _snapMsec = sv_snapshotFps && sv_snapshotFps->integer > 0
+				? 1000 / sv_snapshotFps->integer
+				: 1000 / sv_fps->integer;
+			svs.snapshotEntities[ index ].pos.trType     = TR_LINEAR_STOP;
+			svs.snapshotEntities[ index ].pos.trTime     = svs.time;
+			svs.snapshotEntities[ index ].pos.trDuration = _snapMsec + 10; // small buffer
+			// trDelta (velocity) was already set by BG_PlayerStateToEntityState
+		}
+
 		sf->ents[ i ] = &svs.snapshotEntities[ index ];
 	}
 }
