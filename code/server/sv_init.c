@@ -882,6 +882,7 @@ void SV_Init( void )
     Cvar_SetDescription(sv_fps, "Set the max frames per second the server sends the client\nDefault: 20");
 
 
+
     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
 	Cvar_CheckRange( sv_timeout, "4", NULL, CV_INTEGER );

@@ -1493,10 +1493,6 @@ void SV_Frame( int msec ) {
 		sv.time += frameMsec;
 
 		// --- Engine-side shadow antilag sub-ticks ---
-		// Records entity positions into the engine shadow history at higher
-		// resolution than sv_fps. Runs sv_physicsScale times per game tick.
-		// Completely decoupled from level.time and the QVM. The QVM's own
-		// FIFO antilag continues to run unchanged inside GAME_RUN_FRAME.
 		if ( sv_antilagEnable && sv_antilagEnable->integer ) {
 			int _scale = sv_physicsScale ? sv_physicsScale->integer : 1;
 			int _s;

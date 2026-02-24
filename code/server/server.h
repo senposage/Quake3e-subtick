@@ -91,6 +91,7 @@ typedef struct {
 	int				restartTime;
 	int				time;
 
+
 	byte			baselineUsed[ MAX_GENTITIES ];
 } server_t;
 
