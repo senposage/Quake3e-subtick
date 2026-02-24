@@ -460,19 +460,13 @@ static intptr_t SV_GameSystemCalls( intptr_t *args ) {
 	case G_ENTITY_CONTACTCAPSULE:
 		return SV_EntityContact( VMA(1), VMA(2), VMA(3), /*int capsule*/ qtrue );
 	case G_TRACE:
-		// Engine-side shadow antilag intercept.
-		// If the shooter is an active player with antilag enabled, this
-		// transparently rewinds all other clients to fire time, runs the
-		// trace, then restores everyone before returning to the QVM.
-		// The QVM never observes entities in a rewound state.
-		// Falls through to normal SV_Trace if intercept is not active.
 		if ( !SV_Antilag_InterceptTrace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], qfalse ) ) {
-			SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*int capsule*/ qfalse );
+			SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], qfalse );
 		}
 		return 0;
 	case G_TRACECAPSULE:
 		if ( !SV_Antilag_InterceptTrace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], qtrue ) ) {
-			SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], /*int capsule*/ qtrue );
+			SV_Trace( VMA(1), VMA(2), VMA(3), VMA(4), VMA(5), args[6], args[7], qtrue );
 		}
 		return 0;
 	case G_POINT_CONTENTS:
@@ -1096,7 +1090,7 @@ static void SV_InitGameVM( qboolean restart ) {
 	
 	// use the current msec count for a random seed
 	// init for this gamestate
-	VM_Call( gvm, 3, GAME_INIT, sv.time, Com_Milliseconds(), restart );
+	VM_Call( gvm, 3, GAME_INIT, sv.gameTime, Com_Milliseconds(), restart );
 }
 
 

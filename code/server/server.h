@@ -344,6 +344,7 @@ extern	vm_t			*gvm;				// game virtual machine
 extern	cvar_t	*sv_fps;
 extern	cvar_t	*sv_gameHz;
 extern	cvar_t	*sv_snapshotFps;
+extern	cvar_t	*sv_busyWait;
 extern	cvar_t	*sv_timeout;
 extern	cvar_t	*sv_zombietime;
 extern	cvar_t	*sv_rconPassword;

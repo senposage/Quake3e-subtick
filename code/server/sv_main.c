@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 #include "server.h"
+#include "sv_antilag.h"
 
 serverStatic_t	svs;				// persistant server info
 server_t		sv;					// local server
@@ -29,6 +30,7 @@ vm_t			*gvm = NULL;		// game virtual machine
 cvar_t	*sv_fps;				// time rate for running non-clients
 cvar_t	*sv_gameHz;				// rate at which level.time advances, independent of sv_fps
 cvar_t	*sv_snapshotFps;			// max snapshot send rate, independent of sv_fps
+cvar_t	*sv_busyWait;				// spin last N ms before frame instead of sleeping, for precise timing at high sv_fps
 cvar_t	*sv_timeout;			// seconds without any message
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
 cvar_t	*sv_rconPassword;		// password for remote server commands
@@ -1281,13 +1283,24 @@ int SV_FrameMsec( void )
 	if ( sv_fps )
 	{
 		int frameMsec;
-		
+		int timeLeft;
+		int spinMs;
+
 		frameMsec = 1000.0f / sv_fps->value;
-		
+
 		if ( frameMsec < sv.timeResidual )
 			return 0;
-		else
-			return frameMsec - sv.timeResidual;
+
+		timeLeft = frameMsec - sv.timeResidual;
+
+		// If sv_busyWait is set, spin (return 0) for the last N ms before
+		// the frame is due, giving precise wakeup without OS sleep jitter.
+		// Costs ~1 CPU core but eliminates stutter at high sv_fps.
+		spinMs = sv_busyWait ? sv_busyWait->integer : 0;
+		if ( spinMs > 0 && timeLeft <= spinMs )
+			return 0;
+
+		return timeLeft;
 	}
 	else
 		return 1;
@@ -1494,6 +1507,17 @@ void SV_Frame( int msec ) {
 		sv.timeResidual -= frameMsec;
 		svs.time += frameMsec;
 		sv.time += frameMsec;
+
+		// --- Engine-side shadow antilag sub-ticks ---
+		if ( sv_antilagEnable && sv_antilagEnable->integer ) {
+			int _scale = sv_physicsScale ? sv_physicsScale->integer : 1;
+			int _s;
+			if ( _scale < 1 ) _scale = 1;
+			if ( _scale > 8 ) _scale = 8;
+			for ( _s = 0; _s < _scale; _s++ ) {
+				SV_Antilag_RecordPositions();
+			}
+		}
 
 		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
 		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
