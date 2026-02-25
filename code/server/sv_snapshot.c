@@ -957,32 +957,35 @@ static void SV_BuildCommonSnapshot( void )
 
 	// setup start index
 	index = sf->start;
-	for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
-		//index %= svs.numSnapshotEntities;
-		svs.snapshotEntities[ index ] = list[ i ]->s;
+	{
+		// Extrapolation offset: number of ms since the last GAME_RUN_FRAME.
+		// When sv_fps > sv_gameHz, BG_PlayerStateToEntityState only updates ent->s at
+		// sv_gameHz rate. Without correction, consecutive 60Hz snapshots contain identical
+		// player positions until the next game frame — visible as stutter on other players.
+		// BG_PlayerStateToEntityState stores velocity in pos.trDelta for TR_INTERPOLATE
+		// client entities, so we can forward-extrapolate to sv.time cheaply.
+		const float extrapolateMs = (float)( sv.time - sv.gameTime );
 
-		// Velocity-based entity smoothing for player entities.
-		// BG_PlayerStateToEntityState() sets TR_INTERPOLATE (no velocity) for
-		// all players. At higher sv_fps, fast direction changes produce visible
-		// stutter because the client lerps straight lines between positions.
-		// Override to TR_LINEAR_STOP with velocity so the client can smooth the
-		// path between snapshots — equivalent to BG_PlayerStateToEntityStateExtraPolate
-		// which exists in the QVM but is never called.
-		// trDuration = snapshot interval in ms (how long this velocity is valid).
-		// Only applied to active players (ET_PLAYER), not spectators/dead (ET_INVISIBLE).
-		if ( svs.snapshotEntities[ index ].number < MAX_CLIENTS
-			&& svs.snapshotEntities[ index ].eType == ET_PLAYER
-			&& svs.snapshotEntities[ index ].pos.trType == TR_INTERPOLATE ) {
-			int _snapMsec = sv_snapshotFps && sv_snapshotFps->integer > 0
-				? 1000 / sv_snapshotFps->integer
-				: 1000 / sv_fps->integer;
-			svs.snapshotEntities[ index ].pos.trType     = TR_LINEAR_STOP;
-			svs.snapshotEntities[ index ].pos.trTime     = svs.time;
-			svs.snapshotEntities[ index ].pos.trDuration = _snapMsec + 10; // small buffer
-			// trDelta (velocity) was already set by BG_PlayerStateToEntityState
+		for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
+			//index %= svs.numSnapshotEntities;
+			svs.snapshotEntities[ index ] = list[ i ]->s;
+
+			// Forward-extrapolate alive client entity positions to the current engine tick.
+			// Guard: number < maxclients (client slot) + TR_INTERPOLATE (alive/non-spectator
+			// in UT4 — spectators/dead are ET_INVISIBLE but still TR_INTERPOLATE; extrapolating
+			// them is harmless since cgame won't render them).
+			if ( extrapolateMs > 0.0f ) {
+				entityState_t *es = &svs.snapshotEntities[ index ];
+				if ( es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE ) {
+					const float dt = extrapolateMs * 0.001f;
+					es->pos.trBase[0] += es->pos.trDelta[0] * dt;
+					es->pos.trBase[1] += es->pos.trDelta[1] * dt;
+					es->pos.trBase[2] += es->pos.trDelta[2] * dt;
+				}
+			}
+
+			sf->ents[ i ] = &svs.snapshotEntities[ index ];
 		}
-
-		sf->ents[ i ] = &svs.snapshotEntities[ index ];
 	}
 }
 

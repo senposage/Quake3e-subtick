@@ -20,7 +20,8 @@ code/server/          ← all engine changes live here
   sv_client.c         ← SV_ClientThink multi-step pmove, sv_pmoveMsec clamping
   sv_init.c           ← cvar registration (sv_gameHz, sv_snapshotFps, sv_busyWait,
                          sv_pmoveMsec, antilag cvars)
-  sv_snapshot.c       ← TR_LINEAR_STOP velocity injection for player smoothing
+  sv_snapshot.c       ← engine-side player position extrapolation (sv.time - sv.gameTime offset)
+  sv_ccmds.c          ← SV_MapRestart_f: sync sv.gameTime on restart, GAME_RUN_FRAME uses sv.gameTime
   sv_antilag.c        ← engine-side antilag position history + rewind
   sv_antilag.h        ← antilag interface
 
@@ -101,20 +102,27 @@ Com_Frame (real wall clock)
   └─ SV_Frame(msec)
        sv.timeResidual += msec
        Hard clamp: timeResidual = min(timeResidual, frameMsec*2 - 1)  ← prevents burst on fps change
-       
+
        while timeResidual >= frameMsec (1000/sv_fps):
            timeResidual -= frameMsec
            svs.time += frameMsec
            sv.time  += frameMsec
-           
+
            [antilag: record sv_physicsScale position snapshots here]
-           
+
+           emptyFrame = true  ← reset per sv_fps tick for USE_MV multiview recorder
            gameTimeResidual += frameMsec
            while gameTimeResidual >= gameMsec (1000/sv_gameHz):
                gameTimeResidual -= gameMsec
                sv.gameTime += gameMsec
                SV_BotFrame(sv.gameTime)        ← IMPORTANT: bot AI ticks here, in lockstep
                GAME_RUN_FRAME(sv.gameTime)     ← QVM game logic at 20Hz
+               emptyFrame = false              ← signals multiview to record this tick
+
+           SV_IssueNewSnapshot()   ← per sv_fps tick
+           SV_SendClientMessages() ← per sv_fps tick ← KEY: not once per Com_Frame
+
+       SV_CheckTimeouts()  ← once per Com_Frame is sufficient
 ```
 
 **Key points:**
@@ -122,6 +130,7 @@ Com_Frame (real wall clock)
 - `sv.gameTime` / `level.time` advance at `sv_gameHz` rate (20Hz = every 50ms)
 - Client usercmds arrive and are processed at `sv_fps` rate via `SV_ClientThink`
 - `SV_BotFrame` was previously called before this loop at sv_fps rate — caused bot AI/movement desync. Now correctly placed inside the sv_gameHz inner loop.
+- `SV_SendClientMessages` moved inside the sv_fps loop — see Packet Flow section below.
 
 ### Client Think (sv_client.c — SV_ClientThink)
 
@@ -197,30 +206,100 @@ Rewinds entity positions to `attackTime` (from usercmd) for hit detection, then 
 
 ---
 
-## Player Visual Smoothing (sv_snapshot.c)
+## Packet Flow and Snapshot Dispatch
 
-**Problem:** `BG_PlayerStateToEntityState()` sets `pos.trType = TR_INTERPOLATE` for all players. `TR_INTERPOLATE` ignores velocity entirely — `BG_EvaluateTrajectory` for `TR_INTERPOLATE` just returns `trBase` verbatim. Client lerps straight lines between snapshot positions.
+### Root Cause of Netgraph Jitter (Late/Early Packets)
 
-At 20Hz this was a 50ms straight-line lerp, acceptable. At 60Hz it's 16ms segments, but fast direction changes still produce visible stutter because each segment is still a straight line with no velocity smoothing.
+The original code called `SV_IssueNewSnapshot()` + `SV_SendClientMessages()` **once per `Com_Frame`** call, outside the sv_fps tick loop. `Com_Frame` arrives at irregular intervals due to OS scheduler jitter. When the OS sleeps too long and delivers a `Com_Frame` that's 32ms late instead of 16ms, two sv_fps ticks fire inside the loop — but only one `SV_SendClientMessages` call fires at the end:
 
-`BG_PlayerStateToEntityStateExtraPolate()` exists in the QVM and would fix this by setting `TR_LINEAR_STOP` with velocity, but it is **never called** anywhere in the game code.
-
-**Fix (engine-side injection in SV_BuildCommonSnapshot):**
-
-After copying `ent->s` into the snapshot entity array, override player entities:
-
-```c
-if ( entity.number < MAX_CLIENTS
-    && entity.eType == ET_PLAYER
-    && entity.pos.trType == TR_INTERPOLATE ) {
-    entity.pos.trType     = TR_LINEAR_STOP;
-    entity.pos.trTime     = svs.time;
-    entity.pos.trDuration = snapMsec + 10;  // snapshot interval + buffer
-    // trDelta (velocity) already set by BG_PlayerStateToEntityState — reuse it
-}
+```
+Double-tick scenario (OS sleep overshoot):
+  Com_Frame at t=0ms:  timeResidual=10ms → 0 ticks, 0 snapshots
+  Com_Frame at t=34ms: timeResidual=34ms → 2 ticks fire (svs.time → 32ms)
+                       SV_SendClientMessages fires once → 1 snapshot sent
+                       Client sees a 32ms gap where two 16ms gaps should be
 ```
 
-The cgame `CG_CalcEntityLerpPositions` already handles `TR_LINEAR_STOP` for client entities — it calls `CG_InterpolateEntityPosition` which evaluates trajectory at both snap and nextSnap times using velocity. This path was dead because the server never sent `TR_LINEAR_STOP`. Now it works.
+The snapshotMsec gate (`svs.time - lastSnapshotTime >= snapshotMsec`) passes in the double-tick case (32ms >= 16ms), but it only fires once — the second snapshot for the second tick is simply never generated. This is the netgraph late-packet spike.
+
+On Linux with `sv_busyWait 0`: low frequency, ±1-2ms jitter. Occasional. On Windows with 15.625ms default timer resolution: very common.
+
+### Fix: Snapshot Dispatch Inside the sv_fps Loop
+
+`SV_IssueNewSnapshot()` + `SV_SendClientMessages()` moved inside the `while (timeResidual >= frameMsec)` loop (sv_main.c). Each engine tick now dispatches its own snapshot opportunity — two ticks produce two dispatch attempts, regardless of how the OS scheduled `Com_Frame`.
+
+Clients with a finite `rate` cvar (e.g., `rate 25000`) are naturally protected from burst by the `SV_RateMsec` bandwidth limiter inside `SV_SendClientMessages`. With `rate 0` (unlimited, typical for competitive LAN/dedicated), both snapshots go through.
+
+`SV_CheckTimeouts` remains outside the loop (once per Com_Frame is fine for timeout detection).
+
+### USE_MV Multiview Recorder Interaction
+
+`svs.emptyFrame` is now reset to `qtrue` at the start of each sv_fps tick (inside the loop) instead of once before the loop. It's set to `qfalse` when a `GAME_RUN_FRAME` fires (at sv_gameHz rate). The multiview recorder inside `SV_SendClientMessages` checks `!emptyFrame` — so it still records only at sv_gameHz rate (~20Hz), on the specific sv_fps ticks where a game frame actually fired.
+
+### cl_maxpackets — Upstream, Different Problem
+
+`cl_maxpackets` limits how often the **client sends input to the server** (upstream). The netgraph shows **server → client** snapshot timing (downstream). `cl_maxpackets` does NOT cause the netgraph late/early packets.
+
+At `sv_fps 60` with `cl_maxpackets 30` (UT default): server processes 60 input ticks/sec but receives fresh usercmds only 30/sec. The server reuses the last usercmd for the in-between ticks. This doesn't cause netgraph jitter but means our position extrapolation (trDelta = last-known velocity) is slightly stale for 50% of ticks.
+
+**Recommendation for players:** set `cl_maxpackets 60` or `cl_maxpackets 125` when playing on a 60Hz sv_fps server. The server cannot force this.
+
+---
+
+## Player Visual Smoothing
+
+### Root Cause of Stutter at sv_fps > sv_gameHz
+
+`BG_PlayerStateToEntityState` is called only inside `ClientEndFrame`, which runs at the end of each `GAME_RUN_FRAME` — i.e., at `sv_gameHz` rate (20Hz, every 50ms). This means `ent->s.pos.trBase` (the entity position in outbound snapshots) only updates 20 times per second.
+
+At `sv_fps 60 / sv_snapshotFps 60`, three consecutive snapshots go out between each game frame. Without correction:
+- snap at t=0ms: position P₀ (fresh game frame)
+- snap at t=16ms: position P₀ (stale — unchanged)
+- snap at t=33ms: position P₀ (stale — unchanged)
+- snap at t=50ms: position P₁ (new game frame — jump)
+
+The cgame interpolates these and sees two dead frames followed by a sudden jump. This is the visual stutter.
+
+### Fix: Engine-Side Position Extrapolation (sv_snapshot.c)
+
+`BG_PlayerStateToEntityState` sets `s->pos.trDelta = ps->velocity` (confirmed in UT4.2 source, bg_misc.c line 2041). The velocity is always present in `trDelta` for TR_INTERPOLATE client entities. We use this in `SV_BuildCommonSnapshot` to forward-extrapolate each player entity's `trBase` to `sv.time` before the snapshot is stamped:
+
+```c
+const float extrapolateMs = (float)( sv.time - sv.gameTime );
+// for each entity where es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE:
+const float dt = extrapolateMs * 0.001f;
+es->pos.trBase[0] += es->pos.trDelta[0] * dt;
+es->pos.trBase[1] += es->pos.trDelta[1] * dt;
+es->pos.trBase[2] += es->pos.trDelta[2] * dt;
+```
+
+With this:
+- snap at t=0ms: P₀ + V×0s = P₀
+- snap at t=16ms: P₀ + V×0.016 ≈ P₀.₃
+- snap at t=33ms: P₀ + V×0.033 ≈ P₀.₇
+- snap at t=50ms: P₁ + V×0s = P₁ (new game frame)
+
+The cgame interpolates smooth motion between snapshots instead of seeing dead frames + jump.
+
+**Guard conditions:**
+- `sv.time > sv.gameTime` (no-op when sv_fps == sv_gameHz)
+- `es->number < sv_maxclients->integer` (client entity slots only)
+- `es->pos.trType == TR_INTERPOLATE` (alive and spectator players — both safe; spectators/dead are ET_INVISIBLE and won't be rendered anyway)
+
+**Not applied to the local player's playerState.** The local player's `ps.origin` is already current — it's updated by `SV_ClientThink` (Pmove) at sv_fps rate, not just at game frame rate.
+
+**Investigated and rejected: TR_LINEAR_STOP injection**
+
+An earlier approach injected `TR_LINEAR_STOP` with velocity to have the cgame extrapolate forward. Found to be completely ineffective:
+
+1. `CG_CalcEntityLerpPositions` (cg_ents.c) checks `cg_smoothClients` first. Default is 0, which immediately overwrites any `TR_LINEAR_STOP` back to `TR_INTERPOLATE` for all client entities.
+2. Even with `cg_smoothClients 1`, TR_LINEAR_STOP player entities hit `CG_InterpolateEntityPosition` which evaluates at `cg.snap->serverTime` — `deltaTime = 0`, velocity contribution zeroed.
+
+The `TR_LINEAR_STOP` injection was removed. Engine-side extrapolation (modifying `trBase` before stamping the snapshot) is the correct approach.
+
+**Client `snaps` cvar (default 20)**
+
+The client sends `snaps 20` in userinfo, which in vanilla Q3/UT would cap the server to 20 snapshots/sec for that client. Our engine ignores this — `sv_snapshotFps` is fully authoritative and all clients receive at the server-controlled rate regardless of their `snaps` value (sv_client.c `SV_UserinfoChanged`).
 
 ---
 
@@ -273,14 +352,15 @@ If rcon `map` still fails after the above fix, investigate:
 - `CVAR_PROTECTED` on `sv_fps` — blocks console/rcon `set sv_fps` but `Cvar_Get` default still works
 - `SV_TrackCvarChanges` called with partial state during map load
 
-### Visual smoothness — fast strafe stutter (PARTIALLY FIXED)
-The `TR_LINEAR_STOP` injection in `sv_snapshot.c` should reduce stutter on fast direction changes. Needs in-game testing to confirm the cgame is actually taking the `TR_LINEAR_STOP` interpolation path for these entities. If stutter persists, check:
-- Whether `cg_smoothClients` cvar value matters (it forces `TR_INTERPOLATE` back if 0)
-- The `cg.frameInterpolation` value range at 60Hz
-- Whether `cg.nextSnap` is consistently available (extrapolation fallback if not)
+### Visual smoothness — position extrapolation (IMPLEMENTED, NEEDS TESTING)
+Engine-side position extrapolation in `SV_BuildCommonSnapshot` (sv_snapshot.c) should eliminate the 3-snapshot stutter pattern. Needs in-game testing with multiple human players at `sv_fps 60 / sv_gameHz 20`. If residual stutter remains, check:
+- Whether velocity in `trDelta` is zeroed for crouching or specific movement states in UT4.3 QVM
+- Whether `sv.time - sv.gameTime` ever exceeds `1000/sv_gameHz` ms (should be bounded by the inner loop logic)
+
+### sv_ccmds.c — GAME_RUN_FRAME time clock (FIXED)
+`SV_MapRestart_f` was calling `GAME_RUN_FRAME` with `sv.time` instead of `sv.gameTime` in both its warmup loop (3 settle frames) and final frame. Fixed to match the `SV_SpawnServer` pattern: sync `sv.gameTime = sv.time` and `sv.gameTimeResidual = 0` before `SV_RestartGameProgs()`, then advance and call in lockstep.
 
 ### Items not yet investigated
-- Whether `sv_snapshotFps < sv_fps` causes any issues with the TR_LINEAR_STOP `trDuration` calculation
 - Long session time wrap (`sv.time > 0x78000000`) behaviour with antilag history
 
 ---
@@ -292,7 +372,8 @@ The `TR_LINEAR_STOP` injection in `sv_snapshot.c` should reduce stutter on fast 
 | `sv_main.c` | sv_fps/sv_gameHz frame loop decoupling; timeResidual hard clamp; SV_BotFrame moved to sv_gameHz inner loop; antilag sub-tick recording |
 | `sv_init.c` | Register sv_gameHz, sv_snapshotFps, sv_busyWait, sv_pmoveMsec; antilag cvar registration; CVG_SERVER group tracking |
 | `sv_client.c` | sv_pmoveMsec multi-step loop with commandTime stall detection; bot exclusion from clamping |
-| `sv_snapshot.c` | TR_LINEAR_STOP velocity injection for player entities in SV_BuildCommonSnapshot |
+| `sv_snapshot.c` | `snaps` client cvar bypassed — sv_snapshotFps is authoritative; engine-side player position extrapolation using `sv.time - sv.gameTime` offset and `trDelta` (velocity) |
+| `sv_ccmds.c` | `SV_MapRestart_f`: sync `sv.gameTime = sv.time` + `sv.gameTimeResidual = 0` on restart; warmup frames pass `sv.gameTime` to `GAME_RUN_FRAME` (was incorrectly using `sv.time`) |
 | `sv_antilag.c` | Full engine-side antilag implementation |
 | `sv_antilag.h` | Antilag interface |
 
@@ -303,7 +384,7 @@ The `TR_LINEAR_STOP` injection in `sv_snapshot.c` should reduce stutter on fast 
 1. **End of round → next map** — does it proceed without freeze?
 2. **rcon `map <mapname>`** during live game — does it execute?
 3. **Bleed/bandage timing** — does a bleeding player bleed out at the correct rate vs vanilla?
-4. **Fast strafe visual smoothness** — is the stutter reduced with TR_LINEAR_STOP?
+4. **Fast strafe visual smoothness** — is the stutter reduced with engine-side position extrapolation?
 5. **Bot movement** — smooth at all sv_fps values?
 6. **Weapon ROF / reload** — correct at 60fps clients?
 7. **Stamina drain rate** — correct at 60fps (slide drain is `pml.msec / 8.0` — exactly calibrated)?

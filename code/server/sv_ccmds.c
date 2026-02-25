@@ -319,6 +319,8 @@ static void SV_MapRestart_f( void ) {
 
 	// make sure that level time is not zero
 	sv.time = sv.time ? sv.time : 8;
+	sv.gameTime = sv.time;
+	sv.gameTimeResidual = 0;
 
 	SV_RestartGameProgs();
 
@@ -326,7 +328,8 @@ static void SV_MapRestart_f( void ) {
 	for ( i = 0; i < 3; i++ )
 	{
 		sv.time += 100;
-		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
+		sv.gameTime += 100;
+		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
 	}
 
 	sv.state = SS_GAME;
@@ -372,7 +375,8 @@ static void SV_MapRestart_f( void ) {
 
 	// run another frame to allow things to look at all the players
 	sv.time += 100;
-	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
+	sv.gameTime += 100;
+	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
 	svs.time += 100;
 }
 

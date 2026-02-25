@@ -1529,11 +1529,11 @@ void SV_Frame( int msec ) {
 	SV_CalcPings();
 
 
-#ifdef USE_MV
-    svs.emptyFrame = qtrue;
-#endif
-
 	// run the game simulation in chunks
+	// Snapshot dispatch is inside this loop so each engine tick at sv_fps rate produces
+	// its own snapshot send opportunity. Without this, OS scheduler jitter can cause
+	// two ticks to fire in one Com_Frame with only one SV_SendClientMessages call,
+	// creating a double-interval gap visible in the netgraph as late packets.
 	while ( sv.timeResidual >= frameMsec ) {
 		sv.timeResidual -= frameMsec;
 		svs.time += frameMsec;
@@ -1559,6 +1559,9 @@ void SV_Frame( int msec ) {
 			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
 			_gameMsec = 1000 / _gameHz;
 			sv.gameTimeResidual += frameMsec;
+#ifdef USE_MV
+			svs.emptyFrame = qtrue; // assume no game frame this sv_fps tick; cleared below if one fires
+#endif
 			while ( sv.gameTimeResidual >= _gameMsec ) {
 				sv.gameTimeResidual -= _gameMsec;
 				sv.gameTime += _gameMsec;
@@ -1567,27 +1570,26 @@ void SV_Frame( int msec ) {
 				if (com_dedicated->integer) SV_BotFrame( sv.gameTime );
 				VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
 #ifdef USE_MV
-				svs.emptyFrame = qfalse; // ok, run recorder
+				svs.emptyFrame = qfalse; // game frame fired — allow multiview recorder this tick
 #endif
 			}
 		}
+
+		// Issue and dispatch snapshots once per sv_fps tick, not once per Com_Frame.
+		// This ensures clients receive packets at the true tick rate regardless of
+		// how many ticks fire per real-world Com_Frame call.
+		SV_IssueNewSnapshot();
+		SV_SendClientMessages();
 	}
 
 	if ( com_speeds->integer ) {
 		time_game = Sys_Milliseconds () - startTime;
 	}
 
-	// check timeouts
+	// check timeouts (once per Com_Frame is sufficient)
 	SV_CheckTimeouts();
 
-	// reset current and build new snapshot on first query
-	SV_IssueNewSnapshot();
-
-	// send messages back to the clients
-	SV_SendClientMessages();
-
 #ifdef USE_MV
-    svs.emptyFrame = qfalse;
     if ( sv_autoRecord->integer > 0 ) {
         if ( sv_demoFile == FS_INVALID_HANDLE ) {
             if ( SV_FindActiveClient( qtrue, -1, sv_autoRecord->integer ) >= 0 ) {
