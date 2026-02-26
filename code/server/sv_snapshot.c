@@ -1232,86 +1232,77 @@ static void SV_BuildCommonSnapshot( void )
 				if ( es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE ) {
 
 					qboolean usedBuffer = qfalse;
+					qboolean isBot = ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT );
+					vec3_t origin, velocity;
 
-					// --- Ring buffer paths ---
-					// sv_velSmooth: velocity smoothing (no extra latency, best with TR_LINEAR)
-					// sv_bufferMs: position delay (adds latency for stability)
+					// --- Phase 1: Resolve position source ---
+					// sv_bufferMs applies to both TR_INTERPOLATE and TR_LINEAR modes.
+					// Bots and real players both use the ring buffer when available.
+					if ( bufMs > 0 ) {
+						vec3_t delayedOrigin, delayedVelocity;
+						if ( SV_SmoothGetPosition( es->number, sv.time - bufMs, delayedOrigin, delayedVelocity ) ) {
+							VectorCopy( delayedOrigin, origin );
+							VectorCopy( delayedVelocity, velocity );
+							usedBuffer = qtrue;
+						}
+					}
+					if ( !usedBuffer ) {
+						if ( isBot ) {
+							VectorCopy( es->pos.trBase, origin );
+							VectorCopy( es->pos.trDelta, velocity );
+						} else {
+							playerState_t *ps = SV_GameClientNum( es->number );
+							VectorCopy( ps->origin, origin );
+							VectorCopy( ps->velocity, velocity );
+						}
+					}
 
+					// --- Phase 2: Resolve trajectory type ---
+					// Uses position/velocity resolved in Phase 1.
 					if ( sv_smoothClients && sv_smoothClients->integer ) {
 						// TR_LINEAR mode: set up trajectory for continuous cgame evaluation.
 						// IMPORTANT: only set TR_LINEAR when actually moving — idle players
 						// must stay TR_INTERPOLATE to prevent extrapolation drift/vibration.
 						int velSmoothMs = ( sv_velSmooth && sv_velSmooth->integer > 0 ) ? sv_velSmooth->integer : 0;
-
+						vec3_t finalVel;
 						if ( velSmoothMs > 0 ) {
-							// Velocity smoothing: average velocity over window from ring buffer.
-							// Position stays current (no latency), only velocity is smoothed.
 							vec3_t avgVel;
 							if ( SV_SmoothGetAverageVelocity( es->number, velSmoothMs, avgVel ) ) {
-								// Only switch to TR_LINEAR if averaged velocity indicates movement.
-								// Near-zero averaged velocity → keep TR_INTERPOLATE to avoid drift.
-								if ( DotProduct( avgVel, avgVel ) > 1.0f ) {
-									if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
-										vec3_t bufOrigin, bufVel;
-										if ( SV_SmoothGetPosition( es->number, sv.time, bufOrigin, bufVel ) ) {
-											VectorCopy( bufOrigin, es->pos.trBase );
-										}
-									} else {
-										playerState_t *ps = SV_GameClientNum( es->number );
-										VectorCopy( ps->origin, es->pos.trBase );
-									}
-									VectorCopy( avgVel, es->pos.trDelta );
-									es->pos.trType = TR_LINEAR;
-									es->pos.trTime = sv.time;
-									usedBuffer = qtrue;
-								}
-								// else: idle — fall through to standard fix, keep TR_INTERPOLATE
-							}
-						}
-					} else if ( bufMs > 0 ) {
-						// TR_INTERPOLATE + position delay from ring buffer.
-						// Look back bufMs for more stable snapshot positions.
-						int targetTime = sv.time - bufMs;
-						vec3_t delayedOrigin, delayedVelocity;
-						if ( SV_SmoothGetPosition( es->number, targetTime, delayedOrigin, delayedVelocity ) ) {
-							VectorCopy( delayedOrigin, es->pos.trBase );
-							VectorCopy( delayedVelocity, es->pos.trDelta );
-							usedBuffer = qtrue;
-						}
-					}
-
-					// --- Fallback: direct position fix (no ring buffer data) ---
-					if ( !usedBuffer ) {
-						if ( sv_smoothClients && sv_smoothClients->integer ) {
-							// TR_LINEAR without buffer: use current position + raw velocity.
-							// Only set TR_LINEAR when moving — idle stays TR_INTERPOLATE.
-							if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
-								if ( DotProduct( es->pos.trDelta, es->pos.trDelta ) > 1.0f ) {
-									es->pos.trType = TR_LINEAR;
-									es->pos.trTime = sv.time;
-								}
+								VectorCopy( avgVel, finalVel );
 							} else {
-								playerState_t *ps = SV_GameClientNum( es->number );
-								if ( DotProduct( ps->velocity, ps->velocity ) > 1.0f ) {
-									VectorCopy( ps->origin, es->pos.trBase );
-									VectorCopy( ps->velocity, es->pos.trDelta );
-									es->pos.trType = TR_LINEAR;
-									es->pos.trTime = sv.time;
-								}
+								VectorCopy( velocity, finalVel );
 							}
 						} else {
-							// Standard: fix positions, keep TR_INTERPOLATE
-							if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
-								const float dt = extrapolateMs * 0.001f;
-								es->pos.trBase[0] += es->pos.trDelta[0] * dt;
-								es->pos.trBase[1] += es->pos.trDelta[1] * dt;
-								es->pos.trBase[2] += es->pos.trDelta[2] * dt;
-							} else {
-								playerState_t *ps = SV_GameClientNum( es->number );
-								if ( DotProduct( ps->velocity, ps->velocity ) > 1.0f ) {
-									VectorCopy( ps->origin, es->pos.trBase );
-									VectorCopy( ps->velocity, es->pos.trDelta );
-								}
+							VectorCopy( velocity, finalVel );
+						}
+						if ( DotProduct( finalVel, finalVel ) > 1.0f ) {
+							VectorCopy( origin, es->pos.trBase );
+							VectorCopy( finalVel, es->pos.trDelta );
+							es->pos.trType = TR_LINEAR;
+							es->pos.trTime = sv.time;
+						} else {
+							// Idle: keep TR_INTERPOLATE, but still anchor position from Phase 1
+							// so that sv_bufferMs delayed positions are applied even when idle.
+							VectorCopy( origin, es->pos.trBase );
+							VectorCopy( finalVel, es->pos.trDelta );
+						}
+					} else {
+						// TR_INTERPOLATE mode.
+						if ( usedBuffer ) {
+							// Ring buffer position available: use delayed position.
+							VectorCopy( origin, es->pos.trBase );
+							VectorCopy( velocity, es->pos.trDelta );
+						} else if ( isBot ) {
+							// Bot without buffer: velocity-based extrapolation.
+							const float dt = extrapolateMs * 0.001f;
+							es->pos.trBase[0] += es->pos.trDelta[0] * dt;
+							es->pos.trBase[1] += es->pos.trDelta[1] * dt;
+							es->pos.trBase[2] += es->pos.trDelta[2] * dt;
+						} else {
+							// Real player without buffer: use current position with dead-zone check.
+							if ( DotProduct( velocity, velocity ) > 1.0f ) {
+								VectorCopy( origin, es->pos.trBase );
+								VectorCopy( velocity, es->pos.trDelta );
 							}
 						}
 					}
