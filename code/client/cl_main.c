@@ -39,6 +39,7 @@ cvar_t	*cl_timeout;
 cvar_t	*cl_autoNudge;
 cvar_t	*cl_timeNudge;
 cvar_t	*cl_showTimeDelta;
+cvar_t	*cl_snapScaling;
 
 cvar_t	*cl_shownet;
 cvar_t	*cl_autoRecordDemo;
@@ -4133,6 +4134,13 @@ void CL_Init( void ) {
 
     cl_showTimeDelta = Cvar_Get ("cl_showTimeDelta", "0", CVAR_TEMP );
     Cvar_SetDescription( cl_showTimeDelta, "Display time delta between server updates\nDefault: 0" );
+
+    cl_snapScaling = Cvar_Get ("cl_snapScaling", "1", CVAR_ARCHIVE );
+    Cvar_SetDescription( cl_snapScaling, "Adapt time sync thresholds to actual snapshot interval.\n"
+        "0 = vanilla behavior (assumes 50ms/20Hz snapshots)\n"
+        "1 = measure snapshot interval, scale thresholds accordingly\n"
+        "Required for smooth play at high sv_fps rates.\n"
+        "Default: 1" );
 
     rcon_client_password = Cvar_Get ("rconPassword", "", CVAR_TEMP );
     Cvar_SetDescription( rcon_client_password, "Set the rcon password when connecting to a passworded server\nDefault: empty" );

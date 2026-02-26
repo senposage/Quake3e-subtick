@@ -691,8 +691,11 @@ static qboolean CL_ReadyToSendPacket( void ) {
 	}
 
 	// If we are downloading, throttle packet rate to avoid flooding
-	if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < ( cl.snapshotMsec ? cl.snapshotMsec : 50 ) ) {
-		return qfalse;
+	{
+		int throttleMs = ( cl_snapScaling && cl_snapScaling->integer && cl.snapshotMsec ) ? cl.snapshotMsec : 50;
+		if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < throttleMs ) {
+			return qfalse;
+		}
 	}
 
 	// if we don't have a valid gamestate yet, only send

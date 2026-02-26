@@ -346,6 +346,10 @@ extern	cvar_t	*sv_gameHz;
 extern	cvar_t	*sv_snapshotFps;
 extern	cvar_t	*sv_busyWait;
 extern	cvar_t	*sv_pmoveMsec;
+extern	cvar_t	*sv_extrapolate;
+extern	cvar_t	*sv_smoothClients;
+extern	cvar_t	*sv_bufferMs;
+extern	cvar_t	*sv_velSmooth;
 extern	cvar_t	*sv_timeout;
 extern	cvar_t	*sv_zombietime;
 extern	cvar_t	*sv_rconPassword;
@@ -513,6 +517,10 @@ void SV_SendClientSnapshot( client_t *client );
 
 void SV_InitSnapshotStorage( void );
 void SV_IssueNewSnapshot( void );
+
+// sv_snapshot.c — per-client position ring buffer
+void SV_SmoothInit( void );
+void SV_SmoothRecordAll( void );
 
 int SV_RemainingGameState( void );
 

@@ -32,6 +32,10 @@ cvar_t	*sv_gameHz;				// rate at which level.time advances, independent of sv_fp
 cvar_t	*sv_snapshotFps;			// max snapshot send rate, independent of sv_fps
 cvar_t	*sv_busyWait;				// spin last N ms before frame instead of sleeping, for precise timing at high sv_fps
 cvar_t	*sv_pmoveMsec;				// max physics step size, enforces consistent movement regardless of client framerate
+cvar_t	*sv_extrapolate;			// engine-side position correction for high sv_fps snapshots
+cvar_t	*sv_smoothClients;			// TR_LINEAR trajectory trick for smoother client rendering
+cvar_t	*sv_bufferMs;				// per-client position ring buffer delay (ms)
+cvar_t	*sv_velSmooth;				// velocity smoothing window (ms) for TR_LINEAR mode
 cvar_t	*sv_timeout;			// seconds without any message
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
 cvar_t	*sv_rconPassword;		// password for remote server commands
@@ -1343,8 +1347,11 @@ void SV_TrackCvarChanges( void )
 				sv.timeResidual = 0;
 			if ( sv.timeResidual >= newFrameMsec )
 				sv.timeResidual = newFrameMsec - 1;
-			sv.gameTimeResidual = 0;
-			Com_DPrintf( "sv_fps changed to %d — residuals reset\n", sv_fps->integer );
+			// NOTE: do NOT reset sv.gameTimeResidual here. sv_gameHz doesn't
+			// change, so the accumulated game frame progress is still valid.
+			// Resetting it throws away up to 49ms of progress, causing a gap
+			// where no game frame fires — visible as bot/entity stutter.
+			Com_DPrintf( "sv_fps changed to %d — timeResidual clamped\n", sv_fps->integer );
 		}
 
 		sv_fps->modified = qfalse;
@@ -1570,6 +1577,15 @@ void SV_Frame( int msec ) {
 				svs.emptyFrame = qfalse; // game frame fired — allow multiview recorder this tick
 #endif
 			}
+		}
+
+		// Record positions into smooth buffer when either feature is enabled.
+		// sv_bufferMs = position delay, sv_velSmooth = velocity smoothing.
+		// Ring buffer feeds both — record when either is non-zero.
+		if ( sv_extrapolate && sv_extrapolate->integer
+				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
+				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
+			SV_SmoothRecordAll();
 		}
 
 		// Issue and dispatch snapshots once per sv_fps tick, not once per Com_Frame.

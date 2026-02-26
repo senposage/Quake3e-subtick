@@ -897,6 +897,36 @@ void SV_Init( void )
     Cvar_SetDescription(sv_pmoveMsec, "Maximum physics step size in milliseconds. Enforces consistent movement\nregardless of client framerate. 8=125fps equivalent. 0=disabled.\nDefault: 8");
     Cvar_SetDescription(sv_fps, "Engine tick and input sampling rate (Hz). Higher values give finer input resolution.\nDefault: 60");
 
+    sv_extrapolate = Cvar_Get ("sv_extrapolate", "1", CVAR_ARCHIVE );
+    Cvar_SetDescription(sv_extrapolate, "Engine-side position correction for high sv_fps snapshots.\n"
+        "0 = disabled (vanilla: players stutter when sv_fps > sv_gameHz)\n"
+        "1 = enabled (real players use actual Pmove position, bots use velocity extrapolation)\n"
+        "Interpolation windows: sv_fps 20=50ms, 60=16.7ms, 90=11.1ms, 125=8ms\n"
+        "Default: 1");
+
+    sv_smoothClients = Cvar_Get ("sv_smoothClients", "0", CVAR_ARCHIVE );
+    Cvar_SetDescription(sv_smoothClients, "Set player trajectory type to TR_LINEAR for smoother client rendering.\n"
+        "0 = TR_INTERPOLATE (cgame lerps between snapshot positions)\n"
+        "1 = TR_LINEAR (cgame evaluates trBase + trDelta*dt continuously)\n"
+        "Overrides sv_extrapolate when enabled. Experimental.\n"
+        "Default: 0");
+
+    sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
+    Cvar_SetDescription(sv_bufferMs, "Per-client position delay in milliseconds.\n"
+        "0 = disabled (use latest position, no extra latency)\n"
+        "-1 = auto (50 - 1000/sv_fps, matches vanilla 50ms total latency)\n"
+        "     sv_fps 60: 34ms, sv_fps 90: 39ms, sv_fps 125: 42ms\n"
+        "1-100 = manual delay — trades latency for position stability\n"
+        "Default: 0");
+
+    sv_velSmooth = Cvar_Get ("sv_velSmooth", "32", CVAR_ARCHIVE );
+    Cvar_SetDescription(sv_velSmooth, "Velocity smoothing window in milliseconds.\n"
+        "Averages player velocity over the last N ms from the ring buffer.\n"
+        "Reduces sawtooth artifacts from rapid direction changes.\n"
+        "Only effective with sv_smoothClients 1 (TR_LINEAR mode).\n"
+        "0 = disabled (use raw velocity)\n"
+        "Default: 32");
+
     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
 	Cvar_CheckRange( sv_timeout, "4", NULL, CV_INTEGER );
@@ -979,6 +1009,10 @@ void SV_Init( void )
 	Cvar_SetGroup( sv_snapshotFps, CVG_SERVER );
 	Cvar_SetGroup( sv_busyWait, CVG_SERVER );
 	Cvar_SetGroup( sv_pmoveMsec, CVG_SERVER );
+	Cvar_SetGroup( sv_extrapolate, CVG_SERVER );
+	Cvar_SetGroup( sv_smoothClients, CVG_SERVER );
+	Cvar_SetGroup( sv_bufferMs, CVG_SERVER );
+	Cvar_SetGroup( sv_velSmooth, CVG_SERVER );
 
 	// force initial check
 	SV_TrackCvarChanges();
@@ -986,6 +1020,7 @@ void SV_Init( void )
 	SV_InitChallenger();
 
 	SV_Antilag_Init();
+	SV_SmoothInit();
 }
 
 

@@ -27,6 +27,237 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 /*
 =============================================================================
 
+Per-client position ring buffer for smooth interpolation at high sv_fps.
+
+Records position + velocity at every sv_fps tick. Provides:
+- Position delay: look back N ms for more stable snapshot positions (TR_INTERPOLATE)
+- Velocity smoothing: average velocity over buffer window (TR_LINEAR)
+
+=============================================================================
+*/
+
+#define SV_SMOOTH_MAX_SLOTS 32   // covers 256ms at sv_fps 125 (8ms/tick)
+
+typedef struct {
+	vec3_t      origin;
+	vec3_t      velocity;
+	int         serverTime;
+	qboolean    valid;
+} svSmoothPos_t;
+
+typedef struct {
+	svSmoothPos_t slots[SV_SMOOTH_MAX_SLOTS];
+	int           head;
+	int           count;
+} svSmoothHistory_t;
+
+static svSmoothHistory_t sv_smoothHistory[MAX_CLIENTS];
+
+
+/*
+=============
+SV_SmoothInit
+
+Clear all position history buffers. Called on map load/restart.
+=============
+*/
+void SV_SmoothInit( void ) {
+	Com_Memset( sv_smoothHistory, 0, sizeof( sv_smoothHistory ) );
+}
+
+
+/*
+=============
+SV_SmoothRecord
+
+Record a single client's current position + velocity into the ring buffer.
+Bot positions use velocity extrapolation (ps->origin doesn't update between game frames).
+Real player positions use actual ps->origin (updated by Pmove every usercmd).
+=============
+*/
+static void SV_SmoothRecord( int clientNum ) {
+	svSmoothHistory_t *hist;
+	svSmoothPos_t *slot;
+	int idx;
+
+	if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
+		return;
+
+	hist = &sv_smoothHistory[clientNum];
+	idx = hist->head % SV_SMOOTH_MAX_SLOTS;
+	slot = &hist->slots[idx];
+
+	if ( svs.clients[clientNum].netchan.remoteAddress.type == NA_BOT ) {
+		// Bot: ps->origin doesn't update between game frames.
+		// Extrapolate from entity state using velocity.
+		sharedEntity_t *gent = SV_GentityNum( clientNum );
+		float dt = (float)( sv.time - sv.gameTime ) * 0.001f;
+		slot->origin[0] = gent->s.pos.trBase[0] + gent->s.pos.trDelta[0] * dt;
+		slot->origin[1] = gent->s.pos.trBase[1] + gent->s.pos.trDelta[1] * dt;
+		slot->origin[2] = gent->s.pos.trBase[2] + gent->s.pos.trDelta[2] * dt;
+		VectorCopy( gent->s.pos.trDelta, slot->velocity );
+	} else {
+		// Real player: actual Pmove position + current velocity
+		playerState_t *ps = SV_GameClientNum( clientNum );
+		VectorCopy( ps->origin, slot->origin );
+		VectorCopy( ps->velocity, slot->velocity );
+	}
+
+	slot->serverTime = sv.time;
+	slot->valid = qtrue;
+
+	hist->head++;
+	if ( hist->count < SV_SMOOTH_MAX_SLOTS )
+		hist->count++;
+}
+
+
+/*
+=============
+SV_SmoothRecordAll
+
+Record all active clients into the ring buffer. Called once per sv_fps tick.
+=============
+*/
+void SV_SmoothRecordAll( void ) {
+	int i;
+	for ( i = 0; i < sv_maxclients->integer; i++ ) {
+		if ( svs.clients[i].state == CS_ACTIVE ) {
+			SV_SmoothRecord( i );
+		}
+	}
+}
+
+
+/*
+=============
+SV_SmoothGetPosition
+
+Look up a client's position at a target time by interpolating between
+ring buffer entries. Returns qfalse if insufficient data.
+=============
+*/
+static qboolean SV_SmoothGetPosition( int clientNum, int targetTime,
+		vec3_t outOrigin, vec3_t outVelocity ) {
+	svSmoothHistory_t *hist;
+	svSmoothPos_t *before = NULL, *after = NULL;
+	int i, idx;
+	float frac;
+
+	if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
+		return qfalse;
+
+	hist = &sv_smoothHistory[clientNum];
+	if ( hist->count == 0 )
+		return qfalse;
+
+	// Walk the ring buffer to find entries bracketing targetTime
+	for ( i = 0; i < hist->count; i++ ) {
+		idx = ( ( hist->head - 1 - i ) % SV_SMOOTH_MAX_SLOTS + SV_SMOOTH_MAX_SLOTS ) % SV_SMOOTH_MAX_SLOTS;
+
+		if ( !hist->slots[idx].valid )
+			continue;
+
+		if ( hist->slots[idx].serverTime <= targetTime ) {
+			if ( !before || hist->slots[idx].serverTime > before->serverTime )
+				before = &hist->slots[idx];
+		} else {
+			if ( !after || hist->slots[idx].serverTime < after->serverTime )
+				after = &hist->slots[idx];
+		}
+	}
+
+	// Need at least one valid entry
+	if ( !before && !after )
+		return qfalse;
+
+	// Only one side: use it directly
+	if ( !before ) {
+		VectorCopy( after->origin, outOrigin );
+		VectorCopy( after->velocity, outVelocity );
+		return qtrue;
+	}
+	if ( !after ) {
+		VectorCopy( before->origin, outOrigin );
+		VectorCopy( before->velocity, outVelocity );
+		return qtrue;
+	}
+
+	// Interpolate between before and after
+	if ( after->serverTime == before->serverTime ) {
+		frac = 0.0f;
+	} else {
+		frac = (float)( targetTime - before->serverTime )
+			/ (float)( after->serverTime - before->serverTime );
+	}
+	if ( frac < 0.0f ) frac = 0.0f;
+	if ( frac > 1.0f ) frac = 1.0f;
+
+	outOrigin[0] = before->origin[0] + frac * ( after->origin[0] - before->origin[0] );
+	outOrigin[1] = before->origin[1] + frac * ( after->origin[1] - before->origin[1] );
+	outOrigin[2] = before->origin[2] + frac * ( after->origin[2] - before->origin[2] );
+
+	outVelocity[0] = before->velocity[0] + frac * ( after->velocity[0] - before->velocity[0] );
+	outVelocity[1] = before->velocity[1] + frac * ( after->velocity[1] - before->velocity[1] );
+	outVelocity[2] = before->velocity[2] + frac * ( after->velocity[2] - before->velocity[2] );
+
+	return qtrue;
+}
+
+
+/*
+=============
+SV_SmoothGetAverageVelocity
+
+Average all velocity entries within the last windowMs milliseconds.
+Returns qfalse if no valid data exists.
+=============
+*/
+static qboolean SV_SmoothGetAverageVelocity( int clientNum, int windowMs,
+		vec3_t outVelocity ) {
+	svSmoothHistory_t *hist;
+	int i, idx, n;
+	int cutoff;
+
+	if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
+		return qfalse;
+
+	hist = &sv_smoothHistory[clientNum];
+	if ( hist->count == 0 )
+		return qfalse;
+
+	cutoff = sv.time - windowMs;
+	VectorClear( outVelocity );
+	n = 0;
+
+	for ( i = 0; i < hist->count; i++ ) {
+		idx = ( ( hist->head - 1 - i ) % SV_SMOOTH_MAX_SLOTS + SV_SMOOTH_MAX_SLOTS ) % SV_SMOOTH_MAX_SLOTS;
+
+		if ( !hist->slots[idx].valid )
+			continue;
+		if ( hist->slots[idx].serverTime < cutoff )
+			break; // ring buffer is ordered by time, so older entries past cutoff
+
+		outVelocity[0] += hist->slots[idx].velocity[0];
+		outVelocity[1] += hist->slots[idx].velocity[1];
+		outVelocity[2] += hist->slots[idx].velocity[2];
+		n++;
+	}
+
+	if ( n == 0 )
+		return qfalse;
+
+	outVelocity[0] /= n;
+	outVelocity[1] /= n;
+	outVelocity[2] /= n;
+
+	return qtrue;
+}
+
+
+/*
+=============================================================================
+
 Delta encode a client frame onto the network channel
 
 A normal server packet will look like:
@@ -978,31 +1209,118 @@ static void SV_BuildCommonSnapshot( void )
 		if ( extrapolateMs > (float)gameMsec )
 			extrapolateMs = (float)gameMsec;
 
+		// Compute effective buffer delay (resolved once, used per-entity)
+		{
+			int bufMs = 0;
+			if ( sv_bufferMs && sv_bufferMs->integer != 0 ) {
+				bufMs = sv_bufferMs->integer;
+				if ( bufMs < 0 ) {
+					// Auto mode: 50 - (1000/sv_fps) to match vanilla 50ms total latency
+					bufMs = 50 - ( 1000 / sv_fps->integer );
+					if ( bufMs < 0 ) bufMs = 0;
+				}
+				if ( bufMs > 100 ) bufMs = 100;
+			}
+
 		for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
 			svs.snapshotEntities[ index ] = list[ i ]->s;
 
 			// Fix up client entity positions between game frames.
-			// Guard: client slot (number < maxclients) + TR_INTERPOLATE (alive player).
-			if ( extrapolateMs > 0.0f ) {
+			// Guard: sv_extrapolate enabled + between game frames + client slot + alive player.
+			if ( extrapolateMs > 0.0f && sv_extrapolate && sv_extrapolate->integer ) {
 				entityState_t *es = &svs.snapshotEntities[ index ];
 				if ( es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE ) {
-					if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
-						// Bot: constant velocity between game frames — extrapolate
-						const float dt = extrapolateMs * 0.001f;
-						es->pos.trBase[0] += es->pos.trDelta[0] * dt;
-						es->pos.trBase[1] += es->pos.trDelta[1] * dt;
-						es->pos.trBase[2] += es->pos.trDelta[2] * dt;
-					} else {
-						// Real player: use actual Pmove position + current velocity
-						playerState_t *ps = SV_GameClientNum( es->number );
-						VectorCopy( ps->origin, es->pos.trBase );
-						VectorCopy( ps->velocity, es->pos.trDelta );
+
+					qboolean usedBuffer = qfalse;
+
+					// --- Ring buffer paths ---
+					// sv_velSmooth: velocity smoothing (no extra latency, best with TR_LINEAR)
+					// sv_bufferMs: position delay (adds latency for stability)
+
+					if ( sv_smoothClients && sv_smoothClients->integer ) {
+						// TR_LINEAR mode: set up trajectory for continuous cgame evaluation.
+						// IMPORTANT: only set TR_LINEAR when actually moving — idle players
+						// must stay TR_INTERPOLATE to prevent extrapolation drift/vibration.
+						int velSmoothMs = ( sv_velSmooth && sv_velSmooth->integer > 0 ) ? sv_velSmooth->integer : 0;
+
+						if ( velSmoothMs > 0 ) {
+							// Velocity smoothing: average velocity over window from ring buffer.
+							// Position stays current (no latency), only velocity is smoothed.
+							vec3_t avgVel;
+							if ( SV_SmoothGetAverageVelocity( es->number, velSmoothMs, avgVel ) ) {
+								// Only switch to TR_LINEAR if averaged velocity indicates movement.
+								// Near-zero averaged velocity → keep TR_INTERPOLATE to avoid drift.
+								if ( DotProduct( avgVel, avgVel ) > 1.0f ) {
+									if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
+										vec3_t bufOrigin, bufVel;
+										if ( SV_SmoothGetPosition( es->number, sv.time, bufOrigin, bufVel ) ) {
+											VectorCopy( bufOrigin, es->pos.trBase );
+										}
+									} else {
+										playerState_t *ps = SV_GameClientNum( es->number );
+										VectorCopy( ps->origin, es->pos.trBase );
+									}
+									VectorCopy( avgVel, es->pos.trDelta );
+									es->pos.trType = TR_LINEAR;
+									es->pos.trTime = sv.time;
+									usedBuffer = qtrue;
+								}
+								// else: idle — fall through to standard fix, keep TR_INTERPOLATE
+							}
+						}
+					} else if ( bufMs > 0 ) {
+						// TR_INTERPOLATE + position delay from ring buffer.
+						// Look back bufMs for more stable snapshot positions.
+						int targetTime = sv.time - bufMs;
+						vec3_t delayedOrigin, delayedVelocity;
+						if ( SV_SmoothGetPosition( es->number, targetTime, delayedOrigin, delayedVelocity ) ) {
+							VectorCopy( delayedOrigin, es->pos.trBase );
+							VectorCopy( delayedVelocity, es->pos.trDelta );
+							usedBuffer = qtrue;
+						}
+					}
+
+					// --- Fallback: direct position fix (no ring buffer data) ---
+					if ( !usedBuffer ) {
+						if ( sv_smoothClients && sv_smoothClients->integer ) {
+							// TR_LINEAR without buffer: use current position + raw velocity.
+							// Only set TR_LINEAR when moving — idle stays TR_INTERPOLATE.
+							if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
+								if ( DotProduct( es->pos.trDelta, es->pos.trDelta ) > 1.0f ) {
+									es->pos.trType = TR_LINEAR;
+									es->pos.trTime = sv.time;
+								}
+							} else {
+								playerState_t *ps = SV_GameClientNum( es->number );
+								if ( DotProduct( ps->velocity, ps->velocity ) > 1.0f ) {
+									VectorCopy( ps->origin, es->pos.trBase );
+									VectorCopy( ps->velocity, es->pos.trDelta );
+									es->pos.trType = TR_LINEAR;
+									es->pos.trTime = sv.time;
+								}
+							}
+						} else {
+							// Standard: fix positions, keep TR_INTERPOLATE
+							if ( svs.clients[ es->number ].netchan.remoteAddress.type == NA_BOT ) {
+								const float dt = extrapolateMs * 0.001f;
+								es->pos.trBase[0] += es->pos.trDelta[0] * dt;
+								es->pos.trBase[1] += es->pos.trDelta[1] * dt;
+								es->pos.trBase[2] += es->pos.trDelta[2] * dt;
+							} else {
+								playerState_t *ps = SV_GameClientNum( es->number );
+								if ( DotProduct( ps->velocity, ps->velocity ) > 1.0f ) {
+									VectorCopy( ps->origin, es->pos.trBase );
+									VectorCopy( ps->velocity, es->pos.trDelta );
+								}
+							}
+						}
 					}
 				}
 			}
 
 			sf->ents[ i ] = &svs.snapshotEntities[ index ];
 		}
+		} // end bufMs scope
 	}
 }
 
