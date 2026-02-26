@@ -474,6 +474,23 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
 		cl.snapshots[ ( oldMessageNum + i ) & PACKET_MASK ].valid = qfalse;
 	}
 
+	// measure snapshot interval for adaptive time management
+	if ( cl.snap.valid && newSnap.serverTime > cl.snap.serverTime ) {
+		int measured = newSnap.serverTime - cl.snap.serverTime;
+		if ( measured >= 1 && measured <= 200 ) {
+			if ( cl.snapshotMsec == 0 ) {
+				cl.snapshotMsec = measured; // first measurement
+			} else {
+				cl.snapshotMsec = ( cl.snapshotMsec * 3 + measured ) >> 2; // exponential moving average
+			}
+			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
+			if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
+		}
+	}
+	if ( cl.snapshotMsec == 0 ) {
+		cl.snapshotMsec = 50; // default to 20Hz until measured
+	}
+
 	// copy to the current good spot
 	cl.snap = newSnap;
 	cl.snap.ping = 999;
@@ -667,6 +684,16 @@ static void CL_ParseServerInfo( void )
 	len = strlen( clc.sv_dlURL );
 	if ( len > 0 &&  clc.sv_dlURL[len-1] == '/' )
 		clc.sv_dlURL[len-1] = '\0';
+
+	// pre-compute snapshot interval from server's advertised rate
+	{
+		int snapFps = atoi( Info_ValueForKey( serverInfo, "sv_snapshotFps" ) );
+		if ( snapFps > 0 ) {
+			cl.snapshotMsec = 1000 / snapFps;
+			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
+			if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
+		}
+	}
 }
 
 

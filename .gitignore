@@ -5,3 +5,7 @@ output/
 *.user
 cmake-*
 .idea
+
+# UrbanTerror 4.2 source — reference only, do not distribute
+UrbanTerror42_source/
+UrbanTerror42_Source/

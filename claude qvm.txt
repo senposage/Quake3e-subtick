@@ -1,0 +1,114 @@
+ Complete QVM Timing Sweep — Findings Summary
+
+  CATEGORY 1: Critical — Will Break or Degrade at sv_fps 60
+
+  1. cgame: Snapshot Interpolation Freeze (cg_ents.c + cg_snapshot.c)
+  - When nextSnap == NULL (packet late/dropped), frameInterpolation = 0 and CG_CalcEntityLerpPositions falls through to BG_EvaluateTrajectory which just does VectorCopy(trBase) for
+  TR_INTERPOLATE — players freeze in place.
+  - At sv_fps 60, the 16ms snapshot window means even minor jitter causes nextSnap to be NULL more frequently.
+  - CG_InterpolateEntityPosition at line 1050 calls CG_Error() if nextSnap == NULL — crash risk if interpolation path is entered without nextSnap.
+
+  2. cgame: frameInterpolation Unclamped (cg_ents.c:1332-1340)
+  - frameInterpolation = (cg.time - snap->serverTime) / (nextSnap->serverTime - snap->serverTime) — no clamping.
+  - With 16ms denominator, small timing drift → values > 1.0 or < 0.0 → visual popping/overshooting.
+
+  3. cgame: ut_timenudge Buffer Mismatch (cg_view.c:1295)
+  - Default 25ms is 1.56 snapshot intervals at 60Hz (was 0.5 at 20Hz).
+  - Applied before CG_ProcessSnapshots() — pushes cg.time back, possibly behind snap->serverTime, triggering clamping at line 486.
+
+  4. cgame: No Extrapolation Path
+  - cg_snapshot.c:437-439: Comment says "we will just have to extrapolate" but breaks out of loop with nextSnap = NULL.
+  - BG_EvaluateTrajectory for TR_INTERPOLATE: ignores trDelta (velocity) — VectorCopy(trBase) only.
+  - BG_EvaluateTrajectoryDelta for TR_INTERPOLATE: returns zero vector.
+  - Velocity IS stored in trDelta by BG_PlayerStateToEntityState (bg_misc.c:2041) — it's just never read.
+
+  5. cgame: cg_smoothClients=0 Forces TR_INTERPOLATE (cg_ents.c:1083-1091)
+  - Default off, forces all player entity trType = TR_INTERPOLATE, killing any trajectory-based extrapolation attempt.
+
+  6. game: Antiwarp Hardcoded 50ms (g_active.c:1806)
+  - ent->client->pers.cmd.serverTime += 50 — blank command injection assumes 50ms frames.
+  - This is why sv_gameHz must stay at 20. Already known/handled.
+
+  7. game: MISSILE_PRESTEP_TIME = 50 (g_missile.c:5)
+  - Hardcoded #define MISSILE_PRESTEP_TIME 50 — projectile spawn offset.
+  - Multiple grenade->s.pos.trTime = level.time - 50 in g_weapon.c (lines 126, 229, 325).
+  - These are relative to level.time (sv_gameHz 20), so the 50ms = one game frame. Since sv_gameHz stays at 20, this remains correct. Not broken, but worth documenting.
+
+  CATEGORY 2: Moderate — May Cause Visual Glitches
+
+  8. cgame: Animation System Uses cg.time (c_players.c:145, cg_players.c:1979)
+  - C_RunLerpFrame receives cg.time — animation frame stepping is independent of snapshot rate.
+  - backlerp = 1.0 - (time - oldFrameTime) / (frameTime - oldFrameTime) at line 242.
+  - At sv_fps 60, cg.time advances at render framerate anyway, so this is tick-rate-independent and safe.
+  - However, animationTime += 5000 hack at line 1974-1975 uses absolute ms — safe.
+
+  9. cgame: Lagometer Sampling (cg_draw.c:1177)
+  - offset = cg.time - cg.latestSnapshotTime — at 60Hz, positive offsets are smaller (16ms max vs 50ms). Won't break, but lagometer display will look different.
+
+  10. cgame: Prediction Error Decay (cg_predict.c:1063-1064)
+  - f = (cg_errorDecay.value - t) / cg_errorDecay.value — uses cg.time absolute difference.
+  - cg_errorDecay default controls how fast prediction mismatches smooth out. Tick-rate-independent, but more frequent snapshots = more frequent error detection = potentially more jittery
+   correction.
+
+  11. cgame: CG_InterpolatePlayerState (cg_predict.c:602)
+  - f = (cg.time - prev->serverTime) / (next->serverTime - prev->serverTime) — same unclamped interpolation as entities. Used for demo playback and spectator follow. Same 16ms denominator
+   concern.
+
+  CATEGORY 3: Safe — Already Tick-Rate Independent
+
+  12. game: ClientTimerActions (g_active.c:831-953)
+  - bleedResidual += msec → processes in 100ms ticks. Accumulator pattern, tick-rate-independent.
+  - Since sv_gameHz stays at 20, msec is always 50ms. Safe.
+
+  13. game: G_RunFrame Entity Loop (g_main.c:5293-5377)
+  - Processes missiles, items, movers, clients per game frame. All use level.time (sv_gameHz 20). Safe.
+
+  14. game: EVENT_VALID_MSEC = 300 (g_local.h:74)
+  - Event clearing threshold. Absolute ms, tick-rate-independent.
+
+  15. game: Antilag FIFO Trail (g_antilag.c)
+  - Records at level.time rate (20Hz). Engine-side antilag supplements this. Trail granularity stays at 50ms.
+
+  16. game: Weapon Fire + Antilag (g_weapon.c:1014-1016)
+  - finaltime = ent->client->AttackTime - ent->client->pers.ut_timenudge → G_TimeShiftAllClients(finaltime, ent).
+  - AttackTime = ucmd->serverTime (g_active.c:1420) — this is the client's command time, independent of tick rate.
+
+  17. game: Missile Bounce Timing (g_missile.c:45)
+  - hitTime = level.previousTime + (level.time - level.previousTime) * trace->fraction — fractional interpolation within game frame. At sv_gameHz 20, always 50ms delta. Safe.
+
+  18. game: Pmove Physics Step (bg_pmove.c:3851-3899)
+  - Chunks into PMOVE_MSEC (8ms when physics enabled) or 66ms max steps. Already handles variable msec. Safe.
+
+  19. cgame: View Effects (cg_view.c)
+  - STEP_TIME=200ms, DUCK_TIME=200ms, ZOOM_TIME=150ms, LAND_DEFLECT_TIME=150ms — all absolute ms from cg.time. Render-rate-dependent, not tick-rate-dependent. Safe.
+
+  20. cgame: Client-Side Prediction (cg_predict.c:818-1213)
+  - Full Pmove replaying per-command. Uses cmd.serverTime deltas. Optimized path at line 945 uses cg_optimize to skip replaying when no new snap. At 60Hz, more snapshots = more frequent
+  prediction resets = slightly fewer commands to replay each frame. Actually improves prediction accuracy.
+
+  CATEGORY 4: Jittery Client Tolerance Issues
+
+  21. cgame: CG_ProcessSnapshots Loop Exit (cg_snapshot.c:467)
+  - if ((cg.time >= cg.snap->serverTime) && (cg.time < cg.nextSnap->serverTime)) — 16ms window.
+  - A jittery client whose render frame is slightly late will overshoot this window → triggers CG_TransitionSnapshot which advances to next pair → can skip visual frames.
+
+  22. game: serverTime Sanity Clamping (g_active.c:1423-1428)
+  - ucmd->serverTime > level.time + 200 → clamp to level.time + 200. At sv_fps 60, commands arrive up to 3x faster but level.time still advances at 20Hz, so the +200ms window is the same.
+   Safe.
+  - ucmd->serverTime < level.time - 1000 → very generous lower bound. Safe.
+
+  23. game: EF_CONNECTION Threshold (g_active.c:1938)
+  - level.time - ent->client->lastCmdTime > 1000 — 1 second timeout for disconnect icon. Tick-rate-independent.
+
+  ---
+  Priority Patches for Ghidra/pk3
+
+  The three critical cgame patches that would most improve jittery client tolerance at sv_fps 60:
+
+  1. BG_EvaluateTrajectory TR_INTERPOLATE: Change VectorCopy(trBase) to VectorMA(trBase, (atTime - trTime) * 0.001, trDelta, result) — enables velocity-based extrapolation when nextSnap
+  is missing.
+  2. frameInterpolation clamping: In CG_AddPacketEntities, clamp frameInterpolation to [0.0, 1.0] range.
+  3. CG_CalcEntityLerpPositions fallback: When nextSnap == NULL and entity is TR_INTERPOLATE, use the patched BG_EvaluateTrajectory (now does extrapolation) instead of freezing.
+
+  These three patches work together — patch 1 provides the extrapolation math, patch 2 prevents overshoot during normal interpolation, patch 3 routes the freeze case through the new
+  extrapolation path.

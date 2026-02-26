@@ -1687,7 +1687,7 @@ static qboolean NET_GetCvars( void ) {
     modified += net_socksPassword->modified;
 	net_socksPassword->modified = qfalse;
 
-	net_dropsim = Cvar_Get( "net_dropsim", "", CVAR_TEMP );
+	net_dropsim = Cvar_Get( "net_dropsim", "", CVAR_CHEAT );
     Cvar_SetDescription(net_dropsim, "Simulate packet dropping events for debugging purposes in percent\nDefault: empty");
 
     return modified ? qtrue : qfalse;

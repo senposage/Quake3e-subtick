@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/Legit-Su/Documents/Quake3e-subtick -name \"*.c\" -o -name \"*.h\" | xargs grep -l \"TR_LINEAR_STOP\\\\|CG_CalcEntityLerp\\\\|CG_InterpolateEntityPosition\\\\|cg_smoothClients\" 2>/dev/null)",
+      "Bash(grep:*)",
+      "Bash(cd /c/Users/Legit-Su/Documents/Quake3e-subtick && git status --short UrbanTerror42_Source 2>&1 && git check-ignore -v UrbanTerror42_Source 2>&1)"
+    ]
+  }
+}

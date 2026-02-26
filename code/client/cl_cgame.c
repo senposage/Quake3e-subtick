@@ -1034,11 +1034,15 @@ or bursted delayed packets.
 =================
 */
 
-#define	RESET_TIME	500
-
 static void CL_AdjustTimeDelta( void ) {
 	int		newDelta;
 	int		deltaDelta;
+	// Scale thresholds with snapshot interval — at higher rates, desync of the
+	// same number of frames represents fewer milliseconds, so react sooner.
+	int		resetTime = cl.snapshotMsec * 10;       // 10 snapshots worth of desync
+	int		fastAdjust = cl.snapshotMsec * 2;       // 2 snapshots worth of desync
+	if ( resetTime < 200 ) resetTime = 200;
+	if ( fastAdjust < 50 ) fastAdjust = 50;
 
 	cl.newSnapshots = qfalse;
 
@@ -1050,14 +1054,14 @@ static void CL_AdjustTimeDelta( void ) {
 	newDelta = cl.snap.serverTime - cls.realtime;
 	deltaDelta = abs( newDelta - cl.serverTimeDelta );
 
-	if ( deltaDelta > RESET_TIME ) {
+	if ( deltaDelta > resetTime ) {
 		cl.serverTimeDelta = newDelta;
 		cl.oldServerTime = cl.snap.serverTime;	// FIXME: is this a problem for cgame?
 		cl.serverTime = cl.snap.serverTime;
 		if ( cl_showTimeDelta->integer ) {
 			Com_Printf( "<RESET> " );
 		}
-	} else if ( deltaDelta > 100 ) {
+	} else if ( deltaDelta > fastAdjust ) {
 		// fast adjust, cut the difference in half
 		if ( cl_showTimeDelta->integer ) {
 			Com_Printf( "<FAST> " );
@@ -1072,7 +1076,9 @@ static void CL_AdjustTimeDelta( void ) {
 		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
 			if ( cl.extrapolatedSnapshot ) {
 				cl.extrapolatedSnapshot = qfalse;
-				cl.serverTimeDelta -= 2;
+				// faster pullback at high snapshot rates where the interpolation
+				// window is tighter and recovery needs to be more aggressive
+				cl.serverTimeDelta -= ( cl.snapshotMsec < 30 ) ? 4 : 2;
 			} else {
 				// otherwise, move our sense of time forward to minimize total latency
 				cl.serverTimeDelta++;
@@ -1247,11 +1253,29 @@ void CL_SetCGameTime( void ) {
 		}
 		cl.oldServerTime = cl.serverTime;
 
+		// Clamp serverTime to not overshoot the current interpolation window.
+		// Without this, cgame computes frameInterpolation > 1.0 when cg.time
+		// passes cg.nextSnap->serverTime, causing entity positions to overshoot
+		// ahead and then snap back. At high snapshot rates (16ms windows at 60Hz)
+		// this happens frequently due to render frame timing variance.
+		{
+			int maxTime = cl.snap.serverTime + cl.snapshotMsec;
+			if ( cl.serverTime > maxTime ) {
+				cl.serverTime = maxTime;
+			}
+		}
+
 		// note if we are almost past the latest frame (without timeNudge),
-		// so we will try and adjust back a bit when the next snapshot arrives
-		//if ( cls.realtime + cl.serverTimeDelta >= cl.snap.serverTime - 5 ) {
-		if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
-			cl.extrapolatedSnapshot = qtrue;
+		// so we will try and adjust back a bit when the next snapshot arrives.
+		// Scale the margin with snapshot interval — at higher snapshot rates the
+		// interpolation window is tighter so we need earlier detection.
+		{
+			int extrapMargin = cl.snapshotMsec / 3;
+			if ( extrapMargin < 3 ) extrapMargin = 3;
+			if ( extrapMargin > 16 ) extrapMargin = 16;
+			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -extrapMargin ) {
+				cl.extrapolatedSnapshot = qtrue;
+			}
 		}
 	}
 
@@ -1279,7 +1303,7 @@ void CL_SetCGameTime( void ) {
 			clc.timeDemoStart = Sys_Milliseconds();
 		}
 		clc.timeDemoFrames++;
-		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames * 50;
+		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames * ( cl.snapshotMsec ? cl.snapshotMsec : 50 );
 	}
 
 	//while ( cl.serverTime >= cl.snap.serverTime ) {

@@ -122,6 +122,8 @@ typedef struct {
 									// cleared when CL_AdjustTimeDelta looks at it
 	qboolean	newSnapshots;		// set on parse of any valid packet
 
+	int			snapshotMsec;		// measured interval between snapshots (exponential moving average)
+
 	gameState_t	gameState;			// configstrings
 	char		mapname[MAX_QPATH];	// extracted from CS_SERVERINFO
 

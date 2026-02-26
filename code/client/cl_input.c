@@ -690,8 +690,8 @@ static qboolean CL_ReadyToSendPacket( void ) {
 		return qfalse;
 	}
 
-	// If we are downloading, we send no less than 50ms between packets
-	if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < 50 ) {
+	// If we are downloading, throttle packet rate to avoid flooding
+	if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < ( cl.snapshotMsec ? cl.snapshotMsec : 50 ) ) {
 		return qfalse;
 	}
 

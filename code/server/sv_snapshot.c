@@ -964,7 +964,10 @@ static void SV_BuildCommonSnapshot( void )
 		// player positions until the next game frame — visible as stutter on other players.
 		// BG_PlayerStateToEntityState stores velocity in pos.trDelta for TR_INTERPOLATE
 		// client entities, so we can forward-extrapolate to sv.time cheaply.
-		const float extrapolateMs = (float)( sv.time - sv.gameTime );
+		const int gameMsec = 1000 / ( sv_gameHz && sv_gameHz->integer > 0 ? sv_gameHz->integer : sv_fps->integer );
+		float extrapolateMs = (float)( sv.time - sv.gameTime );
+		if ( extrapolateMs > (float)gameMsec )
+			extrapolateMs = (float)gameMsec; // safety cap — prevent overshoot from clock drift
 
 		for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
 			//index %= svs.numSnapshotEntities;
