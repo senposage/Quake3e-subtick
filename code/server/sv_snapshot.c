@@ -1275,7 +1275,7 @@ static void SV_BuildCommonSnapshot( void )
 						} else {
 							VectorCopy( velocity, finalVel );
 						}
-						if ( DotProduct( finalVel, finalVel ) > 1.0f ) {
+						if ( DotProduct( finalVel, finalVel ) > 100.0f ) {
 							VectorCopy( origin, es->pos.trBase );
 							VectorCopy( finalVel, es->pos.trDelta );
 							es->pos.trType = TR_LINEAR;
@@ -1289,9 +1289,13 @@ static void SV_BuildCommonSnapshot( void )
 					} else {
 						// TR_INTERPOLATE mode.
 						if ( usedBuffer ) {
-							// Ring buffer position available: use delayed position.
-							VectorCopy( origin, es->pos.trBase );
-							VectorCopy( velocity, es->pos.trDelta );
+							// Ring buffer position available: use delayed position,
+							// but only if actually moving (dead-zone guard prevents
+							// Pmove ground-snap micro-oscillations from causing jitter).
+							if ( DotProduct( velocity, velocity ) > 100.0f ) {
+								VectorCopy( origin, es->pos.trBase );
+								VectorCopy( velocity, es->pos.trDelta );
+							}
 						} else if ( isBot ) {
 							// Bot without buffer: velocity-based extrapolation.
 							const float dt = extrapolateMs * 0.001f;
@@ -1300,7 +1304,7 @@ static void SV_BuildCommonSnapshot( void )
 							es->pos.trBase[2] += es->pos.trDelta[2] * dt;
 						} else {
 							// Real player without buffer: use current position with dead-zone check.
-							if ( DotProduct( velocity, velocity ) > 1.0f ) {
+							if ( DotProduct( velocity, velocity ) > 100.0f ) {
 								VectorCopy( origin, es->pos.trBase );
 								VectorCopy( velocity, es->pos.trDelta );
 							}

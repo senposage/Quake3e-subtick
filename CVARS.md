@@ -62,7 +62,7 @@ Engine-side position correction for high sv_fps snapshots.
 
 **Why:** At sv_fps 60 with sv_gameHz 20, the entity state (`ent->s`) only updates every 3rd engine tick. Without correction, clients see players teleporting every 50ms instead of moving smoothly every 16ms.
 
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` checks `sv.time - sv.gameTime > 0` (between game frames). For real players, copies `ps->origin` → `es->pos.trBase` and `ps->velocity` → `es->pos.trDelta`. Velocity dead-zone check `DotProduct(velocity, velocity) > 1.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` checks `sv.time - sv.gameTime > 0` (between game frames). For real players, copies `ps->origin` → `es->pos.trBase` and `ps->velocity` → `es->pos.trDelta`. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
 
 ---
 
@@ -78,7 +78,7 @@ Engine-side position correction for high sv_fps snapshots.
 
 **How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` sets `es->pos.trType = TR_LINEAR` and `es->pos.trTime = sv.time`. Requires `sv_extrapolate 1`. When `sv_smoothClients 1` is enabled, it uses the position resolved by `sv_bufferMs` (Phase 1) as the base, then applies velocity smoothing from `sv_velSmooth` (if enabled) for `trDelta`. The two settings now compose: `sv_bufferMs` controls the position source, `sv_smoothClients` controls the trajectory type.
 
-**Safety:** Idle players (velocity near zero) are NOT switched to TR_LINEAR — they stay TR_INTERPOLATE to prevent extrapolation drift/vibration. The DotProduct > 1.0 dead-zone check applies to both smoothed velocity (ring buffer path) and raw velocity (fallback path). Pmove operates on playerState only and does NOT interact with entityState trajectory type changes.
+**Safety:** Idle players (velocity near zero) are NOT switched to TR_LINEAR — they stay TR_INTERPOLATE to prevent extrapolation drift/vibration. The DotProduct > 100.0 dead-zone check applies to both smoothed velocity (ring buffer path) and raw velocity (fallback path). Pmove operates on playerState only and does NOT interact with entityState trajectory type changes.
 
 ---
 
