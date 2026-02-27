@@ -360,6 +360,15 @@ Engine-side position extrapolation in `SV_BuildCommonSnapshot` (sv_snapshot.c) s
 ### sv_ccmds.c — GAME_RUN_FRAME time clock (FIXED)
 `SV_MapRestart_f` was calling `GAME_RUN_FRAME` with `sv.time` instead of `sv.gameTime` in both its warmup loop (3 settle frames) and final frame. Fixed to match the `SV_SpawnServer` pattern: sync `sv.gameTime = sv.time` and `sv.gameTimeResidual = 0` before `SV_RestartGameProgs()`, then advance and call in lockstep.
 
+### sv_smoothClients / sv_bufferMs stationary jitter (FIXED)
+Both `sv_smoothClients 1` and `sv_bufferMs -1` caused visible vibration on stationary players due to Pmove ground-snapping micro-oscillations tripping the dead-zone threshold. Fixed by raising dead-zone from `DotProduct > 1.0` to `DotProduct > 100.0` (10 ups) and adding the same guard to the `sv_bufferMs` ring buffer path. Both features default to off (0).
+
+### cg_smoothClients QVM intercept (IMPLEMENTED)
+Added `cg_smoothClients` to the cgame `CG_CVAR_SET` intercept in `cl_cgame.c`, same pattern as `snaps`. Prevents QVM from forcing its default. Engine controls the default — currently not needed since `sv_smoothClients 0` sends `TR_INTERPOLATE` anyway, but enables future testing without QVM modification.
+
+### frameInterpolation clamp — VM intercept not possible
+Investigated using `trap_Cvar_Set` intercept to fix the unclamped `frameInterpolation` in the cgame. Not possible — the computation is entirely internal to the QVM (no syscall). Only fixable via Ghidra binary patch (documented in `docs/ghidra-cgame-patches.md`) or by ensuring snapshots arrive fast enough that `cg.time` doesn't overshoot (current approach via `sv_extrapolate 1`).
+
 ### Items not yet investigated
 - Long session time wrap (`sv.time > 0x78000000`) behaviour with antilag history
 
@@ -376,6 +385,7 @@ Engine-side position extrapolation in `SV_BuildCommonSnapshot` (sv_snapshot.c) s
 | `sv_ccmds.c` | `SV_MapRestart_f`: sync `sv.gameTime = sv.time` + `sv.gameTimeResidual = 0` on restart; warmup frames pass `sv.gameTime` to `GAME_RUN_FRAME` (was incorrectly using `sv.time`) |
 | `sv_antilag.c` | Full engine-side antilag implementation |
 | `sv_antilag.h` | Antilag interface |
+| `cl_cgame.c` | `CG_CVAR_SET` intercept: blocks QVM from setting `snaps`, `cg_smoothClients` |
 
 ---
 
