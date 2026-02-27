@@ -130,28 +130,6 @@ Com_Frame → SV_Frame(msec)
 - Records `sv_physicsScale` snapshots per engine tick (~5.5ms granularity at defaults: `sv_fps 60`, `sv_physicsScale 3`).
 - Rewinds entity positions to `attackTime` for hit detection, then restores state after traces complete.
 
-#### sv_antilag (engine path) vs QVM/cgame path
-
-- **Sampling clock source differs:**
-  - Engine path samples from the `sv_fps` loop in `SV_Frame`, so history capture frequency follows engine ticks.
-  - QVM path can only sample when `GAME_RUN_FRAME` executes, which is tied to `sv_gameHz`.
-- **Granularity differs:**
-  - Engine path can sub-sample further with `sv_physicsScale` (multiple history points inside one game frame).
-  - QVM path is effectively one sample per game frame (at `sv_gameHz 20`, that is 50ms per sample).
-- **Where rewind occurs differs:**
-  - Engine path rewinds authoritative server entities around trace/hit evaluation and restores immediately.
-  - QVM-side logic operates inside game-vm frame boundaries and inherits VM frame cadence.
-- **Why this matters at `sv_fps 60`:**
-  - A 50ms sampling grid is too coarse relative to 16ms input/snapshot cadence, producing large rewind quantization error.
-  - Engine-side history density significantly reduces that error for hit registration.
-
-#### Why the legacy/QVM path samples at 20Hz
-
-- The game VM advances only when `GAME_RUN_FRAME` is called.
-- In this project, `GAME_RUN_FRAME` is intentionally driven by `sv_gameHz` and kept at 20 for UT4.3 compatibility.
-- Therefore any QVM-managed history/antilag bookkeeping naturally updates at 20Hz (every 50ms), not at `sv_fps`.
-- The cgame module is also snapshot-driven; it consumes server snapshots and does not control server hit-rewind sampling cadence.
-
 ### sv_ccmds.c Fix
 
 - `SV_MapRestart_f` aligns `sv.gameTime` with `sv.time` and resets residual state before restart progression.
