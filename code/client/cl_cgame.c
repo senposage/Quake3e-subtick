@@ -572,6 +572,11 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		Cvar_Update( VMA(1), cgvm->privateFlag );
 		return 0;
 	case CG_CVAR_SET:
+		// exclude some game module cvars
+		if (!Q_stricmp((char *)VMA(1), "snaps") ||
+			!Q_stricmp((char *)VMA(1), "cg_smoothClients")) {
+			return 0;
+		}
 		Cvar_SetSafe( VMA(1), VMA(2) );
 		return 0;
 	case CG_CVAR_VARIABLESTRINGBUFFER:
