@@ -154,33 +154,13 @@ Velocity smoothing window in milliseconds. Averages player velocity over the las
 
 ## Client-Side Cvars
 
-### cl_snapScaling
-**Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** cl_main.c
+### Removed: cl_snapScaling
+`cl_snapScaling` was removed after testing showed it created a serverTime oscillation loop and visible movement stutter at high snapshot rates, especially at 1:1 `sv_fps:sv_snapshotFps`.
 
-Adapt client time sync thresholds to actual snapshot interval.
+Current behavior is back to vanilla client time sync (`+1/-2` drift logic, no extra clamp layer).
 
-- **0** = vanilla behavior. All thresholds assume 50ms (20Hz) snapshots. Works at sv_fps 20 but causes jitter/freezing at higher rates because the time windows are wrong.
-- **1** = enabled. Measures actual snapshot interval via EMA, scales all thresholds proportionally.
-
-**Why:** At sv_fps 60, the interpolation window is 16ms instead of 50ms. Vanilla Q3's hardcoded thresholds (RESET_TIME=500ms, fast adjust=100ms, extrapolation margin=5ms) were designed for 50ms windows and react too slowly at higher rates. A 16ms jitter spike that's invisible at 20Hz causes a full freeze frame at 60Hz.
-
-**How — what gets scaled:**
-
-| Threshold | cl_snapScaling 0 (vanilla) | cl_snapScaling 1 (adaptive) |
-|-----------|---------------------------|---------------------------|
-| RESET_TIME | 500ms | snapshotMsec * 10 (min 200ms) |
-| Fast adjust | 100ms | snapshotMsec * 2 (min 50ms) |
-| Extrapolation margin | 5ms | snapshotMsec / 3 (clamped [3,16]) |
-| Drift pullback | -2ms/frame | -4ms at high rates (<30ms), -2ms at vanilla |
-| serverTime clamp | none | cl.snap.serverTime + snapshotMsec |
-| Timedemo | 50ms | snapshotMsec |
-| Download throttle | 50ms | snapshotMsec |
-
-**Files affected:**
-- `cl_cgame.c:CL_AdjustTimeDelta()` — reset/fast adjust thresholds, drift pullback rate
-- `cl_cgame.c:CL_SetCGameTime()` — serverTime clamp, extrapolation margin, timedemo
-- `cl_parse.c` — snapshot interval EMA measurement, sv_snapshotFps configstring pre-init
-- `cl_input.c` — download throttle scaling
+For full investigation notes and test matrix, see:
+- `docs/debug-session-2026-02-26-cl_snapScaling-stutter.md`
 
 ---
 
