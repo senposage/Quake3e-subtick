@@ -1,5 +1,26 @@
 # g_antiwarp → Engine-Side Feasibility Analysis
 
+## Bottom Line
+
+**At `sv_gameHz 20`, g_antiwarp works correctly at any `sv_fps` (40, 60, 120+).**
+It does not insert stale or unnecessary latency regardless of how high `sv_fps` is
+set. `sv_fps` controls the engine tick rate (input sampling, snapshot cadence); it
+does not affect the game-frame cadence that antiwarp operates on.
+
+The `sv_gameHz` decoupling is the critical piece: `GAME_RUN_FRAME` fires at exactly
+20Hz regardless of `sv_fps`, so `G_RunClient` sees a 50ms game frame every time it
+fires. The hardcoded `serverTime += 50` blank command matches that 50ms frame exactly
+— correct by construction.
+
+The 50ms hardcode only becomes a problem if `sv_gameHz` is **raised above 20** (e.g.
+to 40Hz), where each game frame is only 25ms but the blank cmd is still 50ms —
+double the intended step. That is an entirely separate concern from `sv_fps`.
+
+The rest of this document analyses feasibility of moving or modifying the antiwarp
+logic, which is only relevant if `sv_gameHz > 20` is ever enabled.
+
+---
+
 ## What g_antiwarp Does
 
 The UT4.2 QVM implements antiwarp in `g_active.c:G_RunClient()`. When the server

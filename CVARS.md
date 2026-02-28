@@ -24,7 +24,7 @@ Engine tick and input sampling rate (Hz). Controls how often the server processe
 
 Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 20 matches UT4.3's QVM antiwarp assumption (`serverTime += 50` in `g_active.c`). Some constraints may have been relaxed in UT4.3.4 — testing at higher values is ongoing; do not assume 20 is still a hard requirement until confirmed.
 
-**Why:** Decouples game logic rate from engine tick rate so sv_fps can be raised without breaking QVM timers (bleed, bandage, antiwarp, inactivity).
+**Why:** Decouples game logic rate from engine tick rate so sv_fps can be raised without breaking QVM timers (bleed, bandage, inactivity) or antiwarp. At `sv_gameHz 20`, g_antiwarp is correct at any `sv_fps` — `G_RunClient` fires at 20Hz regardless of `sv_fps`, so the 50ms blank-cmd step always matches the game frame exactly. No stale or unnecessary latency is added.
 
 **How (sv_gameHz > 0):** Inner `while` loop in `SV_Frame()` accumulates `sv.gameTimeResidual` and fires `GAME_RUN_FRAME(sv.gameTime)` when it reaches `1000/sv_gameHz`. Between firings, `sv.gameTime` lags `sv.time` — this gap (`sv.time - sv.gameTime`) is what the extrapolation patch reads in `SV_BuildCommonSnapshot` to correct stale player entity positions.
 

@@ -232,7 +232,16 @@ Reference: `docs/ghidra-cgame-patches.md`.
 
 ### Antiwarp Analysis
 
-g_antiwarp is safest with `sv_fps` elevated when `sv_gameHz` is 20 (game-side checks operate at game-frame cadence; 50ms antiwarp assumptions remain aligned). Whether `sv_gameHz` above 20 is now safe in UT4.3.4 is unconfirmed — pending in-game testing.
+At `sv_gameHz 20`, g_antiwarp works **correctly** at any `sv_fps` (40, 60, 120+).
+No stale or unnecessary latency is inserted. `sv_fps` controls engine tick and
+snapshot cadence only — it does not affect game-frame rate. `G_RunClient` fires at
+exactly 20Hz regardless of `sv_fps`, so the hardcoded `serverTime += 50` blank
+command always spans exactly one 50ms game frame as intended.
+
+The 50ms hardcode only becomes a problem if `sv_gameHz` itself is raised above 20.
+Whether that is safe in UT4.3.4 is unconfirmed — pending in-game testing.
+
+See `docs/g-antiwarp-engine-feasibility.md` for the full analysis.
 
 ---
 
