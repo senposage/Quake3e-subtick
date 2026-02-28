@@ -81,7 +81,7 @@ code/qcommon/
 | `sv_extrapolate` | `1` | Engine-side position correction between game frames |
 | `sv_smoothClients` | `0` | Use TR_LINEAR trajectory for smoother client rendering (experimental) |
 | `sv_bufferMs` | `0` | Position ring-buffer delay in ms (-1=auto, 0=off) |
-| `sv_velSmooth` | `32` | Velocity smoothing window in ms for TR_LINEAR mode |
+| `sv_velSmooth` | `32` | Velocity smoothing window in ms; requires `sv_smoothClients 1` |
 | `sv_antilagEnable` | `1` | Engine antilag on/off |
 | `sv_physicsScale` | `3` | Antilag sub-ticks per game frame |
 | `sv_antilagMaxMs` | `200` | Max rewind window (ms) |

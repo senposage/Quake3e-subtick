@@ -139,6 +139,8 @@ Per-client position ring buffer with configurable delay.
 ### sv_velSmooth
 **Default:** 32 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
 
+**Requires `sv_smoothClients 1`** — has no effect when `sv_smoothClients 0`.
+
 Velocity smoothing window in milliseconds. Averages player velocity over the last N ms from the ring buffer.
 
 - **0** = disabled. Use raw velocity from current tick.
