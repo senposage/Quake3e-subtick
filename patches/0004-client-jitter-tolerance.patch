@@ -1,0 +1,30 @@
+From 0945fd54943110a0683bfa06917aec07f21b026c Mon Sep 17 00:00:00 2001
+From: "copilot-swe-agent[bot]" <198982749+Copilot@users.noreply.github.com>
+Date: Fri, 27 Feb 2026 01:50:43 +0000
+Subject: [PATCH] client: block QVM from setting snaps and cg_smoothClients via
+ trap_Cvar_Set
+
+Co-authored-by: senposage <14794782+senposage@users.noreply.github.com>
+---
+ code/client/cl_cgame.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/code/client/cl_cgame.c b/code/client/cl_cgame.c
+index a0b3fb9..51d9ebb 100644
+--- a/code/client/cl_cgame.c
++++ b/code/client/cl_cgame.c
+@@ -572,6 +572,11 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
+ 		Cvar_Update( VMA(1), cgvm->privateFlag );
+ 		return 0;
+ 	case CG_CVAR_SET:
++		// exclude some game module cvars
++		if (!Q_stricmp((char *)VMA(1), "snaps") ||
++			!Q_stricmp((char *)VMA(1), "cg_smoothClients")) {
++			return 0;
++		}
+ 		Cvar_SetSafe( VMA(1), VMA(2) );
+ 		return 0;
+ 	case CG_CVAR_VARIABLESTRINGBUFFER:
+-- 
+2.43.0
+
