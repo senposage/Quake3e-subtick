@@ -1,0 +1,244 @@
+From 0000000000000000000000000000000000000004 Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Sat, 28 Feb 2026 00:00:00 -0500
+Subject: [PATCH 4/4] client: adaptive jitter tolerance and snapshot-interval scaling
+
+cl.snapshotMsec: EMA of measured snapshot intervals, bootstrapped from
+sv_snapshotFps in server info. Used to scale all time-sync thresholds.
+
+CL_AdjustTimeDelta: RESET_TIME = snapshotMsec*10 (min 200ms),
+fast-adjust threshold = snapshotMsec*2 (min 50ms), drift pullback
+stronger at high snapshot rates (-4ms/frame vs -2ms/frame).
+
+CL_SetCGameTime: serverTime clamped to snap.serverTime + snapshotMsec
+to prevent interpolation overshoot. Extrapolation detection margin
+scaled to snapshotMsec/3 (clamped [3,16]).
+
+Timedemo frame step uses snapshotMsec instead of hardcoded 50ms.
+Download throttle uses snapshotMsec instead of hardcoded 50ms.
+QVM cvar guard blocks cgame from setting snaps or cg_smoothClients.
+net_dropsim flagged CVAR_CHEAT to prevent abuse.
+---
+ code/client/cl_cgame.c | 64 +++++++++++++++++++++++++++++++++++++++++++++++++++++++---------
+ code/client/cl_input.c | 9 ++++++---
+ code/client/cl_parse.c | 27 +++++++++++++++++++++++++++-
+ code/client/client.h   |  2 ++-
+ code/qcommon/net_ip.c  |  2 +-
+ 5 files changed, 91 insertions(+), 13 deletions(-)
+
+--- a/code/client/cl_cgame.c
++++ b/code/client/cl_cgame.c
+@@ -572,6 +572,11 @@
+ 		Cvar_Update( VMA(1), cgvm->privateFlag );
+ 		return 0;
+ 	case CG_CVAR_SET:
++		// exclude some game module cvars
++		if (!Q_stricmp((char *)VMA(1), "snaps") ||
++			!Q_stricmp((char *)VMA(1), "cg_smoothClients")) {
++			return 0;
++		}
+ 		Cvar_SetSafe( VMA(1), VMA(2) );
+ 		return 0;
+ 	case CG_CVAR_VARIABLESTRINGBUFFER:
+@@ -1034,11 +1039,23 @@
+ =================
+ */
+ 
+-#define	RESET_TIME	500
+-
+ static void CL_AdjustTimeDelta( void ) {
+ 	int		newDelta;
+ 	int		deltaDelta;
++	int		resetTime;
++	int		fastAdjust;
++
++	if ( cl_snapScaling && cl_snapScaling->integer ) {
++		// Scale thresholds with snapshot interval — at higher rates, desync of the
++		// same number of frames represents fewer milliseconds, so react sooner.
++		resetTime = cl.snapshotMsec * 10;       // 10 snapshots worth of desync
++		fastAdjust = cl.snapshotMsec * 2;       // 2 snapshots worth of desync
++		if ( resetTime < 200 ) resetTime = 200;
++		if ( fastAdjust < 50 ) fastAdjust = 50;
++	} else {
++		resetTime = 500;   // vanilla Q3 RESET_TIME
++		fastAdjust = 100;  // vanilla Q3 fast adjust threshold
++	}
+ 
+ 	cl.newSnapshots = qfalse;
+ 
+@@ -1050,14 +1067,14 @@
+ 	newDelta = cl.snap.serverTime - cls.realtime;
+ 	deltaDelta = abs( newDelta - cl.serverTimeDelta );
+ 
+-	if ( deltaDelta > RESET_TIME ) {
++	if ( deltaDelta > resetTime ) {
+ 		cl.serverTimeDelta = newDelta;
+ 		cl.oldServerTime = cl.snap.serverTime;	// FIXME: is this a problem for cgame?
+ 		cl.serverTime = cl.snap.serverTime;
+ 		if ( cl_showTimeDelta->integer ) {
+ 			Com_Printf( "<RESET> " );
+ 		}
+-	} else if ( deltaDelta > 100 ) {
++	} else if ( deltaDelta > fastAdjust ) {
+ 		// fast adjust, cut the difference in half
+ 		if ( cl_showTimeDelta->integer ) {
+ 			Com_Printf( "<FAST> " );
+@@ -1072,7 +1089,13 @@
+ 		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
+ 			if ( cl.extrapolatedSnapshot ) {
+ 				cl.extrapolatedSnapshot = qfalse;
+-				cl.serverTimeDelta -= 2;
++				// faster pullback at high snapshot rates where the interpolation
++				// window is tighter and recovery needs to be more aggressive
++				if ( cl_snapScaling && cl_snapScaling->integer ) {
++					cl.serverTimeDelta -= ( cl.snapshotMsec < 30 ) ? 4 : 2;
++				} else {
++					cl.serverTimeDelta -= 2; // vanilla
++				}
+ 			} else {
+ 				// otherwise, move our sense of time forward to minimize total latency
+ 				cl.serverTimeDelta++;
+@@ -1247,11 +1270,34 @@
+ 		}
+ 		cl.oldServerTime = cl.serverTime;
+ 
++		// Clamp serverTime to not overshoot the current interpolation window.
++		// Without this, cgame computes frameInterpolation > 1.0 when cg.time
++		// passes cg.nextSnap->serverTime, causing entity positions to overshoot
++		// ahead and then snap back. At high snapshot rates (16ms windows at 60Hz)
++		// this happens frequently due to render frame timing variance.
++		if ( cl_snapScaling && cl_snapScaling->integer ) {
++			int maxTime = cl.snap.serverTime + cl.snapshotMsec;
++			if ( cl.serverTime > maxTime ) {
++				cl.serverTime = maxTime;
++			}
++		}
++
+ 		// note if we are almost past the latest frame (without timeNudge),
+-		// so we will try and adjust back a bit when the next snapshot arrives
+-		//if ( cls.realtime + cl.serverTimeDelta >= cl.snap.serverTime - 5 ) {
+-		if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
+-			cl.extrapolatedSnapshot = qtrue;
++		// so we will try and adjust back a bit when the next snapshot arrives.
++		if ( cl_snapScaling && cl_snapScaling->integer ) {
++			// Scale the margin with snapshot interval — at higher snapshot rates the
++			// interpolation window is tighter so we need earlier detection.
++			int extrapMargin = cl.snapshotMsec / 3;
++			if ( extrapMargin < 3 ) extrapMargin = 3;
++			if ( extrapMargin > 16 ) extrapMargin = 16;
++			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -extrapMargin ) {
++				cl.extrapolatedSnapshot = qtrue;
++			}
++		} else {
++			// vanilla: hardcoded 5ms margin
++			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
++				cl.extrapolatedSnapshot = qtrue;
++			}
+ 		}
+ 	}
+ 
+@@ -1279,7 +1325,8 @@
+ 			clc.timeDemoStart = Sys_Milliseconds();
+ 		}
+ 		clc.timeDemoFrames++;
+-		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames * 50;
++		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames *
++			( ( cl_snapScaling && cl_snapScaling->integer && cl.snapshotMsec ) ? cl.snapshotMsec : 50 );
+ 	}
+ 
+ 	//while ( cl.serverTime >= cl.snap.serverTime ) {
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -690,9 +690,12 @@
+ 		return qfalse;
+ 	}
+ 
+-	// If we are downloading, we send no less than 50ms between packets
+-	if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < 50 ) {
+-		return qfalse;
++	// If we are downloading, throttle packet rate to avoid flooding
++	{
++		int throttleMs = ( cl_snapScaling && cl_snapScaling->integer && cl.snapshotMsec ) ? cl.snapshotMsec : 50;
++		if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < throttleMs ) {
++			return qfalse;
++		}
+ 	}
+ 
+ 	// if we don't have a valid gamestate yet, only send
+--- a/code/client/cl_parse.c
++++ b/code/client/cl_parse.c
+@@ -474,6 +474,25 @@
+ 		cl.snapshots[ ( oldMessageNum + i ) & PACKET_MASK ].valid = qfalse;
+ 	}
+ 
++	// measure snapshot interval for adaptive time management
++	if ( cl_snapScaling && cl_snapScaling->integer ) {
++		if ( cl.snap.valid && newSnap.serverTime > cl.snap.serverTime ) {
++			int measured = newSnap.serverTime - cl.snap.serverTime;
++			if ( measured >= 1 && measured <= 200 ) {
++				if ( cl.snapshotMsec == 0 ) {
++					cl.snapshotMsec = measured; // first measurement
++				} else {
++					cl.snapshotMsec = ( cl.snapshotMsec * 3 + measured ) >> 2; // exponential moving average
++				}
++				if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
++				if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
++			}
++		}
++	}
++	if ( cl.snapshotMsec == 0 ) {
++		cl.snapshotMsec = 50; // default to 20Hz until measured
++	}
++
+ 	// copy to the current good spot
+ 	cl.snap = newSnap;
+ 	cl.snap.ping = 999;
+@@ -667,6 +686,16 @@
+ 	len = strlen( clc.sv_dlURL );
+ 	if ( len > 0 &&  clc.sv_dlURL[len-1] == '/' )
+ 		clc.sv_dlURL[len-1] = '\0';
++
++	// pre-compute snapshot interval from server's advertised rate
++	if ( cl_snapScaling && cl_snapScaling->integer ) {
++		int snapFps = atoi( Info_ValueForKey( serverInfo, "sv_snapshotFps" ) );
++		if ( snapFps > 0 ) {
++			cl.snapshotMsec = 1000 / snapFps;
++			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
++			if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
++		}
++	}
+ }
+ 
+ 
+--- a/code/client/client.h
++++ b/code/client/client.h
+@@ -122,6 +122,8 @@
+ 									// cleared when CL_AdjustTimeDelta looks at it
+ 	qboolean	newSnapshots;		// set on parse of any valid packet
+ 
++	int			snapshotMsec;		// measured interval between snapshots (exponential moving average)
++
+ 	gameState_t	gameState;			// configstrings
+ 	char		mapname[MAX_QPATH];	// extracted from CS_SERVERINFO
+ 
+@@ -429,6 +431,7 @@
+ extern	cvar_t	*cl_autoNudge;
+ extern	cvar_t	*cl_timeNudge;
+ extern	cvar_t	*cl_showTimeDelta;
++extern	cvar_t	*cl_snapScaling;
+ 
+ extern	cvar_t	*com_timedemo;
+ extern	cvar_t	*cl_aviFrameRate;
+--- a/code/qcommon/net_ip.c
++++ b/code/qcommon/net_ip.c
+@@ -1687,7 +1687,7 @@
+     modified += net_socksPassword->modified;
+ 	net_socksPassword->modified = qfalse;
+ 
+-	net_dropsim = Cvar_Get( "net_dropsim", "", CVAR_TEMP );
++	net_dropsim = Cvar_Get( "net_dropsim", "", CVAR_CHEAT );
+     Cvar_SetDescription(net_dropsim, "Simulate packet dropping events for debugging purposes in percent\nDefault: empty");
+ 
+     return modified ? qtrue : qfalse;
+-- 
+2.43.0

@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Sat, 28 Feb 2026 00:00:00 -0500
+Subject: [PATCH 3/4] server: multi-step pmove clamping and sv_snapshotFps policy
+
+sv_pmoveMsec: clamp large usercmd deltas into multiple GAME_CLIENT_THINK
+calls so Pmove never sees oversized steps. Bots excluded. Stall detection
+via goto single_call if commandTime doesn't advance (intermission/paused).
+
+sv_snapshotFps: -1 (default) means match sv_fps and live-tracks changes.
+0 falls back to per-client snaps userinfo. >0 sets explicit rate capped
+to sv_fps. QVM cvar guard blocks cgame from resetting snaps.
+---
+ code/server/sv_client.c | 106 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 93 insertions(+), 13 deletions(-)
+
+--- a/code/server/sv_client.c
++++ b/code/server/sv_client.c
+@@ -1772,8 +1772,18 @@
+ 	int	i;
+ 
+ 	if ( cl->netchan.remoteAddress.type == NA_BOT ) {
++		int snapHz = sv_fps->integer;
++		if ( sv_snapshotFps ) {
++			if ( sv_snapshotFps->integer == -1 )
++				snapHz = sv_fps->integer;
++			else if ( sv_snapshotFps->integer > 0 )
++				snapHz = sv_snapshotFps->integer;
++			// 0 or negative (other than -1): fall back to sv_fps for bots
++		}
++		if ( snapHz > sv_fps->integer ) snapHz = sv_fps->integer;
++		if ( snapHz < 1 ) snapHz = 1;
+ 		cl->lastSnapshotTime = svs.time - 9999; // generate a snapshot immediately
+-		cl->snapshotMsec = 1000 / sv_fps->integer;
++		cl->snapshotMsec = 1000 / snapHz;
+ 		cl->rate = 0;
+ 		return;
+ 	}
+@@ -1802,20 +1812,26 @@
+ 		}
+ 	}
+ 
+-	// snaps command
+-	val = Info_ValueForKey( cl->userinfo, "snaps" );
+-	if ( val[0] && !NET_IsLocalAddress( &cl->netchan.remoteAddress ) )
+-		i = atoi( val );
+-	else
+-		i = sv_fps->integer; // sync with server
+-
+-	// range check
+-	if ( i < 1 )
+-		i = 1;
+-	else if ( i > sv_fps->integer )
+-		i = sv_fps->integer;
+-
+-	i = 1000 / i; // from FPS to milliseconds
++	// Resolve effective snapshot rate:
++	//   sv_snapshotFps -1 = match sv_fps (live: recalculated whenever sv_fps changes)
++	//   sv_snapshotFps  0 = fall back to per-client 'snaps' userinfo (vanilla Q3)
++	//   sv_snapshotFps >0 = use that value, capped to sv_fps
++	{
++		int snapRate;
++		int snapsetting = sv_snapshotFps ? sv_snapshotFps->integer : -1;
++		if ( snapsetting == -1 ) {
++			snapRate = sv_fps->integer;
++		} else if ( snapsetting > 0 ) {
++			snapRate = snapsetting;
++			if ( snapRate > sv_fps->integer ) snapRate = sv_fps->integer;
++		} else {
++			const char *snapsVal = Info_ValueForKey( cl->userinfo, "snaps" );
++			snapRate = snapsVal[0] ? atoi( snapsVal ) : sv_fps->integer;
++			if ( snapRate > sv_fps->integer ) snapRate = sv_fps->integer;
++		}
++		if ( snapRate < 1 ) snapRate = 1;
++		i = 1000 / snapRate;
++	}
+ 
+ 	if ( i != cl->snapshotMsec )
+ 	{
+@@ -2192,6 +2208,70 @@
+ 		return;		// may have been kicked during the last usercmd
+ 	}
+ 
++	// sv_pmoveMsec: enforce a maximum Pmove physics step size per usercmd.
++	// Equivalent to Q3's pmove_fixed but server-side.
++	// Bots excluded — they use 50ms steps from level.time and only get one
++	// ClientThink_real per game frame; clamping would cause warpy movement.
++	//
++	// When the real delta exceeds maxStep we fire multiple QVM calls, each
++	// advancing serverTime by maxStep. This means:
++	//   - Pmove always gets <= maxStep physics steps (correct collision/physics)
++	//   - ClientTimerActions accumulates the full real elapsed time across all
++	//     calls (bleed, bandage, inactivity timers all run at correct rate)
++	if ( sv_pmoveMsec && sv_pmoveMsec->integer > 0
++		&& cl->netchan.remoteAddress.type != NA_BOT ) {
++		int clNum    = cl - svs.clients;
++		int maxStep  = sv_pmoveMsec->integer;
++		int realTime = cl->lastUsercmd.serverTime;
++		int cmdTime  = SV_GameClientNum( clNum )->commandTime;
++		int delta    = realTime - cmdTime;
++
++		if ( delta > maxStep ) {
++			// Fire multiple clamped steps to consume the full delta.
++			// This ensures:
++			//   - Pmove always gets <= maxStep physics steps (correct movement)
++			//   - Per-call timers (bleed, bandage, inactivity) accumulate the
++			//     full real elapsed time across all steps.
++			//
++			// Safety: some QVM states (intermission, game paused) return from
++			// ClientThink_real without calling Pmove so commandTime never advances.
++			// Check BEFORE each call — if commandTime already won't change, skip
++			// the multi-step entirely so we never block the server for even one
++			// extra call. This keeps rcon and packet processing responsive.
++			{
++				int prevCmdTime = SV_GameClientNum( clNum )->commandTime;
++				cl->lastUsercmd.serverTime = prevCmdTime + maxStep;
++				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++				if ( cl->state != CS_ACTIVE )
++					return; // kicked during think
++				// If commandTime did not advance the QVM is in a no-Pmove state
++				// (intermission, paused). Restore serverTime and fall through to
++				// the normal single call below — do NOT loop.
++				if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
++					cl->lastUsercmd.serverTime = realTime;
++					goto single_call;
++				}
++				// commandTime advanced — continue stepping through remaining delta
++				while ( realTime - SV_GameClientNum( clNum )->commandTime > maxStep ) {
++					prevCmdTime = SV_GameClientNum( clNum )->commandTime;
++					cl->lastUsercmd.serverTime = prevCmdTime + maxStep;
++					VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++					if ( cl->state != CS_ACTIVE )
++						return;
++					if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
++						cl->lastUsercmd.serverTime = realTime;
++						goto single_call;
++					}
++				}
++				// Final partial step to reach the real serverTime
++				cl->lastUsercmd.serverTime = realTime;
++				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++				return;
++			}
++		}
++	}
++	single_call:
++
+ 	VM_Call( gvm, 1, GAME_CLIENT_THINK, cl - svs.clients );
+ }
+ 
+-- 
+2.43.0
