@@ -62,7 +62,7 @@ Engine-side position correction for high sv_fps snapshots.
 
 **Why:** At sv_fps 60 with sv_gameHz 20, the entity state (`ent->s`) only updates every 3rd engine tick. Without correction, clients see players teleporting every 50ms instead of moving smoothly every 16ms.
 
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` checks `sv.time - sv.gameTime > 0` (between game frames). For real players, copies `ps->origin` → `es->pos.trBase` and `ps->velocity` → `es->pos.trDelta`. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` checks `sv.time - sv.gameTime > 0` (between game frames). For real players, copies `ps->origin` → `es->pos.trBase` and `ps->velocity` → `es->pos.trDelta`. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations. Note: `sv_extrapolate` skips the fixup at game-frame boundaries (no work needed); `sv_smoothClients` runs on every tick so TR_LINEAR is never interrupted.
 
 ---
 
@@ -76,7 +76,7 @@ Engine-side position correction for high sv_fps snapshots.
 
 **Why:** With `TR_INTERPOLATE`, cgame linearly interpolates between the previous and current snapshot positions. When a player reverses direction, the interpolation target is wrong until the next snapshot arrives — visible as a brief drift in the wrong direction. `TR_LINEAR` lets cgame compute position from velocity at any time, potentially smoother for direction changes.
 
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` sets `es->pos.trType = TR_LINEAR` and `es->pos.trTime = sv.time`. Works independently of `sv_extrapolate` — no longer requires it to be enabled. When `sv_smoothClients 1` is enabled, it uses the position resolved by `sv_bufferMs` (Phase 1) as the base, then applies velocity smoothing from `sv_velSmooth` (if enabled) for `trDelta`. The two settings now compose: `sv_bufferMs` controls the position source, `sv_smoothClients` controls the trajectory type.
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` sets `es->pos.trType = TR_LINEAR` and `es->pos.trTime = sv.time` on **every** engine tick (including game-frame ticks). This is important: the `sv_extrapolate` fixup skips game-frame ticks (`extrapolateMs == 0`) because the entity state is already correct; the `sv_smoothClients` fixup must run on every tick so that TR_LINEAR is never interrupted by a stray TR_INTERPOLATE snapshot on game-frame boundaries. When `sv_smoothClients 1` is enabled, it uses the position resolved by `sv_bufferMs` (Phase 1) as the base, then applies velocity smoothing from `sv_velSmooth` (if enabled) for `trDelta`. The two settings compose: `sv_bufferMs` controls the position source, `sv_smoothClients` controls the trajectory type.
 
 **Safety:** Idle players (velocity near zero) are NOT switched to TR_LINEAR — they stay TR_INTERPOLATE to prevent extrapolation drift/vibration. The DotProduct > 100.0 dead-zone check applies to both smoothed velocity (ring buffer path) and raw velocity (fallback path). Pmove operates on playerState only and does NOT interact with entityState trajectory type changes.
 

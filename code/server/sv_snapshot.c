@@ -1225,8 +1225,13 @@ static void SV_BuildCommonSnapshot( void )
 			svs.snapshotEntities[ index ] = list[ i ]->s;
 
 			// Fix up client entity positions between game frames.
-			// Guard: extrapolation or smoothClients enabled + between game frames + client slot + alive player.
-			if ( extrapolateMs > 0.0f && ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) ) ) {
+			// sv_smoothClients runs on every tick (including game-frame ticks) so TR_LINEAR is set
+			// consistently — skipping game-frame ticks would emit TR_INTERPOLATE 1/3 of the time at
+			// sv_gameHz 20 / sv_fps 60, causing visible stutter every 50ms.
+			// sv_extrapolate only needs to run between game frames (extrapolateMs > 0), so we keep
+			// that guard for the extrapolate-only path to avoid redundant work.
+			if ( ( sv_smoothClients && sv_smoothClients->integer ) ||
+				( extrapolateMs > 0.0f && sv_extrapolate && sv_extrapolate->integer ) ) {
 				entityState_t *es = &svs.snapshotEntities[ index ];
 				if ( es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE ) {
 
