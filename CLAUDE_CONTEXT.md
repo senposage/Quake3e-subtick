@@ -55,7 +55,7 @@ The default was intentionally set to match the QVM's assumed frame rate. A range
 // original — inside the sv_fps while loop
 VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
 ```
-There was no separate `sv.gameTime`. At `sv_fps 60`, `level.time` would advance 16ms per engine tick instead of 50ms. The QVM antiwarp blank command injection `cmd.serverTime += 50` then fires a 50ms ghost usercmd every 16ms of real time — teleporting lagging players at 3× the intended rate. This is the hardest-breaking issue and the primary reason `sv_gameHz` must stay locked at 20.
+There was no separate `sv.gameTime`. At `sv_fps 60`, `level.time` would advance 16ms per engine tick instead of 50ms. The QVM antiwarp blank command injection `cmd.serverTime += 50` then fires a 50ms ghost usercmd every 16ms of real time — teleporting lagging players at 3× the intended rate. This was the hardest-breaking issue with UT4.2 QVM. Note: some of these constraints may have been relaxed in UT4.3.4 — further testing is needed before drawing firm conclusions.
 
 ### 3. No separate game clock — decoupling was impossible
 Because `GAME_RUN_FRAME` received `sv.time` directly and there was no `sv.gameTime` / `gameTimeResidual`, there was no mechanism to run the engine tick at one rate and the QVM at another. The two were the same variable.

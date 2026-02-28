@@ -103,4 +103,4 @@ These files are in `UrbanTerror42_Source/` and are reference only. We cannot mod
 | Dead-zone threshold | 100.0f | sv_snapshot.c (DotProduct check on velocity², threshold 100.0f = 10 ups magnitude) |
 | Ring buffer size | 32 | sv_snapshot.c |
 | FRAMETIME (QVM) | 100 | g_local.h (only nextthink, self-correcting) |
-| Antiwarp inject | 50ms | g_active.c (hardcoded, breaks at sv_gameHz != 20) |
+| Antiwarp inject | 50ms | g_active.c (hardcoded in UT4.2; behaviour at sv_gameHz != 20 may differ in 4.3.4 — pending testing) |

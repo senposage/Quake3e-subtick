@@ -22,7 +22,7 @@ Engine tick and input sampling rate (Hz). Controls how often the server processe
 ### sv_gameHz
 **Default:** 20 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
 
-Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. **MUST stay at 20** for UT4.3 — the QVM has a hardcoded `serverTime += 50` antiwarp injection in `g_active.c` that assumes 50ms game frames.
+Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 20 matches UT4.3's QVM antiwarp assumption (`serverTime += 50` in `g_active.c`). Some constraints may have been relaxed in UT4.3.4 — testing at higher values is ongoing; do not assume 20 is still a hard requirement until confirmed.
 
 **Why:** Decouples game logic rate from engine tick rate so sv_fps can be raised without breaking QVM timers (bleed, bandage, antiwarp, inactivity).
 

@@ -35,7 +35,7 @@ Urban Terror 4.3 (UT4.3) competitive server engine enhancement built on **Quake3
 
 Current runtime model:
 - `sv_fps 60` for high-rate input sampling
-- `sv_gameHz 20` for QVM game logic compatibility
+- `sv_gameHz 20` for QVM game logic compatibility (may be raiseable in 4.3.4 — pending testing)
 - `sv_snapshotFps -1` (= sv_fps) for downstream snapshot cadence
 
 UT4.3 QVM binaries (`qagame`, `cgame`, `ui`) are closed-source.
@@ -74,7 +74,7 @@ code/qcommon/
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
-| `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (keep at 20 for UT4.3 constraints) |
+| `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (20 matches UT4.3 antiwarp; some constraints may be relaxed in 4.3.4 — pending testing) |
 | `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame |
@@ -148,9 +148,9 @@ Com_Frame → SV_Frame(msec)
 - `SV_MapRestart_f` aligns `sv.gameTime` with `sv.time` and resets residual state before restart progression.
 - Warmup/restart frame progression uses the synchronized game clock.
 
-### Why `sv_gameHz` Must Stay at 20
+### `sv_gameHz` and QVM Compatibility
 
-UT antiwarp uses hardcoded 50ms behavior in QVM logic; increasing game frame rate above 20Hz creates timing mismatch and can produce invalid movement correction. Keep `sv_gameHz` at 20 for compatibility.
+UT4.2 antiwarp uses a hardcoded `serverTime += 50` ghost command injection in `g_active.c` that assumes 50ms (20Hz) game frames. Raising `sv_gameHz` above 20 was known to fire the injection at the wrong rate. However, some of these QVM-side constraints may have been relaxed in UT4.3.4 — do not treat 20 as an absolute requirement until further in-game testing confirms the behaviour at higher values.
 
 ### Snapshot Dispatch
 
@@ -232,10 +232,7 @@ Reference: `docs/ghidra-cgame-patches.md`.
 
 ### Antiwarp Analysis
 
-g_antiwarp remains safe with `sv_fps` elevated **when** `sv_gameHz` remains 20:
-- game-side checks operate at game-frame cadence
-- 50ms antiwarp assumptions remain aligned
-- triggers occur on real command gaps rather than normal high-rate server ticks
+g_antiwarp is safest with `sv_fps` elevated when `sv_gameHz` is 20 (game-side checks operate at game-frame cadence; 50ms antiwarp assumptions remain aligned). Whether `sv_gameHz` above 20 is now safe in UT4.3.4 is unconfirmed — pending in-game testing.
 
 ---
 
