@@ -1773,7 +1773,7 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 
 	if ( cl->netchan.remoteAddress.type == NA_BOT ) {
 		cl->lastSnapshotTime = svs.time - 9999; // generate a snapshot immediately
-		{ int _sc = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer; if (_sc > sv_fps->integer) _sc = sv_fps->integer; if (_sc < 1) _sc = 1; cl->snapshotMsec = 1000 / _sc; }
+		{ int _sc = (sv_snapshotFps && sv_snapshotFps->integer > 0) ? sv_snapshotFps->integer : sv_fps->integer; if (_sc > sv_fps->integer) _sc = sv_fps->integer; if (_sc < 1) _sc = 1; cl->snapshotMsec = 1000 / _sc; }
 		cl->rate = 0;
 		return;
 	}
@@ -1802,16 +1802,21 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 		}
 	}
 
-	// snaps is ignored — sv_snapshotFps is fully authoritative.
-	// All clients receive snapshots at the server-controlled rate.
+	// Use sv_snapshotFps if non-zero; otherwise fall back to per-client 'snaps' userinfo.
 	{
-		int snapCap = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer;
-		if ( snapCap > sv_fps->integer ) snapCap = sv_fps->integer;
-		if ( snapCap < 1 ) snapCap = 1;
-		i = snapCap;
+		int snapRate;
+		if ( sv_snapshotFps && sv_snapshotFps->integer > 0 ) {
+			snapRate = sv_snapshotFps->integer;
+			if ( snapRate > sv_fps->integer ) snapRate = sv_fps->integer;
+			if ( snapRate < 1 ) snapRate = 1;
+		} else {
+			const char *snapsVal = Info_ValueForKey( cl->userinfo, "snaps" );
+			snapRate = snapsVal[0] ? atoi( snapsVal ) : sv_fps->integer;
+			if ( snapRate < 1 ) snapRate = 1;
+			if ( snapRate > sv_fps->integer ) snapRate = sv_fps->integer;
+		}
+		i = 1000 / snapRate;
 	}
-
-	i = 1000 / i; // from FPS to milliseconds
 
 	if ( i != cl->snapshotMsec )
 	{
