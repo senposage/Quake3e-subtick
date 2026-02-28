@@ -1257,9 +1257,12 @@ static void SV_BuildCommonSnapshot( void )
 					vec3_t origin, velocity;
 
 					// --- Phase 1: Resolve position source ---
-					// sv_bufferMs applies to both TR_INTERPOLATE and TR_LINEAR modes.
-					// Bots and real players both use the ring buffer when available.
-					if ( bufMs > 0 ) {
+					// sv_bufferMs applies to real players only. Bots are excluded:
+					// their ring-buffer entries are extrapolated from trBase+trDelta and
+					// reset at every game-frame boundary, creating discontinuities that
+					// cause visible warping when a delayed lookup straddles that boundary.
+					// Bots fall through to the velocity-extrapolation path below instead.
+					if ( bufMs > 0 && !isBot ) {
 						vec3_t delayedOrigin, delayedVelocity;
 						if ( SV_SmoothGetPosition( es->number, sv.time - bufMs, delayedOrigin, delayedVelocity ) ) {
 							VectorCopy( delayedOrigin, origin );
