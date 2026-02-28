@@ -1583,7 +1583,7 @@ void SV_Frame( int msec ) {
 		// Record positions into smooth buffer when either feature is enabled.
 		// sv_bufferMs = position delay, sv_velSmooth = velocity smoothing.
 		// Ring buffer feeds both — record when either is non-zero.
-		if ( sv_extrapolate && sv_extrapolate->integer
+		if ( ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) )
 				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
 				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
 			SV_SmoothRecordAll();

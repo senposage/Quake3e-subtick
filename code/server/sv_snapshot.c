@@ -1215,9 +1215,8 @@ static void SV_BuildCommonSnapshot( void )
 			if ( sv_bufferMs && sv_bufferMs->integer != 0 ) {
 				bufMs = sv_bufferMs->integer;
 				if ( bufMs < 0 ) {
-					// Auto mode: 50 - (1000/sv_fps) to match vanilla 50ms total latency
-					bufMs = 50 - ( 1000 / sv_fps->integer );
-					if ( bufMs < 0 ) bufMs = 0;
+					// Auto mode: one snapshot interval — minimum for clean ring-buffer interpolation
+					bufMs = 1000 / sv_fps->integer;
 				}
 				if ( bufMs > 100 ) bufMs = 100;
 			}
@@ -1226,8 +1225,13 @@ static void SV_BuildCommonSnapshot( void )
 			svs.snapshotEntities[ index ] = list[ i ]->s;
 
 			// Fix up client entity positions between game frames.
-			// Guard: sv_extrapolate enabled + between game frames + client slot + alive player.
-			if ( extrapolateMs > 0.0f && sv_extrapolate && sv_extrapolate->integer ) {
+			// sv_smoothClients runs on every tick (including game-frame ticks) so TR_LINEAR is set
+			// consistently — skipping game-frame ticks would emit TR_INTERPOLATE 1/3 of the time at
+			// sv_gameHz 20 / sv_fps 60, causing visible stutter every 50ms.
+			// sv_extrapolate only needs to run between game frames (extrapolateMs > 0), so we keep
+			// that guard for the extrapolate-only path to avoid redundant work.
+			if ( ( sv_smoothClients && sv_smoothClients->integer ) ||
+				( extrapolateMs > 0.0f && sv_extrapolate && sv_extrapolate->integer ) ) {
 				entityState_t *es = &svs.snapshotEntities[ index ];
 				if ( es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE ) {
 

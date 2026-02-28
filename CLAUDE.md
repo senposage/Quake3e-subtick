@@ -127,6 +127,8 @@ Com_Frame → SV_Frame(msec)
 - Player entity state is authored at game-frame cadence; at high snapshot rate this would otherwise duplicate positions.
 - `SV_BuildCommonSnapshot` extrapolates player `trBase` by `sv.time - sv.gameTime` using `trDelta` velocity.
 - Guarded by player index and trajectory type checks.
+- **`sv_extrapolate` path** skips the fixup when `sv.time == sv.gameTime` (entity state already correct at game-frame tick).
+- **`sv_smoothClients` path** runs on **every** tick — including game-frame ticks — to ensure TR_LINEAR is never interrupted by a stray TR_INTERPOLATE snapshot (which would cause 50ms-period stutter at sv_gameHz 20).
 
 ### Antilag (sv_antilag.c)
 

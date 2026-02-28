@@ -15,7 +15,7 @@ Engine tick and input sampling rate (Hz). Controls how often the server processe
 
 **How:** `sv_main.c:SV_Frame()` outer `while` loop runs at sv_fps rate. `sv.time` and `svs.time` advance by `1000/sv_fps` per tick.
 
-**Interpolation windows:** sv_fps 20=50ms, 60=16.7ms, 90=11.1ms, 125=8ms. Higher rates = tighter windows = less tolerance for network jitter.
+**Interpolation windows:** sv_fps 20=50ms, 60=16.7ms, 80=12.5ms, 100=10ms, 125=8ms. Higher rates = tighter windows = less tolerance for network jitter. The snapshot interval also sets the **minimum sv_bufferMs** for clean ring-buffer interpolation — see sv_bufferMs for the per-rate table.
 
 ---
 
@@ -62,7 +62,7 @@ Engine-side position correction for high sv_fps snapshots.
 
 **Why:** At sv_fps 60 with sv_gameHz 20, the entity state (`ent->s`) only updates every 3rd engine tick. Without correction, clients see players teleporting every 50ms instead of moving smoothly every 16ms.
 
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` checks `sv.time - sv.gameTime > 0` (between game frames). For real players, copies `ps->origin` → `es->pos.trBase` and `ps->velocity` → `es->pos.trDelta`. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` checks `sv.time - sv.gameTime > 0` (between game frames). For real players, copies `ps->origin` → `es->pos.trBase` and `ps->velocity` → `es->pos.trDelta`. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations. Note: `sv_extrapolate` skips the fixup at game-frame boundaries (no work needed); `sv_smoothClients` runs on every tick so TR_LINEAR is never interrupted.
 
 ---
 
@@ -76,7 +76,7 @@ Engine-side position correction for high sv_fps snapshots.
 
 **Why:** With `TR_INTERPOLATE`, cgame linearly interpolates between the previous and current snapshot positions. When a player reverses direction, the interpolation target is wrong until the next snapshot arrives — visible as a brief drift in the wrong direction. `TR_LINEAR` lets cgame compute position from velocity at any time, potentially smoother for direction changes.
 
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` sets `es->pos.trType = TR_LINEAR` and `es->pos.trTime = sv.time`. Requires `sv_extrapolate 1`. When `sv_smoothClients 1` is enabled, it uses the position resolved by `sv_bufferMs` (Phase 1) as the base, then applies velocity smoothing from `sv_velSmooth` (if enabled) for `trDelta`. The two settings now compose: `sv_bufferMs` controls the position source, `sv_smoothClients` controls the trajectory type.
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` sets `es->pos.trType = TR_LINEAR` and `es->pos.trTime = sv.time` on **every** engine tick (including game-frame ticks). This is important: the `sv_extrapolate` fixup skips game-frame ticks (`extrapolateMs == 0`) because the entity state is already correct; the `sv_smoothClients` fixup must run on every tick so that TR_LINEAR is never interrupted by a stray TR_INTERPOLATE snapshot on game-frame boundaries. When `sv_smoothClients 1` is enabled, it uses the position resolved by `sv_bufferMs` (Phase 1) as the base, then applies velocity smoothing from `sv_velSmooth` (if enabled) for `trDelta`. The two settings compose: `sv_bufferMs` controls the position source, `sv_smoothClients` controls the trajectory type.
 
 **Safety:** Idle players (velocity near zero) are NOT switched to TR_LINEAR — they stay TR_INTERPOLATE to prevent extrapolation drift/vibration. The DotProduct > 100.0 dead-zone check applies to both smoothed velocity (ring buffer path) and raw velocity (fallback path). Pmove operates on playerState only and does NOT interact with entityState trajectory type changes.
 
@@ -119,18 +119,33 @@ Maximum rewind window for antilag (ms). Players with ping above this get no anti
 ### sv_bufferMs
 **Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
 
+**Requires `sv_extrapolate 1` or `sv_smoothClients 1`** — has no effect when both are 0 (vanilla mode).
+
 Per-client position ring buffer with configurable delay.
 
-- **0** = disabled. No ring buffer, no extra latency. Falls through to direct position correction (sv_extrapolate).
-- **-1** = auto. Computes `50 - (1000/sv_fps)` to match vanilla 50ms total latency:
-  - sv_fps 125: auto = 42ms buffer (8ms interval + 42ms delay = 50ms total)
-  - sv_fps 60: auto = 34ms buffer (16ms + 34ms = 50ms total)
-  - sv_fps 20: auto = 0ms (already at 50ms, no delay needed)
+- **0** = disabled. No ring buffer position delay, no extra latency. `trBase` is always the current `ps->origin` (straight pass-through). This applies regardless of `sv_smoothClients` setting — when `sv_bufferMs 0`, there is zero added position latency even in TR_LINEAR mode. `sv_velSmooth` may still average the velocity vector but does not delay the position.
+- **-1** = auto. Computes `1000/sv_fps` — one snapshot interval, the minimum for clean ring-buffer interpolation:
+  - sv_fps 20: auto = 50ms
+  - sv_fps 40: auto = 25ms
+  - sv_fps 60: auto = 16ms
+  - sv_fps 80: auto = 12ms
+  - sv_fps 100: auto = 10ms
+  - sv_fps 125: auto = 8ms
 - **1-100** = manual delay in milliseconds.
+
+**Minimum values to avoid under/overshoot:** For the ring buffer to straddle a direction change (interpolate *through* the reversal rather than snap to the nearest entry), `bufMs` must be at least one full snapshot interval — `1000/sv_fps`. This is exactly what auto (-1) provides.
+
+| sv_fps | Snapshot interval | Min / Auto (-1) bufMs |
+|--------|------------------|-----------------------|
+| 20     | 50 ms            | 50 ms                 |
+| 40     | 25 ms            | 25 ms                 |
+| 60     | 16 ms            | 16 ms                 |
+| 80     | 12 ms            | 12 ms                 |
+| 100    | 10 ms            | 10 ms                 |
 
 **Why:** At high sv_fps, rapid direction changes produce sawtooth artifacts because each snapshot captures a slightly different velocity vector. The ring buffer provides two smoothing strategies:
 
-**How:** `sv_snapshot.c` maintains a 32-slot ring buffer per client (`svSmoothHistory_t`). Positions are recorded every sv_fps tick in `SV_Frame`. When `sv_bufferMs > 0`, `SV_BuildCommonSnapshot` queries the ring buffer for delayed positions via `SV_SmoothGetPosition()`. Provides the base position for both TR_INTERPOLATE (sv_smoothClients 0) and TR_LINEAR (sv_smoothClients 1) modes — these settings now compose rather than being mutually exclusive.
+**How:** `sv_snapshot.c` maintains a 32-slot ring buffer per client (`svSmoothHistory_t`). Positions are recorded every sv_fps tick in `SV_Frame` when `sv_extrapolate 1` or `sv_smoothClients 1` is active. When `sv_bufferMs > 0`, `SV_BuildCommonSnapshot` queries the ring buffer for delayed positions via `SV_SmoothGetPosition()`. Provides the base position for both TR_INTERPOLATE (sv_smoothClients 0) and TR_LINEAR (sv_smoothClients 1) modes — these settings compose rather than being mutually exclusive.
 
 **Ring buffer capacity:** 32 slots = 256ms at sv_fps 125, 533ms at sv_fps 60. Sufficient for any reasonable buffer depth.
 
@@ -150,7 +165,7 @@ Velocity smoothing window in milliseconds. Averages player velocity over the las
 
 **How:** Only effective with `sv_smoothClients 1` (TR_LINEAR mode), where cgame uses `trDelta` (velocity) for continuous position evaluation via `BG_EvaluateTrajectory`. The smoothed velocity makes extrapolation between snapshots more stable. Uses the same ring buffer as `sv_bufferMs`. No position latency added — only the velocity vector is smoothed.
 
-**Relationship:** Uses the same ring buffer as `sv_bufferMs`. The ring buffer records whenever either `sv_bufferMs != 0` or `sv_velSmooth > 0`.
+**Relationship:** Uses the same ring buffer as `sv_bufferMs`. The ring buffer records whenever `sv_extrapolate 1` or `sv_smoothClients 1` is active AND either `sv_bufferMs != 0` or `sv_velSmooth > 0`.
 
 ---
 
@@ -184,22 +199,24 @@ These are correctness fixes that should never be disabled:
 
 ## Configuration Guide
 
-`sv_bufferMs`, `sv_smoothClients`, and `sv_velSmooth` are independent stages in a pipeline and can be freely combined. Phase 1 resolves the position source (`sv_bufferMs`); Phase 2 resolves the trajectory type (`sv_smoothClients`) and velocity (`sv_velSmooth`).
+`sv_bufferMs`, `sv_smoothClients`, and `sv_velSmooth` compose as stages in a pipeline. **`sv_bufferMs` and `sv_velSmooth` require `sv_extrapolate 1` or `sv_smoothClients 1` to activate** — both are no-ops in vanilla mode (sv_extrapolate 0, sv_smoothClients 0). Phase 1 resolves the position source (`sv_bufferMs`); Phase 2 resolves the trajectory type (`sv_smoothClients`) and velocity (`sv_velSmooth`).
 
 ### Combination Table
 
 | sv_smoothClients | sv_bufferMs | sv_velSmooth | Position Source | Trajectory | Velocity | Description |
 |---|---|---|---|---|---|---|
 | 0 | 0 | any | Current | TR_INTERPOLATE | Raw | **Default.** Standard extrapolation between game frames. Lowest latency. |
-| 0 | -1 | any | Delayed (auto) | TR_INTERPOLATE | Raw | Position delayed to match vanilla 50ms total latency. Stable lerp targets. |
-| 0 | 1-100 | any | Delayed (manual) | TR_INTERPOLATE | Raw | Manual position delay in ms. Trades latency for stability. |
+| 0 | -1 | any | Delayed (auto) | TR_INTERPOLATE | Raw | Position delayed by one snapshot interval. Requires `sv_extrapolate 1`. |
+| 0 | 1-100 | any | Delayed (manual) | TR_INTERPOLATE | Raw | Manual position delay in ms. Requires `sv_extrapolate 1`. |
 | 1 | 0 | 0 | Current | TR_LINEAR | Raw | Continuous trajectory evaluation. No smoothing. |
 | 1 | 0 | 1-100 | Current | TR_LINEAR | Smoothed | Continuous trajectory with averaged velocity. Reduces direction-change artifacts. |
-| 1 | -1 | 1-100 | Delayed (auto) | TR_LINEAR | Smoothed | **Best of both worlds.** Stable delayed base position + smoothed velocity for extrapolation. |
+| 1 | -1 | 1-100 | Delayed (auto) | TR_LINEAR | Smoothed | **Best of both worlds.** Minimum-latency delayed base position + smoothed velocity for extrapolation. |
 | 1 | 1-100 | 1-100 | Delayed (manual) | TR_LINEAR | Smoothed | Same as above with manual delay control. |
+
+> **Note:** rows with `sv_smoothClients 0` and `sv_bufferMs != 0` require `sv_extrapolate 1` (the default). When `sv_extrapolate 0` and `sv_smoothClients 0`, the entire position-fixup block is skipped and `sv_bufferMs` has no effect.
 
 ### Recommended Configurations
 
 - **Competitive (lowest latency):** `sv_smoothClients 0`, `sv_bufferMs 0`, `sv_velSmooth 0` — raw positions, minimal processing
-- **Balanced:** `sv_smoothClients 0`, `sv_bufferMs -1`, `sv_velSmooth 0` — position delay matches vanilla feel
+- **Balanced:** `sv_extrapolate 1` (default), `sv_smoothClients 0`, `sv_bufferMs -1`, `sv_velSmooth 0` — one-interval position delay, clean ring-buffer lerp targets
 - **Smoothest (experimental):** `sv_smoothClients 1`, `sv_bufferMs -1`, `sv_velSmooth 32` — delayed position + smoothed velocity + TR_LINEAR
