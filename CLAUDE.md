@@ -36,7 +36,7 @@ Urban Terror 4.3 (UT4.3) competitive server engine enhancement built on **Quake3
 Current runtime model:
 - `sv_fps 60` for high-rate input sampling
 - `sv_gameHz 20` for QVM game logic compatibility
-- `sv_snapshotFps 60` for downstream snapshot cadence
+- `sv_snapshotFps -1` (= sv_fps) for downstream snapshot cadence
 
 UT4.3 QVM binaries (`qagame`, `cgame`, `ui`) are closed-source.
 UT4.2 source and Ghidra notes are used as reference material only (see docs below).
@@ -75,7 +75,7 @@ code/qcommon/
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
 | `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (keep at 20 for UT4.3 constraints) |
-| `sv_snapshotFps` | `60` | Snapshot send rate to clients |
+| `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame |
 | `sv_extrapolate` | `1` | Engine-side position correction between game frames |
@@ -125,9 +125,9 @@ Com_Frame → SV_Frame(msec)
 ### Engine-Side Position Extrapolation (sv_snapshot.c)
 
 - Player entity state is authored at game-frame cadence; at high snapshot rate this would otherwise duplicate positions.
-- `SV_BuildCommonSnapshot` extrapolates player `trBase` by `sv.time - sv.gameTime` using `trDelta` velocity.
-- Guarded by player index and trajectory type checks.
-- **`sv_extrapolate` path** skips the fixup when `sv.time == sv.gameTime` (entity state already correct at game-frame tick).
+- `SV_BuildCommonSnapshot` fixes up player positions between game frames: real players use actual `ps->origin` (updated by Pmove every usercmd); bots use velocity extrapolation (`trBase += trDelta * dt`) since their `ps->origin` only updates at game-frame boundaries.
+- Guarded by player index and trajectory type checks. Velocity dead-zone check prevents idle-player vibration.
+- **`sv_extrapolate` path** only runs between game frames (`sv.time > sv.gameTime`); skipped at game-frame ticks where entity state is already correct.
 - **`sv_smoothClients` path** runs on **every** tick — including game-frame ticks — to ensure TR_LINEAR is never interrupted by a stray TR_INTERPOLATE snapshot (which would cause 50ms-period stutter at sv_gameHz 20).
 
 ### Antilag (sv_antilag.c)

@@ -84,7 +84,7 @@ Flags used in code (note: not all are ARCHIVE — antilag cvars are SERVERINFO o
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
 | `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (locked at 20 — see constraints) |
-| `sv_snapshotFps` | `60` | Snapshot send rate to clients |
+| `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step size (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame instead of sleeping |
 | `sv_antilagEnable` | `1` | Engine antilag on/off |
@@ -240,7 +240,7 @@ Clients with a finite `rate` cvar (e.g., `rate 25000`) are naturally protected f
 
 `cl_maxpackets` limits how often the **client sends input to the server** (upstream). The netgraph shows **server → client** snapshot timing (downstream). `cl_maxpackets` does NOT cause the netgraph late/early packets.
 
-At `sv_fps 60` with `cl_maxpackets 30` (UT default): server processes 60 input ticks/sec but receives fresh usercmds only 30/sec. The server reuses the last usercmd for the in-between ticks. This doesn't cause netgraph jitter but means our position extrapolation (trDelta = last-known velocity) is slightly stale for 50% of ticks.
+At `sv_fps 60` with `cl_maxpackets 30` (UT default): server processes 60 input ticks/sec but receives fresh usercmds only 30/sec. The server reuses the last usercmd for the in-between ticks. This doesn't cause netgraph jitter but means the bot velocity extrapolation and the real-player ps->origin are both slightly stale for 50% of ticks.
 
 **Recommendation for players:** set `cl_maxpackets 60` or `cl_maxpackets 125` when playing on a 60Hz sv_fps server. The server cannot force this.
 
@@ -260,33 +260,24 @@ At `sv_fps 60 / sv_snapshotFps 60`, three consecutive snapshots go out between e
 
 The cgame interpolates these and sees two dead frames followed by a sudden jump. This is the visual stutter.
 
-### Fix: Engine-Side Position Extrapolation (sv_snapshot.c)
+### Fix: Engine-Side Position Fixup (sv_snapshot.c)
 
-`BG_PlayerStateToEntityState` sets `s->pos.trDelta = ps->velocity` (confirmed in UT4.2 source, bg_misc.c line 2041). The velocity is always present in `trDelta` for TR_INTERPOLATE client entities. We use this in `SV_BuildCommonSnapshot` to forward-extrapolate each player entity's `trBase` to `sv.time` before the snapshot is stamped:
+`SV_BuildCommonSnapshot` corrects player entity positions between game frames before the snapshot is stamped. The approach differs by entity type:
 
+**Real players** — `ps->origin` is already the correct post-Pmove position (updated by `SV_ClientThink` every usercmd). We copy it directly:
 ```c
-const float extrapolateMs = (float)( sv.time - sv.gameTime );
-// for each entity where es->number < sv_maxclients->integer && es->pos.trType == TR_INTERPOLATE:
+const playerState_t *ps = SV_GameClientNum( es->number );
+VectorCopy( ps->origin, es->pos.trBase );
+VectorCopy( ps->velocity, es->pos.trDelta );
+```
+
+**Bots** — `ps->origin` only updates at game-frame boundaries (bot AI ticks at sv_gameHz). Between frames we use velocity extrapolation:
+```c
 const float dt = extrapolateMs * 0.001f;
 es->pos.trBase[0] += es->pos.trDelta[0] * dt;
 es->pos.trBase[1] += es->pos.trDelta[1] * dt;
 es->pos.trBase[2] += es->pos.trDelta[2] * dt;
 ```
-
-With this:
-- snap at t=0ms: P₀ + V×0s = P₀
-- snap at t=16ms: P₀ + V×0.016 ≈ P₀.₃
-- snap at t=33ms: P₀ + V×0.033 ≈ P₀.₇
-- snap at t=50ms: P₁ + V×0s = P₁ (new game frame)
-
-The cgame interpolates smooth motion between snapshots instead of seeing dead frames + jump.
-
-**Guard conditions:**
-- `sv.time > sv.gameTime` (no-op when sv_fps == sv_gameHz)
-- `es->number < sv_maxclients->integer` (client entity slots only)
-- `es->pos.trType == TR_INTERPOLATE` (alive and spectator players — both safe; spectators/dead are ET_INVISIBLE and won't be rendered anyway)
-
-**Not applied to the local player's playerState.** The local player's `ps.origin` is already current — it's updated by `SV_ClientThink` (Pmove) at sv_fps rate, not just at game frame rate.
 
 **Investigated and rejected: TR_LINEAR_STOP injection**
 
@@ -381,7 +372,7 @@ Investigated using `trap_Cvar_Set` intercept to fix the unclamped `frameInterpol
 | `sv_main.c` | sv_fps/sv_gameHz frame loop decoupling; timeResidual hard clamp; SV_BotFrame moved to sv_gameHz inner loop; antilag sub-tick recording |
 | `sv_init.c` | Register sv_gameHz, sv_snapshotFps, sv_busyWait, sv_pmoveMsec; antilag cvar registration; CVG_SERVER group tracking |
 | `sv_client.c` | sv_pmoveMsec multi-step loop with commandTime stall detection; bot exclusion from clamping |
-| `sv_snapshot.c` | `snaps` client cvar bypassed — sv_snapshotFps is authoritative; engine-side player position extrapolation using `sv.time - sv.gameTime` offset and `trDelta` (velocity) |
+| `sv_snapshot.c` | `snaps` client cvar bypassed — sv_snapshotFps is authoritative; real players use ps->origin for position fixup between game frames; bots use velocity extrapolation (trDelta * dt) |
 | `sv_ccmds.c` | `SV_MapRestart_f`: sync `sv.gameTime = sv.time` + `sv.gameTimeResidual = 0` on restart; warmup frames pass `sv.gameTime` to `GAME_RUN_FRAME` (was incorrectly using `sv.time`) |
 | `sv_antilag.c` | Full engine-side antilag implementation |
 | `sv_antilag.h` | Antilag interface |

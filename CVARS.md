@@ -31,13 +31,13 @@ Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. **MUST stay at 2
 ---
 
 ### sv_snapshotFps
-**Default:** 60 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
+**Default:** -1 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
 
-Max snapshot send rate to clients. Server ignores client `snaps` userinfo — this is fully authoritative.
+Max snapshot send rate to clients. `-1` (default) means match `sv_fps` and live-tracks changes to it. `0` falls back to per-client `snaps` userinfo (vanilla Q3 behavior). `>0` sets an explicit rate capped to `sv_fps`. Server ignores client `snaps` userinfo when non-zero — this is fully authoritative.
 
 **Why:** Ensures all clients receive snapshots at a consistent rate controlled by the server, not by individual client settings.
 
-**How:** `sv_client.c:SV_UserinfoChanged()` computes `cl->snapshotMsec = 1000 / min(sv_snapshotFps, sv_fps)`. Client `snaps` cvar is bypassed entirely.
+**How:** `sv_client.c:SV_UserinfoChanged()` computes `cl->snapshotMsec = 1000 / min(sv_snapshotFps, sv_fps)`. When `sv_snapshotFps == -1`, uses `sv_fps` directly. Client `snaps` cvar is bypassed entirely.
 
 ---
 
