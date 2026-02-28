@@ -921,9 +921,9 @@ void SV_Init( void )
 
     sv_velSmooth = Cvar_Get ("sv_velSmooth", "32", CVAR_ARCHIVE );
     Cvar_SetDescription(sv_velSmooth, "Velocity smoothing window in milliseconds.\n"
+        "Requires sv_smoothClients 1 (TR_LINEAR mode) — has no effect otherwise.\n"
         "Averages player velocity over the last N ms from the ring buffer.\n"
         "Reduces sawtooth artifacts from rapid direction changes.\n"
-        "Only effective with sv_smoothClients 1 (TR_LINEAR mode).\n"
         "0 = disabled (use raw velocity)\n"
         "Default: 32");
 
