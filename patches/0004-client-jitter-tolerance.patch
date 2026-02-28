@@ -1,0 +1,188 @@
+From e3aa26d11fd4d76db0adf3d2a5a3a62355b0d8aa Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Fri, 27 Feb 2026 02:14:00 +0000
+Subject: [PATCH] client: adaptive jitter tolerance and snapshot-interval
+ scaling
+
+---
+ code/client/cl_cgame.c | 62 ++++++++++++++++++++++++++++++++++++++++++-------
+ code/client/cl_input.c |  9 ++++---
+ code/client/cl_parse.c | 29 ++++++++++++++++++++++
+ code/client/client.h   |  3 +++
+ 4 files changed, 74 insertions(+), 10 deletions(-)
+
+diff --git a/code/client/cl_cgame.c b/code/client/cl_cgame.c
+index d0e5fc2..51d9ebb 100644
+--- a/code/client/cl_cgame.c
++++ b/code/client/cl_cgame.c
+@@ -572,6 +572,11 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
+ 		Cvar_Update( VMA(1), cgvm->privateFlag );
+ 		return 0;
+ 	case CG_CVAR_SET:
++		// exclude some game module cvars
++		if (!Q_stricmp((char *)VMA(1), "snaps") ||
++			!Q_stricmp((char *)VMA(1), "cg_smoothClients")) {
++			return 0;
++		}
+ 		Cvar_SetSafe( VMA(1), VMA(2) );
+ 		return 0;
+ 	case CG_CVAR_VARIABLESTRINGBUFFER:
+@@ -1034,11 +1039,23 @@ or bursted delayed packets.
+ =================
+ */
+ 
+-#define	RESET_TIME	500
+-
+ static void CL_AdjustTimeDelta( void ) {
+ 	int		newDelta;
+ 	int		deltaDelta;
++	int		resetTime;
++	int		fastAdjust;
++
++	resetTime = cl.snapshotMsec * 10;
++	fastAdjust = cl.snapshotMsec * 2;
++	if ( resetTime < 200 ) resetTime = 200;
++	if ( fastAdjust < 50 ) fastAdjust = 50;
+ 
+ 	cl.newSnapshots = qfalse;
+@@ -1050,14 +1067,14 @@ static void CL_AdjustTimeDelta( void ) {
+ 	newDelta = cl.snap.serverTime - cls.realtime;
+ 	deltaDelta = abs( newDelta - cl.serverTimeDelta );
+ 
+-	if ( deltaDelta > RESET_TIME ) {
++	if ( deltaDelta > resetTime ) {
+ 		cl.serverTimeDelta = newDelta;
+ 		cl.oldServerTime = cl.snap.serverTime;
+ 		cl.serverTime = cl.snap.serverTime;
+ 		if ( cl_showTimeDelta->integer ) {
+ 			Com_Printf( "<RESET> " );
+ 		}
+-	} else if ( deltaDelta > 100 ) {
++	} else if ( deltaDelta > fastAdjust ) {
+ 		if ( cl_showTimeDelta->integer ) {
+ 			Com_Printf( "<FAST> " );
+ 		}
+@@ -1072,7 +1089,12 @@ static void CL_AdjustTimeDelta( void ) {
+ 		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
+ 			if ( cl.extrapolatedSnapshot ) {
+ 				cl.extrapolatedSnapshot = qfalse;
+-				cl.serverTimeDelta -= 2;
++				cl.serverTimeDelta -= ( cl.snapshotMsec < 30 ) ? 4 : 2;
++
+ 			} else {
+ 				cl.serverTimeDelta++;
+ 			}
+@@ -1247,11 +1269,30 @@ void CL_SetCGameTime( void ) {
+ 		}
+ 		cl.oldServerTime = cl.serverTime;
++
++		{
++			int maxTime = cl.snap.serverTime + cl.snapshotMsec;
++			if ( cl.serverTime > maxTime ) {
++				cl.serverTime = maxTime;
++			}
++		}
+ 
+-		// note if we are almost past the latest frame (without timeNudge),
+-		// so we will try and adjust back a bit when the next snapshot arrives
+-		//if ( cls.realtime + cl.serverTimeDelta >= cl.snap.serverTime - 5 ) {
+-		if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
+-			cl.extrapolatedSnapshot = qtrue;
++		{
++			int extrapMargin = cl.snapshotMsec / 3;
++			if ( extrapMargin < 3 ) extrapMargin = 3;
++			if ( extrapMargin > 16 ) extrapMargin = 16;
++			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -extrapMargin ) {
++				cl.extrapolatedSnapshot = qtrue;
++			}
+ 		}
+ 	}
+@@ -1279,7 +1320,8 @@ void CL_SetCGameTime( void ) {
+ 			clc.timeDemoStart = Sys_Milliseconds();
+ 		}
+ 		clc.timeDemoFrames++;
+-		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames * 50;
++		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames *
++			cl.snapshotMsec;
+ 	}
+ 
+ 	//while ( cl.serverTime >= cl.snap.serverTime ) {
+diff --git a/code/client/cl_input.c b/code/client/cl_input.c
+index 02fe488..c6ec744 100644
+--- a/code/client/cl_input.c
++++ b/code/client/cl_input.c
+@@ -690,9 +690,12 @@ static qboolean CL_ReadyToSendPacket( void ) {
+ 		return qfalse;
+ 	}
+ 
+-	// If we are downloading, we send no less than 50ms between packets
+-	if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < 50 ) {
+-		return qfalse;
++	// If we are downloading, throttle packet rate to current snapshot interval
++	{
++		int throttleMs = cl.snapshotMsec;
++		if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < throttleMs ) {
++			return qfalse;
++		}
+ 	}
+ 
+ 	// if we don't have a valid gamestate yet, only send
+diff --git a/code/client/cl_parse.c b/code/client/cl_parse.c
+index 5fef16a..7213541 100644
+--- a/code/client/cl_parse.c
++++ b/code/client/cl_parse.c
+@@ -474,6 +474,25 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
+ 		cl.snapshots[ ( oldMessageNum + i ) & PACKET_MASK ].valid = qfalse;
+ 	}
+ 
++	// measure snapshot interval for adaptive time management
++	if ( cl.snap.valid && newSnap.serverTime > cl.snap.serverTime ) {
++		int measured = newSnap.serverTime - cl.snap.serverTime;
++		if ( measured >= 1 && measured <= 200 ) {
++			if ( cl.snapshotMsec == 0 ) {
++				cl.snapshotMsec = measured;
++			} else {
++				cl.snapshotMsec = ( cl.snapshotMsec * 3 + measured ) >> 2;
++			}
++			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
++			if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
++		}
++	}
++	if ( cl.snapshotMsec == 0 ) {
++		cl.snapshotMsec = 50;
++	}
++
+ 	// copy to the current good spot
+ 	cl.snap = newSnap;
+ 	cl.snap.ping = 999;
+@@ -667,6 +686,16 @@ static void CL_ParseServerInfo( void )
+ 	len = strlen( clc.sv_dlURL );
+ 	if ( len > 0 &&  clc.sv_dlURL[len-1] == '/' )
+ 		clc.sv_dlURL[len-1] = '\0';
++
++	// pre-compute snapshot interval from server's advertised sv_fps
++	{
++		int snapFps = atoi( Info_ValueForKey( serverInfo, "sv_fps" ) );
++		if ( snapFps > 0 ) {
++			cl.snapshotMsec = 1000 / snapFps;
++			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
++			if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
++		}
++	}
+ }
+ 
+ 
+diff --git a/code/client/client.h b/code/client/client.h
+index 24453af..8589e8e 100644
+--- a/code/client/client.h
++++ b/code/client/client.h
+@@ -122,6 +122,8 @@ typedef struct {
+ 									// cleared when CL_AdjustTimeDelta looks at it
+ 	qboolean	newSnapshots;		// set on parse of any valid packet
+ 
++	int			snapshotMsec;		// measured snapshot interval (EMA)
++
+ 	gameState_t	gameState;			// configstrings
+ 	char		mapname[MAX_QPATH];	// extracted from CS_SERVERINFO
+-- 
+2.43.0

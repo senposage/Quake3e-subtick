@@ -1,0 +1,118 @@
+From cbf619e6cff710d24da20d193c4af6740c992926 Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Tue, 24 Feb 2026 14:06:03 -0500
+Subject: [PATCH] add context file, expermental interpolation improvements
+
+---
+ code/server/sv_client.c   | 44 ++++++++++++++++++++++++++++++++-------
+ code/server/sv_init.c     |  2 +-
+ code/server/sv_snapshot.c | 22 ++++++++++++++++++++
+ 3 files changed, 60 insertions(+), 8 deletions(-)
+
+diff --git a/code/server/sv_client.c b/code/server/sv_client.c
+index d32b775..fa7cce8 100644
+--- a/code/server/sv_client.c
++++ b/code/server/sv_client.c
+@@ -2208,19 +2208,49 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
+ 
+ 		if ( delta > maxStep ) {
+ 			// Fire multiple clamped steps to consume the full delta.
+-			// commandTime advances inside the QVM each call so we re-read it.
+-			while ( realTime - SV_GameClientNum( clNum )->commandTime > maxStep ) {
+-				cl->lastUsercmd.serverTime = SV_GameClientNum( clNum )->commandTime + maxStep;
++			// This ensures:
++			//   - Pmove always gets <= maxStep physics steps (correct movement)
++			//   - Per-call timers (bleed, bandage, inactivity) accumulate the
++			//     full real elapsed time across all steps.
++			//
++			// Safety: some QVM states (intermission, game paused) return from
++			// ClientThink_real without calling Pmove so commandTime never advances.
++			// Check BEFORE each call — if commandTime already won't change, skip
++			// the multi-step entirely so we never block the server for even one
++			// extra call. This keeps rcon and packet processing responsive.
++			{
++				int prevCmdTime = SV_GameClientNum( clNum )->commandTime;
++				cl->lastUsercmd.serverTime = prevCmdTime + maxStep;
+ 				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
+ 				if ( cl->state != CS_ACTIVE )
+ 					return; // kicked during think
++				// If commandTime did not advance the QVM is in a no-Pmove state
++				// (intermission, paused). Restore serverTime and fall through to
++				// the normal single call below — do NOT loop.
++				if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
++					cl->lastUsercmd.serverTime = realTime;
++					goto single_call;
++				}
++				// commandTime advanced — continue stepping through remaining delta
++				while ( realTime - SV_GameClientNum( clNum )->commandTime > maxStep ) {
++					prevCmdTime = SV_GameClientNum( clNum )->commandTime;
++					cl->lastUsercmd.serverTime = prevCmdTime + maxStep;
++					VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++					if ( cl->state != CS_ACTIVE )
++						return;
++					if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
++						cl->lastUsercmd.serverTime = realTime;
++						goto single_call;
++					}
++				}
++				// Final partial step to reach the real serverTime
++				cl->lastUsercmd.serverTime = realTime;
++				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++				return;
+ 			}
+-			// Final partial step to reach the real serverTime
+-			cl->lastUsercmd.serverTime = realTime;
+-			VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
+-			return;
+ 		}
+ 	}
++	single_call:
+ 
+ 	VM_Call( gvm, 1, GAME_CLIENT_THINK, cl - svs.clients );
+ }
+diff --git a/code/server/sv_init.c b/code/server/sv_init.c
+index 5162d66..28016e9 100644
+--- a/code/server/sv_init.c
++++ b/code/server/sv_init.c
+@@ -895,7 +895,7 @@ void SV_Init( void )
+ 
+     sv_pmoveMsec = Cvar_Get ("sv_pmoveMsec", "8", CVAR_ARCHIVE | CVAR_SERVERINFO );
+     Cvar_SetDescription(sv_pmoveMsec, "Maximum physics step size in milliseconds. Enforces consistent movement\nregardless of client framerate. 8=125fps equivalent. 0=disabled.\nDefault: 8");
+-    Cvar_SetDescription(sv_fps, "Set the max frames per second the server sends the client\nDefault: 20");
++    Cvar_SetDescription(sv_fps, "Engine tick and input sampling rate (Hz). Higher values give finer input resolution.\nDefault: 60");
+ 
+     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
+ 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
+diff --git a/code/server/sv_snapshot.c b/code/server/sv_snapshot.c
+index 93948e5..3cd18aa 100644
+--- a/code/server/sv_snapshot.c
++++ b/code/server/sv_snapshot.c
+@@ -960,6 +960,26 @@ static void SV_BuildCommonSnapshot( void )
+ 	for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
+ 		//index %= svs.numSnapshotEntities;
+ 		svs.snapshotEntities[ index ] = list[ i ]->s;
++
++		// Velocity-based entity smoothing for player entities.
++		// BG_PlayerStateToEntityState() sets TR_INTERPOLATE (no velocity) for
++		// all players. At higher sv_fps, fast direction changes produce visible
++		// stutter because the client lerps straight lines between positions.
++		// Override to TR_LINEAR_STOP with velocity so the client can smooth the
++		// path between snapshots — equivalent to BG_PlayerStateToEntityStateExtraPolate
++		// which exists in the QVM but is never called.
++		// trDuration = snapshot interval in ms (how long this velocity is valid).
++		// Only applied to active players (ET_PLAYER), not spectators/dead (ET_INVISIBLE).
++		if ( svs.snapshotEntities[ index ].number < MAX_CLIENTS
++			&& svs.snapshotEntities[ index ].eType == ET_PLAYER
++			&& svs.snapshotEntities[ index ].pos.trType == TR_INTERPOLATE ) {
++			int _snapMsec = 1000 / sv_fps->integer;
++			svs.snapshotEntities[ index ].pos.trType     = TR_LINEAR_STOP;
++			svs.snapshotEntities[ index ].pos.trTime     = svs.time;
++			svs.snapshotEntities[ index ].pos.trDuration = _snapMsec + 10; // small buffer
++			// trDelta (velocity) was already set by BG_PlayerStateToEntityState
++		}
++
+ 		sf->ents[ i ] = &svs.snapshotEntities[ index ];
+ 	}
+ }
+-- 
+2.43.0

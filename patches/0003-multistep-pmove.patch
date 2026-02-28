@@ -1,0 +1,60 @@
+From 7b0f3cad6f9dd472576488b269db0e0c7f0f3f7f Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Tue, 24 Feb 2026 11:48:47 -0500
+Subject: [PATCH] server: multi-step pmove clamping for long usercmd deltas
+
+Vanilla-path version of the pmove fix: clamp large usercmd deltas into
+multiple server-side ClientThink calls so Pmove never sees oversized steps.
+
+This rewrite only changes `SV_ClientThink` and keeps vanilla scheduling behavior.
+---
+ code/server/sv_client.c | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/code/server/sv_client.c b/code/server/sv_client.c
+index e29a517..d32b775 100644
+--- a/code/server/sv_client.c
++++ b/code/server/sv_client.c
+@@ -2188,6 +2188,40 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
+ 		return;		// may have been kicked during the last usercmd
+ 	}
+ 
++	// sv_pmoveMsec: enforce a maximum Pmove physics step size per usercmd.
++	// Equivalent to Q3's pmove_fixed but server-side.
++	// Bots excluded — they use 50ms steps from level.time and only get one
++	// ClientThink_real per game frame; clamping would cause warpy movement.
++	//
++	// When the real delta exceeds maxStep we fire multiple QVM calls, each
++	// advancing serverTime by maxStep. This means:
++	//   - Pmove always gets <= maxStep physics steps (correct collision/physics)
++	//   - ClientTimerActions accumulates the full real elapsed time across all
++	//     calls (bleed, bandage, inactivity timers all run at correct rate)
++	if ( sv_pmoveMsec && sv_pmoveMsec->integer > 0
++		&& cl->netchan.remoteAddress.type != NA_BOT ) {
++		int clNum    = cl - svs.clients;
++		int maxStep  = sv_pmoveMsec->integer;
++		int realTime = cl->lastUsercmd.serverTime;
++		int cmdTime  = SV_GameClientNum( clNum )->commandTime;
++		int delta    = realTime - cmdTime;
++
++		if ( delta > maxStep ) {
++			// Fire multiple clamped steps to consume the full delta.
++			// commandTime advances inside the QVM each call so we re-read it.
++			while ( realTime - SV_GameClientNum( clNum )->commandTime > maxStep ) {
++				cl->lastUsercmd.serverTime = SV_GameClientNum( clNum )->commandTime + maxStep;
++				VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++				if ( cl->state != CS_ACTIVE )
++					return; // kicked during think
++			}
++			// Final partial step to reach the real serverTime
++			cl->lastUsercmd.serverTime = realTime;
++			VM_Call( gvm, 1, GAME_CLIENT_THINK, clNum );
++			return;
++		}
++	}
++
+ 	VM_Call( gvm, 1, GAME_CLIENT_THINK, cl - svs.clients );
+ }
+ 
+-- 
+2.43.0

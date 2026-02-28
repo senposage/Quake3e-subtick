@@ -1,0 +1,68 @@
+From 4a1c1306cf9f5aeb59f4f8fd6dbde2c86d3c0f3f Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Tue, 24 Feb 2026 19:20:43 -0500
+Subject: [PATCH] server: dispatch snapshot issue/send per sv_fps tick (vanilla
+ path)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Move `SV_IssueNewSnapshot()` and `SV_SendClientMessages()` into the inner
+`sv_fps` tick loop so each engine tick gets its own snapshot-dispatch
+opportunity. This avoids packet cadence gaps when multiple ticks are consumed
+inside one `Com_Frame` due to scheduler jitter.
+
+This rewrite intentionally stays on the vanilla `sv_fps` path only.
+---
+ code/server/sv_main.c | 23 ++++++++++++++---------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+diff --git a/code/server/sv_main.c b/code/server/sv_main.c
+index 1958ae1..5b2bf7d 100644
+--- a/code/server/sv_main.c
++++ b/code/server/sv_main.c
+@@ -1532,8 +1532,13 @@ void SV_Frame( int msec ) {
+ #ifdef USE_MV
+     svs.emptyFrame = qtrue;
+ #endif
++
+ 	// run the game simulation in chunks
++	// Snapshot dispatch is inside this loop so each engine tick at sv_fps rate
++	// produces its own snapshot send opportunity. Without this, OS scheduler
++	// jitter can cause two ticks to fire in one Com_Frame with only one
++	// SV_SendClientMessages call, creating a double-interval gap.
+ 	while ( sv.timeResidual >= frameMsec ) {
+ 		sv.timeResidual -= frameMsec;
+ 		svs.time += frameMsec;
+@@ -1544,6 +1549,12 @@ void SV_Frame( int msec ) {
+ #endif
+ 		if ( com_dedicated->integer ) SV_BotFrame( sv.time );
+ 		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
++
++		// Issue and dispatch snapshots once per sv_fps tick, not once per
++		// outer Com_Frame. This keeps packet cadence aligned with server ticks.
++		SV_IssueNewSnapshot();
++		SV_SendClientMessages();
++
+ #ifdef USE_MV
+ 		svs.emptyFrame = qfalse; // ok, run recorder
+ #endif
+@@ -1554,15 +1565,9 @@ void SV_Frame( int msec ) {
+ 		time_game = Sys_Milliseconds () - startTime;
+ 	}
+ 
+-	// check timeouts
++	// check timeouts (once per Com_Frame is sufficient)
+ 	SV_CheckTimeouts();
+ 
+-	// reset current and build new snapshot on first query
+-	SV_IssueNewSnapshot();
+-
+-	// send messages back to the clients
+-	SV_SendClientMessages();
+-
+ #ifdef USE_MV
+     svs.emptyFrame = qfalse;
+     if ( sv_autoRecord->integer > 0 ) {
+-- 
+2.43.0
