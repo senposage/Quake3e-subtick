@@ -1,34 +1,8 @@
-From 0000000000000000000000000000000000000004 Mon Sep 17 00:00:00 2001
-From: senposage <onemoar@gmail.com>
-Date: Sat, 28 Feb 2026 00:00:00 -0500
-Subject: [PATCH 4/4] client: adaptive jitter tolerance and snapshot-interval scaling
-
-cl.snapshotMsec: EMA of measured snapshot intervals, bootstrapped from
-sv_snapshotFps in server info. Used to scale all time-sync thresholds.
-
-CL_AdjustTimeDelta: RESET_TIME = snapshotMsec*10 (min 200ms),
-fast-adjust threshold = snapshotMsec*2 (min 50ms), drift pullback
-stronger at high snapshot rates (-4ms/frame vs -2ms/frame).
-
-CL_SetCGameTime: serverTime clamped to snap.serverTime + snapshotMsec
-to prevent interpolation overshoot. Extrapolation detection margin
-scaled to snapshotMsec/3 (clamped [3,16]).
-
-Timedemo frame step uses snapshotMsec instead of hardcoded 50ms.
-Download throttle uses snapshotMsec instead of hardcoded 50ms.
-QVM cvar guard blocks cgame from setting snaps or cg_smoothClients.
-net_dropsim flagged CVAR_CHEAT to prevent abuse.
----
- code/client/cl_cgame.c | 64 +++++++++++++++++++++++++++++++++++++++++++++++++++++++---------
- code/client/cl_input.c | 9 ++++++---
- code/client/cl_parse.c | 27 +++++++++++++++++++++++++++-
- code/client/client.h   |  2 ++-
- code/qcommon/net_ip.c  |  2 +-
- 5 files changed, 91 insertions(+), 13 deletions(-)
-
+diff --git a/code/client/cl_cgame.c b/code/client/cl_cgame.c
+index d0e5fc2..51d9ebb 100644
 --- a/code/client/cl_cgame.c
 +++ b/code/client/cl_cgame.c
-@@ -572,6 +572,11 @@
+@@ -572,6 +572,11 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
  		Cvar_Update( VMA(1), cgvm->privateFlag );
  		return 0;
  	case CG_CVAR_SET:
@@ -40,7 +14,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  		Cvar_SetSafe( VMA(1), VMA(2) );
  		return 0;
  	case CG_CVAR_VARIABLESTRINGBUFFER:
-@@ -1034,11 +1039,23 @@
+@@ -1034,11 +1039,23 @@ or bursted delayed packets.
  =================
  */
  
@@ -66,7 +40,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  
  	cl.newSnapshots = qfalse;
  
-@@ -1050,14 +1067,14 @@
+@@ -1050,14 +1067,14 @@ static void CL_AdjustTimeDelta( void ) {
  	newDelta = cl.snap.serverTime - cls.realtime;
  	deltaDelta = abs( newDelta - cl.serverTimeDelta );
  
@@ -83,7 +57,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  		// fast adjust, cut the difference in half
  		if ( cl_showTimeDelta->integer ) {
  			Com_Printf( "<FAST> " );
-@@ -1072,7 +1089,13 @@
+@@ -1072,7 +1089,13 @@ static void CL_AdjustTimeDelta( void ) {
  		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
  			if ( cl.extrapolatedSnapshot ) {
  				cl.extrapolatedSnapshot = qfalse;
@@ -98,7 +72,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  			} else {
  				// otherwise, move our sense of time forward to minimize total latency
  				cl.serverTimeDelta++;
-@@ -1247,11 +1270,34 @@
+@@ -1247,11 +1270,34 @@ void CL_SetCGameTime( void ) {
  		}
  		cl.oldServerTime = cl.serverTime;
  
@@ -137,7 +111,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  		}
  	}
  
-@@ -1279,7 +1325,8 @@
+@@ -1279,7 +1325,8 @@ void CL_SetCGameTime( void ) {
  			clc.timeDemoStart = Sys_Milliseconds();
  		}
  		clc.timeDemoFrames++;
@@ -147,9 +121,11 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  	}
  
  	//while ( cl.serverTime >= cl.snap.serverTime ) {
+diff --git a/code/client/cl_input.c b/code/client/cl_input.c
+index 02fe488..c6ec744 100644
 --- a/code/client/cl_input.c
 +++ b/code/client/cl_input.c
-@@ -690,9 +690,12 @@
+@@ -690,9 +690,12 @@ static qboolean CL_ReadyToSendPacket( void ) {
  		return qfalse;
  	}
  
@@ -165,9 +141,11 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  	}
  
  	// if we don't have a valid gamestate yet, only send
+diff --git a/code/client/cl_parse.c b/code/client/cl_parse.c
+index 5fef16a..7213541 100644
 --- a/code/client/cl_parse.c
 +++ b/code/client/cl_parse.c
-@@ -474,6 +474,25 @@
+@@ -474,6 +474,25 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
  		cl.snapshots[ ( oldMessageNum + i ) & PACKET_MASK ].valid = qfalse;
  	}
  
@@ -193,7 +171,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  	// copy to the current good spot
  	cl.snap = newSnap;
  	cl.snap.ping = 999;
-@@ -667,6 +686,16 @@
+@@ -667,6 +686,16 @@ static void CL_ParseServerInfo( void )
  	len = strlen( clc.sv_dlURL );
  	if ( len > 0 &&  clc.sv_dlURL[len-1] == '/' )
  		clc.sv_dlURL[len-1] = '\0';
@@ -210,9 +188,11 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  }
  
  
+diff --git a/code/client/client.h b/code/client/client.h
+index 3c534a1..8589e8e 100644
 --- a/code/client/client.h
 +++ b/code/client/client.h
-@@ -122,6 +122,8 @@
+@@ -122,6 +122,8 @@ typedef struct {
  									// cleared when CL_AdjustTimeDelta looks at it
  	qboolean	newSnapshots;		// set on parse of any valid packet
  
@@ -221,7 +201,7 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  	gameState_t	gameState;			// configstrings
  	char		mapname[MAX_QPATH];	// extracted from CS_SERVERINFO
  
-@@ -429,6 +431,7 @@
+@@ -429,6 +431,7 @@ extern	cvar_t	*cl_shownet;
  extern	cvar_t	*cl_autoNudge;
  extern	cvar_t	*cl_timeNudge;
  extern	cvar_t	*cl_showTimeDelta;
@@ -229,9 +209,11 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
  
  extern	cvar_t	*com_timedemo;
  extern	cvar_t	*cl_aviFrameRate;
+diff --git a/code/qcommon/net_ip.c b/code/qcommon/net_ip.c
+index c0c92dc..72ac921 100644
 --- a/code/qcommon/net_ip.c
 +++ b/code/qcommon/net_ip.c
-@@ -1687,7 +1687,7 @@
+@@ -1687,7 +1687,7 @@ static qboolean NET_GetCvars( void ) {
      modified += net_socksPassword->modified;
  	net_socksPassword->modified = qfalse;
  
@@ -240,5 +222,3 @@ net_dropsim flagged CVAR_CHEAT to prevent abuse.
      Cvar_SetDescription(net_dropsim, "Simulate packet dropping events for debugging purposes in percent\nDefault: empty");
  
      return modified ? qtrue : qfalse;
--- 
-2.43.0

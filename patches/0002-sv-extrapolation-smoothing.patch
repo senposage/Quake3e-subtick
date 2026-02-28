@@ -1,25 +1,8 @@
-From 0000000000000000000000000000000000000002 Mon Sep 17 00:00:00 2001
-From: senposage <onemoar@gmail.com>
-Date: Sat, 28 Feb 2026 00:00:00 -0500
-Subject: [PATCH 2/4] server: engine-side position extrapolation and smoothing
-
-sv_extrapolate: real players use ps->origin directly (updated by Pmove
-every usercmd); bots use velocity extrapolation (trDelta * dt) since
-their ps->origin only updates at game-frame boundaries.
-
-sv_smoothClients: TR_LINEAR trajectory injection runs on every tick so
-cgame can continuously evaluate position. Runs even on game-frame ticks
-to prevent TR_INTERPOLATE interruption causing 50ms-period stutter.
-
-sv_bufferMs: per-client position ring-buffer with configurable delay.
-sv_velSmooth: velocity averaging window for TR_LINEAR mode.
----
- code/server/sv_snapshot.c | 313 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++----
- 1 file changed, 309 insertions(+), 4 deletions(-)
-
+diff --git a/code/server/sv_snapshot.c b/code/server/sv_snapshot.c
+index 599756f..109de29 100644
 --- a/code/server/sv_snapshot.c
 +++ b/code/server/sv_snapshot.c
-@@ -21,6 +21,238 @@
+@@ -21,6 +21,238 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
  
  #include "server.h"
@@ -258,7 +241,7 @@ sv_velSmooth: velocity averaging window for TR_LINEAR mode.
  
  
  /*
-@@ -956,10 +1188,138 @@
+@@ -956,10 +1188,138 @@ static void SV_BuildCommonSnapshot( void )
  
  	// setup start index
  	index = sf->start;
@@ -401,7 +384,7 @@ sv_velSmooth: velocity averaging window for TR_LINEAR mode.
  	}
  }
  
-@@ -1455,6 +1815,7 @@
+@@ -1455,6 +1815,7 @@ void SV_SendClientMessages( void )
  		// generate and send a new message
  		SV_SendClientSnapshot( c );
  		c->lastSnapshotTime = svs.time;
@@ -409,5 +392,3 @@ sv_velSmooth: velocity averaging window for TR_LINEAR mode.
  		c->rateDelayed = qfalse;
  	}
  }
--- 
-2.43.0

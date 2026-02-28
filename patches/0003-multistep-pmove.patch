@@ -1,22 +1,8 @@
-From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
-From: senposage <onemoar@gmail.com>
-Date: Sat, 28 Feb 2026 00:00:00 -0500
-Subject: [PATCH 3/4] server: multi-step pmove clamping and sv_snapshotFps policy
-
-sv_pmoveMsec: clamp large usercmd deltas into multiple GAME_CLIENT_THINK
-calls so Pmove never sees oversized steps. Bots excluded. Stall detection
-via goto single_call if commandTime doesn't advance (intermission/paused).
-
-sv_snapshotFps: -1 (default) means match sv_fps and live-tracks changes.
-0 falls back to per-client snaps userinfo. >0 sets explicit rate capped
-to sv_fps. QVM cvar guard blocks cgame from resetting snaps.
----
- code/server/sv_client.c | 106 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------
- 1 file changed, 93 insertions(+), 13 deletions(-)
-
+diff --git a/code/server/sv_client.c b/code/server/sv_client.c
+index de225ad..071fed2 100644
 --- a/code/server/sv_client.c
 +++ b/code/server/sv_client.c
-@@ -1772,8 +1772,18 @@
+@@ -1772,8 +1772,18 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
  	int	i;
  
  	if ( cl->netchan.remoteAddress.type == NA_BOT ) {
@@ -36,7 +22,7 @@ to sv_fps. QVM cvar guard blocks cgame from resetting snaps.
  		cl->rate = 0;
  		return;
  	}
-@@ -1802,20 +1812,26 @@
+@@ -1802,20 +1812,26 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
  		}
  	}
  
@@ -77,7 +63,7 @@ to sv_fps. QVM cvar guard blocks cgame from resetting snaps.
  
  	if ( i != cl->snapshotMsec )
  	{
-@@ -2192,6 +2208,70 @@
+@@ -2192,6 +2208,70 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
  		return;		// may have been kicked during the last usercmd
  	}
  
@@ -148,5 +134,3 @@ to sv_fps. QVM cvar guard blocks cgame from resetting snaps.
  	VM_Call( gvm, 1, GAME_CLIENT_THINK, cl - svs.clients );
  }
  
--- 
-2.43.0

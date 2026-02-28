@@ -1,468 +1,7 @@
-From 0000000000000000000000000000000000000001 Mon Sep 17 00:00:00 2001
-From: senposage <onemoar@gmail.com>
-Date: Sat, 28 Feb 2026 00:00:00 -0500
-Subject: [PATCH 1/4] server: dual-rate frame loop, sv_gameHz, antilag, snapshot dispatch
-
-Decouples the engine tick rate (sv_fps) from the QVM game logic rate
-(sv_gameHz). Adds engine-side antilag, per-tick snapshot dispatch,
-bot frame clock fix, sv_snapshotFps -1 sentinel, and map restart
-game clock sync.
-
-New files: sv_antilag.c, sv_antilag.h
----
- code/server/sv_antilag.c | 687 ++++++++++++++++++++++++++++++++++++++
- code/server/sv_antilag.h | 48 +++++++++++++++++++++++++++++
- code/server/sv_bot.c     |  2 +-
- code/server/sv_ccmds.c   |  8 ++++++--
- code/server/sv_init.c    |  63 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++------
- code/server/sv_main.c    |  135 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------
- 6 files changed, 908 insertions(+), 35 deletions(-)
-
---- a/code/server/sv_main.c
-+++ b/code/server/sv_main.c
-@@ -21,12 +21,21 @@
- */
- 
- #include "server.h"
-+#include "sv_antilag.h"
- 
- serverStatic_t	svs;				// persistant server info
- server_t		sv;					// local server
- vm_t			*gvm = NULL;		// game virtual machine
- 
- cvar_t	*sv_fps;				// time rate for running non-clients
-+cvar_t	*sv_gameHz;				// rate at which level.time advances, independent of sv_fps
-+cvar_t	*sv_snapshotFps;			// max snapshot send rate, independent of sv_fps
-+cvar_t	*sv_busyWait;				// spin last N ms before frame instead of sleeping, for precise timing at high sv_fps
-+cvar_t	*sv_pmoveMsec;				// max physics step size, enforces consistent movement regardless of client framerate
-+cvar_t	*sv_extrapolate;			// engine-side position correction for high sv_fps snapshots
-+cvar_t	*sv_smoothClients;			// TR_LINEAR trajectory trick for smoother client rendering
-+cvar_t	*sv_bufferMs;				// per-client position ring buffer delay (ms)
-+cvar_t	*sv_velSmooth;				// velocity smoothing window (ms) for TR_LINEAR mode
- cvar_t	*sv_timeout;			// seconds without any message
- cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
- cvar_t	*sv_rconPassword;		// password for remote server commands
-@@ -1279,13 +1288,24 @@
- 	if ( sv_fps )
- 	{
- 		int frameMsec;
--		
-+		int timeLeft;
-+		int spinMs;
-+
- 		frameMsec = 1000.0f / sv_fps->value;
--		
-+
- 		if ( frameMsec < sv.timeResidual )
- 			return 0;
--		else
--			return frameMsec - sv.timeResidual;
-+
-+		timeLeft = frameMsec - sv.timeResidual;
-+
-+		// If sv_busyWait is set, spin (return 0) for the last N ms before
-+		// the frame is due, giving precise wakeup without OS sleep jitter.
-+		// Costs ~1 CPU core but eliminates stutter at high sv_fps.
-+		spinMs = sv_busyWait ? sv_busyWait->integer : 0;
-+		if ( spinMs > 0 && timeLeft <= spinMs )
-+			return 0;
-+
-+		return timeLeft;
- 	}
- 	else
- 		return 1;
-@@ -1312,15 +1332,44 @@
- 		Com_DPrintf( "sv_minRate adjusted to 1000\n" );
- 	}
- 
--	Cvar_ResetGroup( CVG_SERVER, qfalse );
-+	// When sv_fps changes at runtime, clamp the time residual so it doesn't
-+	// represent more than one frame at the new rate — prevents double-ticking
-+	// or a stall on the first frame after the change.
-+	if ( sv_fps->modified || sv_snapshotFps->modified ) {
-+		qboolean fpsChanged = sv_fps->modified;
-+		int newFrameMsec = 1000 / sv_fps->integer;
-+
-+		if ( fpsChanged ) {
-+			// Clamp residual to just under one frame at the new rate.
-+			// Prevents burst-ticking when going from low to high sv_fps
-+			// (e.g. 20->125: residual of 49ms would fire 6 frames at once).
-+			if ( sv.timeResidual < 0 )
-+				sv.timeResidual = 0;
-+			if ( sv.timeResidual >= newFrameMsec )
-+				sv.timeResidual = newFrameMsec - 1;
-+			// NOTE: do NOT reset sv.gameTimeResidual here. sv_gameHz doesn't
-+			// change, so the accumulated game frame progress is still valid.
-+			// Resetting it throws away up to 49ms of progress, causing a gap
-+			// where no game frame fires — visible as bot/entity stutter.
-+			Com_DPrintf( "sv_fps changed to %d — timeResidual clamped\n", sv_fps->integer );
-+		}
- 
--	if ( sv.state == SS_DEAD || !svs.clients )
--		return;
-+		sv_fps->modified = qfalse;
-+		sv_snapshotFps->modified = qfalse;
- 
--	for ( i = 0, cl = svs.clients; i < sv_maxclients->integer; i++, cl++ ) {
--		if ( cl->state >= CS_CONNECTED ) {
--			SV_UserinfoChanged( cl, qfalse, qfalse ); // do not update userinfo, do not run filter
-+		Cvar_ResetGroup( CVG_SERVER, qfalse );
-+
-+		if ( sv.state == SS_DEAD || !svs.clients )
-+			return;
-+
-+		// Recalculate snapshotMsec for all clients when fps or snapshot rate changes
-+		for ( i = 0, cl = svs.clients; i < sv_maxclients->integer; i++, cl++ ) {
-+			if ( cl->state >= CS_CONNECTED ) {
-+				SV_UserinfoChanged( cl, qfalse, qfalse );
-+			}
- 		}
-+	} else {
-+		Cvar_ResetGroup( CVG_SERVER, qfalse );
- 	}
- }
- 
-@@ -1346,6 +1395,8 @@
- 	}
- 
- 	sv.time = 0; // force level time reset
-+	sv.gameTime = 0;
-+	sv.gameTimeResidual = 0;
- 	sv.restartTime = 0;
- 	
- 	Cvar_VariableStringBuffer( "mapname", mapName, sizeof( mapName ) );
-@@ -1371,7 +1422,7 @@
- 	int		startTime;
- 	int		i, n;
- 
--	if ( Cvar_CheckGroup( CVG_SERVER ) )
-+	if ( Cvar_CheckGroup( CVG_SERVER ) || sv_fps->modified )
- 		SV_TrackCvarChanges(); // update rate settings, etc.
- 
- 	// the menu kills the server with this cvar
-@@ -1410,8 +1461,11 @@
- 
- 	sv.timeResidual += msec;
- 
--	if ( !com_dedicated->integer )
--		SV_BotFrame( sv.time + sv.timeResidual );
-+	// Hard clamp: never accumulate more than one frame worth of residual.
-+	// Prevents burst-ticking after sv_fps changes regardless of whether
-+	// the modified flag was caught. Safe to do every frame.
-+	if ( sv.timeResidual >= frameMsec * 2 )
-+		sv.timeResidual = frameMsec - 1;
- 
- 	// if time is about to hit the 32nd bit, kick all clients
- 	// and clear sv.time, rather
-@@ -1479,40 +1533,77 @@
- 	// update ping based on the all received frames
- 	SV_CalcPings();
- 
--	if (com_dedicated->integer) SV_BotFrame (sv.time);
--
--#ifdef USE_MV
--    svs.emptyFrame = qtrue;
--#endif
- 
- 	// run the game simulation in chunks
-+	// Snapshot dispatch is inside this loop so each engine tick at sv_fps rate produces
-+	// its own snapshot send opportunity. Without this, OS scheduler jitter can cause
-+	// two ticks to fire in one Com_Frame with only one SV_SendClientMessages call,
-+	// creating a double-interval gap visible in the netgraph as late packets.
- 	while ( sv.timeResidual >= frameMsec ) {
- 		sv.timeResidual -= frameMsec;
- 		svs.time += frameMsec;
- 		sv.time += frameMsec;
- 
--		// let everything in the world think and move
--		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
-+		// --- Engine-side shadow antilag sub-ticks ---
-+		if ( sv_antilagEnable && sv_antilagEnable->integer ) {
-+			int _scale = sv_physicsScale ? sv_physicsScale->integer : 1;
-+			int _s;
-+			if ( _scale < 1 ) _scale = 1;
-+			if ( _scale > 8 ) _scale = 8;
-+			for ( _s = 0; _s < _scale; _s++ ) {
-+				SV_Antilag_RecordPositions();
-+			}
-+		}
-+
-+		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
-+		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
-+		// sv_gameHz 0 = disabled, falls back to sv_fps.
-+		{
-+			int _gameHz = (sv_gameHz && sv_gameHz->integer > 0) ? sv_gameHz->integer : sv_fps->integer;
-+			int _gameMsec;
-+			if ( _gameHz < 1 )               _gameHz = 1;
-+			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
-+			_gameMsec = 1000 / _gameHz;
-+			sv.gameTimeResidual += frameMsec;
-+#ifdef USE_MV
-+			svs.emptyFrame = qtrue; // assume no game frame this sv_fps tick; cleared below if one fires
-+#endif
-+			while ( sv.gameTimeResidual >= _gameMsec ) {
-+				sv.gameTimeResidual -= _gameMsec;
-+				sv.gameTime += _gameMsec;
-+				// Bot AI ticks in lockstep with GAME_RUN_FRAME at sv_gameHz rate.
-+				SV_BotFrame( sv.gameTime );
-+				VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
- #ifdef USE_MV
--		svs.emptyFrame = qfalse; // ok, run recorder
-+				svs.emptyFrame = qfalse; // game frame fired — allow multiview recorder this tick
- #endif
-+			}
-+		}
-+
-+		// Record positions into smooth buffer when either feature is enabled.
-+		// sv_bufferMs = position delay, sv_velSmooth = velocity smoothing.
-+		// Ring buffer feeds both — record when either is non-zero.
-+		if ( ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) )
-+				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
-+				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
-+			SV_SmoothRecordAll();
-+		}
-+
-+		// Issue and dispatch snapshots once per sv_fps tick, not once per Com_Frame.
-+		// This ensures clients receive packets at the true tick rate regardless of
-+		// how many ticks fire per real-world Com_Frame call.
-+		SV_IssueNewSnapshot();
-+		SV_SendClientMessages();
- 	}
- 
- 	if ( com_speeds->integer ) {
- 		time_game = Sys_Milliseconds () - startTime;
- 	}
- 
--	// check timeouts
-+	// check timeouts (once per Com_Frame is sufficient)
- 	SV_CheckTimeouts();
- 
--	// reset current and build new snapshot on first query
--	SV_IssueNewSnapshot();
--
--	// send messages back to the clients
--	SV_SendClientMessages();
--
- #ifdef USE_MV
--    svs.emptyFrame = qfalse;
-     if ( sv_autoRecord->integer > 0 ) {
-         if ( sv_demoFile == FS_INVALID_HANDLE ) {
-             if ( SV_FindActiveClient( qtrue, -1, sv_autoRecord->integer ) >= 0 ) {
---- a/code/server/sv_init.c
-+++ b/code/server/sv_init.c
-@@ -21,6 +21,7 @@
- */
- 
- #include "server.h"
-+#include "sv_antilag.h"
- 
- 
- /*
-@@ -604,6 +605,8 @@
- 
- 	// make sure that level time is not zero
- 	sv.time = sv.time ? sv.time : 8;
-+	sv.gameTime = sv.time;
-+	sv.gameTimeResidual = 0;
- 
- 	// load and spawn all other entities
- 	SV_InitGameProgs();
-@@ -617,8 +620,9 @@
- 	for ( i = 0; i < 3; i++ )
- 	{
- 		sv.time += 100;
--		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
--		SV_BotFrame( sv.time );
-+		sv.gameTime += 100;
-+		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
-+		SV_BotFrame( sv.gameTime );
- 	}
- 
- 	// create a baseline for more efficient communications
-@@ -679,8 +683,9 @@
- 
- 	// run another frame to allow things to look at all the players
- 	sv.time += 100;
--	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
--	SV_BotFrame( sv.time );
-+	sv.gameTime += 100;
-+	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
-+	SV_BotFrame( sv.gameTime );
- 	svs.time += 100;
- 
- 	// we need to touch the cgame and ui qvm because they could be in
-@@ -877,8 +882,52 @@
-     sv_privatePassword = Cvar_Get ("sv_privatePassword", "", CVAR_TEMP );
-     Cvar_SetDescription(sv_privatePassword, "Set password for private clients to login\nDefault: empty");
- 
--    sv_fps = Cvar_Get ("sv_fps", "20", CVAR_TEMP | CVAR_PROTECTED );
--    Cvar_SetDescription(sv_fps, "Set the max frames per second the server sends the client\nDefault: 20");
-+    sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED );
-+
-+    sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
-+    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nKeep at 20 to match UT4.3 timer expectations. Never set higher than sv_fps.\n0 = disabled, falls back to sv_fps.\nDefault: 20");
-+
-+    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "-1", CVAR_ARCHIVE | CVAR_SERVERINFO );
-+    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients.\n-1 = match sv_fps (default, live-tracks sv_fps changes).\n 0 = fall back to per-client 'snaps' userinfo (vanilla Q3 behavior).\n>0 = explicit rate, capped to sv_fps.\nDefault: -1");
-+
-+    sv_busyWait = Cvar_Get ("sv_busyWait", "0", CVAR_ARCHIVE );
-+    Cvar_SetDescription(sv_busyWait, "Spin for last N milliseconds before each frame instead of sleeping.\nEliminates OS scheduler jitter at the cost of ~1 CPU core at 100pct.\nThe timeResidual clamping fix makes this unnecessary in normal operation.\nOnly enable if you observe measurable frame timing jitter on your specific hardware.\nDefault: 0 (disabled)");
-+
-+    sv_pmoveMsec = Cvar_Get ("sv_pmoveMsec", "8", CVAR_ARCHIVE | CVAR_SERVERINFO );
-+    Cvar_SetDescription(sv_pmoveMsec, "Maximum physics step size in milliseconds. Enforces consistent movement\nregardless of client framerate. 8=125fps equivalent. 0=disabled.\nDefault: 8");
-+    Cvar_SetDescription(sv_fps, "Engine tick and input sampling rate (Hz). Higher values give finer input resolution.\nDefault: 60");
-+
-+    sv_extrapolate = Cvar_Get ("sv_extrapolate", "1", CVAR_ARCHIVE );
-+    Cvar_SetDescription(sv_extrapolate, "Engine-side position correction for high sv_fps snapshots.\n"
-+        "0 = disabled (vanilla: players stutter when sv_fps > sv_gameHz)\n"
-+        "1 = enabled (real players use actual Pmove position, bots use velocity extrapolation)\n"
-+        "Interpolation windows: sv_fps 20=50ms, 60=16.7ms, 90=11.1ms, 125=8ms\n"
-+        "Default: 1");
-+
-+    sv_smoothClients = Cvar_Get ("sv_smoothClients", "0", CVAR_ARCHIVE );
-+    Cvar_SetDescription(sv_smoothClients, "Set player trajectory type to TR_LINEAR for smoother client rendering.\n"
-+        "0 = TR_INTERPOLATE (cgame lerps between snapshot positions)\n"
-+        "1 = TR_LINEAR (cgame evaluates trBase + trDelta*dt continuously)\n"
-+        "Works independently of sv_extrapolate. Experimental.\n"
-+        "sv_bufferMs 0 = no position latency (trBase = current ps->origin).\n"
-+        "Default: 0");
-+
-+    sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
-+    Cvar_SetDescription(sv_bufferMs, "Per-client position delay in milliseconds.\n"
-+        "Requires sv_extrapolate 1 or sv_smoothClients 1 — has no effect in vanilla mode (both 0).\n"
-+        "0 = disabled (use latest position, no extra latency)\n"
-+        "-1 = auto (1000/sv_fps = one snapshot interval, minimum for clean interpolation)\n"
-+        "     sv_fps 20: 50ms, sv_fps 40: 25ms, sv_fps 60: 16ms, sv_fps 80: 12ms, sv_fps 100: 10ms\n"
-+        "1-100 = manual delay — trades latency for position stability\n"
-+        "Default: 0");
-+
-+    sv_velSmooth = Cvar_Get ("sv_velSmooth", "32", CVAR_ARCHIVE );
-+    Cvar_SetDescription(sv_velSmooth, "Velocity smoothing window in milliseconds.\n"
-+        "Requires sv_smoothClients 1 (TR_LINEAR mode) — has no effect otherwise.\n"
-+        "Averages player velocity over the last N ms from the ring buffer.\n"
-+        "Reduces sawtooth artifacts from rapid direction changes.\n"
-+        "0 = disabled (use raw velocity)\n"
-+        "Default: 32");
- 
-     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
- 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
-@@ -958,11 +1007,22 @@
- 	Cvar_SetGroup( sv_minRate, CVG_SERVER );
- 	Cvar_SetGroup( sv_maxRate, CVG_SERVER );
- 	Cvar_SetGroup( sv_fps, CVG_SERVER );
-+	Cvar_SetGroup( sv_gameHz, CVG_SERVER );
-+	Cvar_SetGroup( sv_snapshotFps, CVG_SERVER );
-+	Cvar_SetGroup( sv_busyWait, CVG_SERVER );
-+	Cvar_SetGroup( sv_pmoveMsec, CVG_SERVER );
-+	Cvar_SetGroup( sv_extrapolate, CVG_SERVER );
-+	Cvar_SetGroup( sv_smoothClients, CVG_SERVER );
-+	Cvar_SetGroup( sv_bufferMs, CVG_SERVER );
-+	Cvar_SetGroup( sv_velSmooth, CVG_SERVER );
- 
- 	// force initial check
- 	SV_TrackCvarChanges();
- 
- 	SV_InitChallenger();
-+
-+	SV_Antilag_Init();
-+	SV_SmoothInit();
- }
- 
- 
---- a/code/server/sv_bot.c
-+++ b/code/server/sv_bot.c
-@@ -63,7 +63,7 @@
- 	cl->gentity->s.number = i;
- 	cl->state = CS_ACTIVE;
- 	cl->lastPacketTime = svs.time;
--	cl->snapshotMsec = 1000 / sv_fps->integer;
-+	{ int _sc = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer; if (_sc > sv_fps->integer) _sc = sv_fps->integer; if (_sc < 1) _sc = 1; cl->snapshotMsec = 1000 / _sc; }
- 	cl->netchan.remoteAddress.type = NA_BOT;
- 	cl->rate = 0;
- 
---- a/code/server/sv_ccmds.c
-+++ b/code/server/sv_ccmds.c
-@@ -319,6 +319,8 @@
- 
- 	// make sure that level time is not zero
- 	sv.time = sv.time ? sv.time : 8;
-+	sv.gameTime = sv.time;
-+	sv.gameTimeResidual = 0;
- 
- 	SV_RestartGameProgs();
- 
-@@ -326,7 +328,8 @@
- 	for ( i = 0; i < 3; i++ )
- 	{
- 		sv.time += 100;
--		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
-+		sv.gameTime += 100;
-+		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
- 	}
- 
- 	sv.state = SS_GAME;
-@@ -372,7 +375,8 @@
- 
- 	// run another frame to allow things to look at all the players
- 	sv.time += 100;
--	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
-+	sv.gameTime += 100;
-+	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
- 	svs.time += 100;
- }
- 
---- a/code/server/sv_antilag.h
-+++ b/code/server/sv_antilag.h
-@@ -0,0 +1,48 @@
-+/*
-+===========================================================================
-+sv_antilag.h - Engine-side shadow antilag system
-+
-+Included by sv_main.c, sv_game.c, sv_init.c.
-+server.h must be included before this header in each .c file.
-+===========================================================================
-+*/
-+
-+#ifndef SV_ANTILAG_H
-+#define SV_ANTILAG_H
-+
-+#define SV_ANTILAG_MAX_HISTORY_SLOTS    256  // 256 slots: covers 200ms at up to 1000Hz shadow rate
-+#define SV_ANTILAG_HISTORY_WINDOW_MS    300
-+#define SV_ANTILAG_MAX_REWIND_MS        200
-+
-+// Cvars — registered by SV_Antilag_Init(), accessible after that call
-+extern cvar_t *sv_antilagEnable;
-+extern cvar_t *sv_physicsScale;
-+extern cvar_t *sv_antilagMaxMs;
-+extern cvar_t *sv_antilagTraceLog;
-+extern cvar_t *sv_snapRateLog;
-+
-+// Called once at server init — registers cvars, resets state
-+void        SV_Antilag_Init( void );
-+
-+// Called from SV_Frame() before GAME_RUN_FRAME, sv_physicsScale times per game tick.
-+// Records all active client positions into engine-side shadow history.
-+// Completely decoupled from level.time and QVM.
-+void        SV_Antilag_RecordPositions( void );
-+void        SV_Antilag_NoteSnapshot( int clientNum );
-+
-+// Called from G_TRACE / G_TRACECAPSULE syscall handler in sv_game.c.
-+// Transparently rewinds clients to shooter's fire time, runs trace, restores all.
-+// Returns qtrue if the intercept ran (caller should NOT call SV_Trace again).
-+// Returns qfalse if conditions not met (caller calls SV_Trace normally).
-+qboolean    SV_Antilag_InterceptTrace(
-+                trace_t     *results,
-+                const vec3_t start,
-+                const vec3_t mins,
-+                const vec3_t maxs,
-+                const vec3_t end,
-+                int         passEntityNum,
-+                int         contentmask,
-+                qboolean    capsule
-+            );
-+
-+#endif // SV_ANTILAG_H
---- a/code/server/sv_antilag.c
+diff --git a/code/server/sv_antilag.c b/code/server/sv_antilag.c
+new file mode 100644
+index 0000000..21a74c1
+--- /dev/null
 +++ b/code/server/sv_antilag.c
 @@ -0,0 +1,687 @@
 +/*
@@ -1152,5 +691,458 @@ New files: sv_antilag.c, sv_antilag.h
 +
 +    return qtrue; // we handled it, caller should not call SV_Trace again
 +}
--- 
-2.43.0
+diff --git a/code/server/sv_antilag.h b/code/server/sv_antilag.h
+new file mode 100644
+index 0000000..e68ffb5
+--- /dev/null
++++ b/code/server/sv_antilag.h
+@@ -0,0 +1,48 @@
++/*
++===========================================================================
++sv_antilag.h - Engine-side shadow antilag system
++
++Included by sv_main.c, sv_game.c, sv_init.c.
++server.h must be included before this header in each .c file.
++===========================================================================
++*/
++
++#ifndef SV_ANTILAG_H
++#define SV_ANTILAG_H
++
++#define SV_ANTILAG_MAX_HISTORY_SLOTS    256  // 256 slots: covers 200ms at up to 1000Hz shadow rate
++#define SV_ANTILAG_HISTORY_WINDOW_MS    300
++#define SV_ANTILAG_MAX_REWIND_MS        200
++
++// Cvars — registered by SV_Antilag_Init(), accessible after that call
++extern cvar_t *sv_antilagEnable;
++extern cvar_t *sv_physicsScale;
++extern cvar_t *sv_antilagMaxMs;
++extern cvar_t *sv_antilagTraceLog;
++extern cvar_t *sv_snapRateLog;
++
++// Called once at server init — registers cvars, resets state
++void        SV_Antilag_Init( void );
++
++// Called from SV_Frame() before GAME_RUN_FRAME, sv_physicsScale times per game tick.
++// Records all active client positions into engine-side shadow history.
++// Completely decoupled from level.time and QVM.
++void        SV_Antilag_RecordPositions( void );
++void        SV_Antilag_NoteSnapshot( int clientNum );
++
++// Called from G_TRACE / G_TRACECAPSULE syscall handler in sv_game.c.
++// Transparently rewinds clients to shooter's fire time, runs trace, restores all.
++// Returns qtrue if the intercept ran (caller should NOT call SV_Trace again).
++// Returns qfalse if conditions not met (caller calls SV_Trace normally).
++qboolean    SV_Antilag_InterceptTrace(
++                trace_t     *results,
++                const vec3_t start,
++                const vec3_t mins,
++                const vec3_t maxs,
++                const vec3_t end,
++                int         passEntityNum,
++                int         contentmask,
++                qboolean    capsule
++            );
++
++#endif // SV_ANTILAG_H
+diff --git a/code/server/sv_bot.c b/code/server/sv_bot.c
+index cfb5776..73b27df 100644
+--- a/code/server/sv_bot.c
++++ b/code/server/sv_bot.c
+@@ -63,7 +63,7 @@ int SV_BotAllocateClient( void ) {
+ 	cl->gentity->s.number = i;
+ 	cl->state = CS_ACTIVE;
+ 	cl->lastPacketTime = svs.time;
+-	cl->snapshotMsec = 1000 / sv_fps->integer;
++	{ int _sc = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer; if (_sc > sv_fps->integer) _sc = sv_fps->integer; if (_sc < 1) _sc = 1; cl->snapshotMsec = 1000 / _sc; }
+ 	cl->netchan.remoteAddress.type = NA_BOT;
+ 	cl->rate = 0;
+ 
+diff --git a/code/server/sv_ccmds.c b/code/server/sv_ccmds.c
+index 2bb708b..c5000c4 100644
+--- a/code/server/sv_ccmds.c
++++ b/code/server/sv_ccmds.c
+@@ -319,6 +319,8 @@ static void SV_MapRestart_f( void ) {
+ 
+ 	// make sure that level time is not zero
+ 	sv.time = sv.time ? sv.time : 8;
++	sv.gameTime = sv.time;
++	sv.gameTimeResidual = 0;
+ 
+ 	SV_RestartGameProgs();
+ 
+@@ -326,7 +328,8 @@ static void SV_MapRestart_f( void ) {
+ 	for ( i = 0; i < 3; i++ )
+ 	{
+ 		sv.time += 100;
+-		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
++		sv.gameTime += 100;
++		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
+ 	}
+ 
+ 	sv.state = SS_GAME;
+@@ -372,7 +375,8 @@ static void SV_MapRestart_f( void ) {
+ 
+ 	// run another frame to allow things to look at all the players
+ 	sv.time += 100;
+-	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
++	sv.gameTime += 100;
++	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
+ 	svs.time += 100;
+ }
+ 
+diff --git a/code/server/sv_init.c b/code/server/sv_init.c
+index 43093ac..a236613 100644
+--- a/code/server/sv_init.c
++++ b/code/server/sv_init.c
+@@ -21,6 +21,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+ 
+ #include "server.h"
++#include "sv_antilag.h"
+ 
+ 
+ /*
+@@ -604,6 +605,8 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
+ 
+ 	// make sure that level time is not zero
+ 	sv.time = sv.time ? sv.time : 8;
++	sv.gameTime = sv.time;
++	sv.gameTimeResidual = 0;
+ 
+ 	// load and spawn all other entities
+ 	SV_InitGameProgs();
+@@ -617,8 +620,9 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
+ 	for ( i = 0; i < 3; i++ )
+ 	{
+ 		sv.time += 100;
+-		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
+-		SV_BotFrame( sv.time );
++		sv.gameTime += 100;
++		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
++		SV_BotFrame( sv.gameTime );
+ 	}
+ 
+ 	// create a baseline for more efficient communications
+@@ -679,8 +683,9 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
+ 
+ 	// run another frame to allow things to look at all the players
+ 	sv.time += 100;
+-	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
+-	SV_BotFrame( sv.time );
++	sv.gameTime += 100;
++	VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
++	SV_BotFrame( sv.gameTime );
+ 	svs.time += 100;
+ 
+ 	// we need to touch the cgame and ui qvm because they could be in
+@@ -877,8 +882,52 @@ void SV_Init( void )
+     sv_privatePassword = Cvar_Get ("sv_privatePassword", "", CVAR_TEMP );
+     Cvar_SetDescription(sv_privatePassword, "Set password for private clients to login\nDefault: empty");
+ 
+-    sv_fps = Cvar_Get ("sv_fps", "20", CVAR_TEMP | CVAR_PROTECTED );
+-    Cvar_SetDescription(sv_fps, "Set the max frames per second the server sends the client\nDefault: 20");
++    sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED );
++
++    sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
++    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nKeep at 20 to match UT4.3 timer expectations. Never set higher than sv_fps.\n0 = disabled, falls back to sv_fps.\nDefault: 20");
++
++    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "-1", CVAR_ARCHIVE | CVAR_SERVERINFO );
++    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients.\n-1 = match sv_fps (default, live-tracks sv_fps changes).\n 0 = fall back to per-client 'snaps' userinfo (vanilla Q3 behavior).\n>0 = explicit rate, capped to sv_fps.\nDefault: -1");
++
++    sv_busyWait = Cvar_Get ("sv_busyWait", "0", CVAR_ARCHIVE );
++    Cvar_SetDescription(sv_busyWait, "Spin for last N milliseconds before each frame instead of sleeping.\nEliminates OS scheduler jitter at the cost of ~1 CPU core at 100pct.\nThe timeResidual clamping fix makes this unnecessary in normal operation.\nOnly enable if you observe measurable frame timing jitter on your specific hardware.\nDefault: 0 (disabled)");
++
++    sv_pmoveMsec = Cvar_Get ("sv_pmoveMsec", "8", CVAR_ARCHIVE | CVAR_SERVERINFO );
++    Cvar_SetDescription(sv_pmoveMsec, "Maximum physics step size in milliseconds. Enforces consistent movement\nregardless of client framerate. 8=125fps equivalent. 0=disabled.\nDefault: 8");
++    Cvar_SetDescription(sv_fps, "Engine tick and input sampling rate (Hz). Higher values give finer input resolution.\nDefault: 60");
++
++    sv_extrapolate = Cvar_Get ("sv_extrapolate", "1", CVAR_ARCHIVE );
++    Cvar_SetDescription(sv_extrapolate, "Engine-side position correction for high sv_fps snapshots.\n"
++        "0 = disabled (vanilla: players stutter when sv_fps > sv_gameHz)\n"
++        "1 = enabled (real players use actual Pmove position, bots use velocity extrapolation)\n"
++        "Interpolation windows: sv_fps 20=50ms, 60=16.7ms, 90=11.1ms, 125=8ms\n"
++        "Default: 1");
++
++    sv_smoothClients = Cvar_Get ("sv_smoothClients", "0", CVAR_ARCHIVE );
++    Cvar_SetDescription(sv_smoothClients, "Set player trajectory type to TR_LINEAR for smoother client rendering.\n"
++        "0 = TR_INTERPOLATE (cgame lerps between snapshot positions)\n"
++        "1 = TR_LINEAR (cgame evaluates trBase + trDelta*dt continuously)\n"
++        "Works independently of sv_extrapolate. Experimental.\n"
++        "sv_bufferMs 0 = no position latency (trBase = current ps->origin).\n"
++        "Default: 0");
++
++    sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
++    Cvar_SetDescription(sv_bufferMs, "Per-client position delay in milliseconds.\n"
++        "Requires sv_extrapolate 1 or sv_smoothClients 1 — has no effect in vanilla mode (both 0).\n"
++        "0 = disabled (use latest position, no extra latency)\n"
++        "-1 = auto (1000/sv_fps = one snapshot interval, minimum for clean interpolation)\n"
++        "     sv_fps 20: 50ms, sv_fps 40: 25ms, sv_fps 60: 16ms, sv_fps 80: 12ms, sv_fps 100: 10ms\n"
++        "1-100 = manual delay — trades latency for position stability\n"
++        "Default: 0");
++
++    sv_velSmooth = Cvar_Get ("sv_velSmooth", "32", CVAR_ARCHIVE );
++    Cvar_SetDescription(sv_velSmooth, "Velocity smoothing window in milliseconds.\n"
++        "Requires sv_smoothClients 1 (TR_LINEAR mode) — has no effect otherwise.\n"
++        "Averages player velocity over the last N ms from the ring buffer.\n"
++        "Reduces sawtooth artifacts from rapid direction changes.\n"
++        "0 = disabled (use raw velocity)\n"
++        "Default: 32");
+ 
+     //Cvar_CheckRange( sv_fps, "20", "125", CV_INTEGER );
+ 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
+@@ -958,11 +1007,22 @@ void SV_Init( void )
+ 	Cvar_SetGroup( sv_minRate, CVG_SERVER );
+ 	Cvar_SetGroup( sv_maxRate, CVG_SERVER );
+ 	Cvar_SetGroup( sv_fps, CVG_SERVER );
++	Cvar_SetGroup( sv_gameHz, CVG_SERVER );
++	Cvar_SetGroup( sv_snapshotFps, CVG_SERVER );
++	Cvar_SetGroup( sv_busyWait, CVG_SERVER );
++	Cvar_SetGroup( sv_pmoveMsec, CVG_SERVER );
++	Cvar_SetGroup( sv_extrapolate, CVG_SERVER );
++	Cvar_SetGroup( sv_smoothClients, CVG_SERVER );
++	Cvar_SetGroup( sv_bufferMs, CVG_SERVER );
++	Cvar_SetGroup( sv_velSmooth, CVG_SERVER );
+ 
+ 	// force initial check
+ 	SV_TrackCvarChanges();
+ 
+ 	SV_InitChallenger();
++
++	SV_Antilag_Init();
++	SV_SmoothInit();
+ }
+ 
+ 
+diff --git a/code/server/sv_main.c b/code/server/sv_main.c
+index 1ffba50..36ac25b 100644
+--- a/code/server/sv_main.c
++++ b/code/server/sv_main.c
+@@ -21,12 +21,21 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+ 
+ #include "server.h"
++#include "sv_antilag.h"
+ 
+ serverStatic_t	svs;				// persistant server info
+ server_t		sv;					// local server
+ vm_t			*gvm = NULL;		// game virtual machine
+ 
+ cvar_t	*sv_fps;				// time rate for running non-clients
++cvar_t	*sv_gameHz;				// rate at which level.time advances, independent of sv_fps
++cvar_t	*sv_snapshotFps;			// max snapshot send rate, independent of sv_fps
++cvar_t	*sv_busyWait;				// spin last N ms before frame instead of sleeping, for precise timing at high sv_fps
++cvar_t	*sv_pmoveMsec;				// max physics step size, enforces consistent movement regardless of client framerate
++cvar_t	*sv_extrapolate;			// engine-side position correction for high sv_fps snapshots
++cvar_t	*sv_smoothClients;			// TR_LINEAR trajectory trick for smoother client rendering
++cvar_t	*sv_bufferMs;				// per-client position ring buffer delay (ms)
++cvar_t	*sv_velSmooth;				// velocity smoothing window (ms) for TR_LINEAR mode
+ cvar_t	*sv_timeout;			// seconds without any message
+ cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
+ cvar_t	*sv_rconPassword;		// password for remote server commands
+@@ -1279,13 +1288,24 @@ int SV_FrameMsec( void )
+ 	if ( sv_fps )
+ 	{
+ 		int frameMsec;
+-		
++		int timeLeft;
++		int spinMs;
++
+ 		frameMsec = 1000.0f / sv_fps->value;
+-		
++
+ 		if ( frameMsec < sv.timeResidual )
+ 			return 0;
+-		else
+-			return frameMsec - sv.timeResidual;
++
++		timeLeft = frameMsec - sv.timeResidual;
++
++		// If sv_busyWait is set, spin (return 0) for the last N ms before
++		// the frame is due, giving precise wakeup without OS sleep jitter.
++		// Costs ~1 CPU core but eliminates stutter at high sv_fps.
++		spinMs = sv_busyWait ? sv_busyWait->integer : 0;
++		if ( spinMs > 0 && timeLeft <= spinMs )
++			return 0;
++
++		return timeLeft;
+ 	}
+ 	else
+ 		return 1;
+@@ -1312,15 +1332,44 @@ void SV_TrackCvarChanges( void )
+ 		Com_DPrintf( "sv_minRate adjusted to 1000\n" );
+ 	}
+ 
+-	Cvar_ResetGroup( CVG_SERVER, qfalse );
++	// When sv_fps changes at runtime, clamp the time residual so it doesn't
++	// represent more than one frame at the new rate — prevents double-ticking
++	// or a stall on the first frame after the change.
++	if ( sv_fps->modified || sv_snapshotFps->modified ) {
++		qboolean fpsChanged = sv_fps->modified;
++		int newFrameMsec = 1000 / sv_fps->integer;
++
++		if ( fpsChanged ) {
++			// Clamp residual to just under one frame at the new rate.
++			// Prevents burst-ticking when going from low to high sv_fps
++			// (e.g. 20->125: residual of 49ms would fire 6 frames at once).
++			if ( sv.timeResidual < 0 )
++				sv.timeResidual = 0;
++			if ( sv.timeResidual >= newFrameMsec )
++				sv.timeResidual = newFrameMsec - 1;
++			// NOTE: do NOT reset sv.gameTimeResidual here. sv_gameHz doesn't
++			// change, so the accumulated game frame progress is still valid.
++			// Resetting it throws away up to 49ms of progress, causing a gap
++			// where no game frame fires — visible as bot/entity stutter.
++			Com_DPrintf( "sv_fps changed to %d — timeResidual clamped\n", sv_fps->integer );
++		}
+ 
+-	if ( sv.state == SS_DEAD || !svs.clients )
+-		return;
++		sv_fps->modified = qfalse;
++		sv_snapshotFps->modified = qfalse;
+ 
+-	for ( i = 0, cl = svs.clients; i < sv_maxclients->integer; i++, cl++ ) {
+-		if ( cl->state >= CS_CONNECTED ) {
+-			SV_UserinfoChanged( cl, qfalse, qfalse ); // do not update userinfo, do not run filter
++		Cvar_ResetGroup( CVG_SERVER, qfalse );
++
++		if ( sv.state == SS_DEAD || !svs.clients )
++			return;
++
++		// Recalculate snapshotMsec for all clients when fps or snapshot rate changes
++		for ( i = 0, cl = svs.clients; i < sv_maxclients->integer; i++, cl++ ) {
++			if ( cl->state >= CS_CONNECTED ) {
++				SV_UserinfoChanged( cl, qfalse, qfalse );
++			}
+ 		}
++	} else {
++		Cvar_ResetGroup( CVG_SERVER, qfalse );
+ 	}
+ }
+ 
+@@ -1346,6 +1395,8 @@ static void SV_Restart( const char *reason ) {
+ 	}
+ 
+ 	sv.time = 0; // force level time reset
++	sv.gameTime = 0;
++	sv.gameTimeResidual = 0;
+ 	sv.restartTime = 0;
+ 	
+ 	Cvar_VariableStringBuffer( "mapname", mapName, sizeof( mapName ) );
+@@ -1371,7 +1422,7 @@ void SV_Frame( int msec ) {
+ 	int		startTime;
+ 	int		i, n;
+ 
+-	if ( Cvar_CheckGroup( CVG_SERVER ) )
++	if ( Cvar_CheckGroup( CVG_SERVER ) || sv_fps->modified )
+ 		SV_TrackCvarChanges(); // update rate settings, etc.
+ 
+ 	// the menu kills the server with this cvar
+@@ -1410,8 +1461,11 @@ void SV_Frame( int msec ) {
+ 
+ 	sv.timeResidual += msec;
+ 
+-	if ( !com_dedicated->integer )
+-		SV_BotFrame( sv.time + sv.timeResidual );
++	// Hard clamp: never accumulate more than one frame worth of residual.
++	// Prevents burst-ticking after sv_fps changes regardless of whether
++	// the modified flag was caught. Safe to do every frame.
++	if ( sv.timeResidual >= frameMsec * 2 )
++		sv.timeResidual = frameMsec - 1;
+ 
+ 	// if time is about to hit the 32nd bit, kick all clients
+ 	// and clear sv.time, rather
+@@ -1479,40 +1533,77 @@ void SV_Frame( int msec ) {
+ 	// update ping based on the all received frames
+ 	SV_CalcPings();
+ 
+-	if (com_dedicated->integer) SV_BotFrame (sv.time);
+-
+-#ifdef USE_MV
+-    svs.emptyFrame = qtrue;
+-#endif
+ 
+ 	// run the game simulation in chunks
++	// Snapshot dispatch is inside this loop so each engine tick at sv_fps rate produces
++	// its own snapshot send opportunity. Without this, OS scheduler jitter can cause
++	// two ticks to fire in one Com_Frame with only one SV_SendClientMessages call,
++	// creating a double-interval gap visible in the netgraph as late packets.
+ 	while ( sv.timeResidual >= frameMsec ) {
+ 		sv.timeResidual -= frameMsec;
+ 		svs.time += frameMsec;
+ 		sv.time += frameMsec;
+ 
+-		// let everything in the world think and move
+-		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
++		// --- Engine-side shadow antilag sub-ticks ---
++		if ( sv_antilagEnable && sv_antilagEnable->integer ) {
++			int _scale = sv_physicsScale ? sv_physicsScale->integer : 1;
++			int _s;
++			if ( _scale < 1 ) _scale = 1;
++			if ( _scale > 8 ) _scale = 8;
++			for ( _s = 0; _s < _scale; _s++ ) {
++				SV_Antilag_RecordPositions();
++			}
++		}
++
++		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
++		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
++		// sv_gameHz 0 = disabled, falls back to sv_fps.
++		{
++			int _gameHz = (sv_gameHz && sv_gameHz->integer > 0) ? sv_gameHz->integer : sv_fps->integer;
++			int _gameMsec;
++			if ( _gameHz < 1 )               _gameHz = 1;
++			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
++			_gameMsec = 1000 / _gameHz;
++			sv.gameTimeResidual += frameMsec;
++#ifdef USE_MV
++			svs.emptyFrame = qtrue; // assume no game frame this sv_fps tick; cleared below if one fires
++#endif
++			while ( sv.gameTimeResidual >= _gameMsec ) {
++				sv.gameTimeResidual -= _gameMsec;
++				sv.gameTime += _gameMsec;
++				// Bot AI ticks in lockstep with GAME_RUN_FRAME at sv_gameHz rate.
++				SV_BotFrame( sv.gameTime );
++				VM_Call( gvm, 1, GAME_RUN_FRAME, sv.gameTime );
+ #ifdef USE_MV
+-		svs.emptyFrame = qfalse; // ok, run recorder
++				svs.emptyFrame = qfalse; // game frame fired — allow multiview recorder this tick
+ #endif
++			}
++		}
++
++		// Record positions into smooth buffer when either feature is enabled.
++		// sv_bufferMs = position delay, sv_velSmooth = velocity smoothing.
++		// Ring buffer feeds both — record when either is non-zero.
++		if ( ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) )
++				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
++				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
++			SV_SmoothRecordAll();
++		}
++
++		// Issue and dispatch snapshots once per sv_fps tick, not once per Com_Frame.
++		// This ensures clients receive packets at the true tick rate regardless of
++		// how many ticks fire per real-world Com_Frame call.
++		SV_IssueNewSnapshot();
++		SV_SendClientMessages();
+ 	}
+ 
+ 	if ( com_speeds->integer ) {
+ 		time_game = Sys_Milliseconds () - startTime;
+ 	}
+ 
+-	// check timeouts
++	// check timeouts (once per Com_Frame is sufficient)
+ 	SV_CheckTimeouts();
+ 
+-	// reset current and build new snapshot on first query
+-	SV_IssueNewSnapshot();
+-
+-	// send messages back to the clients
+-	SV_SendClientMessages();
+-
+ #ifdef USE_MV
+-    svs.emptyFrame = qfalse;
+     if ( sv_autoRecord->integer > 0 ) {
+         if ( sv_demoFile == FS_INVALID_HANDLE ) {
+             if ( SV_FindActiveClient( qtrue, -1, sv_autoRecord->integer ) >= 0 ) {
