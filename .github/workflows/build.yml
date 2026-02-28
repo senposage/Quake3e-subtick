@@ -47,7 +47,7 @@ jobs:
     steps:
     - uses: msys2/setup-msys2@v2
       with:
-        install: ${{ matrix.prefix }}-binutils ${{ matrix.prefix }}-make ${{ matrix.prefix }}-gcc
+        install: ${{ matrix.prefix }}-binutils ${{ matrix.prefix }}-gcc make git
         msystem: ${{ matrix.msystem }}
         path-type: minimal
         release: false
