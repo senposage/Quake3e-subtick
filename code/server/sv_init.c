@@ -885,10 +885,10 @@ void SV_Init( void )
     sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED );
 
     sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nKeep at 20 to match UT4.3 timer expectations. Never set higher than sv_fps.\nDefault: 20");
+    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nKeep at 20 to match UT4.3 timer expectations. Never set higher than sv_fps.\n0 = disabled, falls back to sv_fps.\nDefault: 20");
 
-    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "60", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients. Set equal to sv_fps for full benefit.\nDefault: 60");
+    sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "-1", CVAR_ARCHIVE | CVAR_SERVERINFO );
+    Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients.\n-1 = match sv_fps (default, live-tracks sv_fps changes).\n 0 = fall back to per-client 'snaps' userinfo (vanilla Q3 behavior).\n>0 = explicit rate, capped to sv_fps.\nDefault: -1");
 
     sv_busyWait = Cvar_Get ("sv_busyWait", "0", CVAR_ARCHIVE );
     Cvar_SetDescription(sv_busyWait, "Spin for last N milliseconds before each frame instead of sleeping.\nEliminates OS scheduler jitter at the cost of ~1 CPU core at 100pct.\nThe timeResidual clamping fix makes this unnecessary in normal operation.\nOnly enable if you observe measurable frame timing jitter on your specific hardware.\nDefault: 0 (disabled)");

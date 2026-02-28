@@ -1557,8 +1557,9 @@ void SV_Frame( int msec ) {
 
 		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
 		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
+		// sv_gameHz 0 = disabled, falls back to sv_fps.
 		{
-			int _gameHz = sv_gameHz ? sv_gameHz->integer : sv_fps->integer;
+			int _gameHz = (sv_gameHz && sv_gameHz->integer > 0) ? sv_gameHz->integer : sv_fps->integer;
 			int _gameMsec;
 			if ( _gameHz < 1 )               _gameHz = 1;
 			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
