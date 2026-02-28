@@ -30,6 +30,8 @@ Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 20 match
 
 **How (sv_gameHz <= 0, disabled):** Effective rate falls back to `sv_fps`. `GAME_RUN_FRAME` fires on every engine tick; `sv.gameTime == sv.time` always, no gap. `sv_extrapolate` still runs: bot velocity extrapolation produces `dt=0` (position unchanged); real-player `ps->origin` read is identical to what `BG_PlayerStateToEntityState` already wrote. `sv_bufferMs` ring buffer queries still run and apply delayed positions when configured. `sv_smoothClients` TR_LINEAR also runs unconditionally on every tick.
 
+**⚠ Antiwarp warning (`sv_gameHz 0`):** With `sv_gameHz <= 0`, game frames advance at `1000/sv_fps` ms per tick. The QVM's hardcoded `serverTime += 50` blank command is then mismatched at any `sv_fps != 20` — at `sv_fps 60` it fires a 50ms injection every 16ms, teleporting lagging players at 3× the intended rate. **Do not use `sv_gameHz 0` with UT QVM unless `sv_fps` is also 20.** See `docs/g-antiwarp-engine-feasibility.md` for details.
+
 ---
 
 ### sv_snapshotFps

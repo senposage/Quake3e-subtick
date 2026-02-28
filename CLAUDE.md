@@ -238,7 +238,13 @@ snapshot cadence only — it does not affect game-frame rate. `G_RunClient` fire
 exactly 20Hz regardless of `sv_fps`, so the hardcoded `serverTime += 50` blank
 command always spans exactly one 50ms game frame as intended.
 
-The 50ms hardcode only becomes a problem if `sv_gameHz` itself is raised above 20.
+At `sv_gameHz 0` (disabled), g_antiwarp is **broken** at any `sv_fps != 20`.
+When `sv_gameHz <= 0`, the game-frame rate falls back to `sv_fps` and `level.time`
+advances by `1000/sv_fps` ms per tick. At `sv_fps 60` this means a 50ms blank cmd
+fires every 16ms — teleporting lagging players at 3× the intended rate. Do not use
+`sv_gameHz 0` with UT QVM unless `sv_fps` is also 20.
+
+The 50ms hardcode also becomes a problem if `sv_gameHz` itself is raised above 20.
 Whether that is safe in UT4.3.4 is unconfirmed — pending in-game testing.
 
 See `docs/g-antiwarp-engine-feasibility.md` for the full analysis.

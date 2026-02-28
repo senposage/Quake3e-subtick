@@ -12,12 +12,28 @@ The `sv_gameHz` decoupling is the critical piece: `GAME_RUN_FRAME` fires at exac
 fires. The hardcoded `serverTime += 50` blank command matches that 50ms frame exactly
 — correct by construction.
 
-The 50ms hardcode only becomes a problem if `sv_gameHz` is **raised above 20** (e.g.
+**At `sv_gameHz 0` (disabled), g_antiwarp is broken at any `sv_fps != 20`.**
+When `sv_gameHz <= 0`, the effective game-frame rate falls back to `sv_fps`, so
+`level.time` advances by `1000/sv_fps` ms each tick. The hardcoded 50ms blank cmd
+is then mismatched:
+
+| sv_fps (with sv_gameHz 0) | gameMsec | Injected cmd | Effect |
+|---------------------------|----------|--------------|--------|
+| 20 | 50ms | 50ms | Correct — accidental match |
+| 40 | 25ms | 50ms | **Double** — 2× intended step per frame |
+| 60 | 16ms | 50ms | **3× intended** — lagging players teleport |
+| 120 | 8ms | 50ms | **6× intended** — severe teleport |
+
+This is the same class of breakage as raising `sv_gameHz` above 20. **Do not use
+`sv_gameHz 0` with UT QVM unless `sv_fps` is also set to 20.**
+
+The 50ms hardcode also becomes a problem if `sv_gameHz` is **raised above 20** (e.g.
 to 40Hz), where each game frame is only 25ms but the blank cmd is still 50ms —
 double the intended step. That is an entirely separate concern from `sv_fps`.
 
 The rest of this document analyses feasibility of moving or modifying the antiwarp
-logic, which is only relevant if `sv_gameHz > 20` is ever enabled.
+logic, which is relevant if `sv_gameHz 0` is used at `sv_fps != 20`, or if
+`sv_gameHz > 20` is ever enabled.
 
 ---
 
@@ -71,6 +87,8 @@ blank command spans exactly one 20Hz game frame. At any other `sv_gameHz`:
 | 20 | 50ms | 50ms | Correct — one full game frame of coasting |
 | 40 | 25ms | 50ms | **Double** — teleports forward 2× intended distance per frame |
 | 10 | 100ms | 50ms | **Half** — lagging player barely moves |
+| 0 (sv_fps 60) | 16ms | 50ms | **3× intended** — same breakage as sv_gameHz 60 |
+| 0 (sv_fps 20) | 50ms | 50ms | Correct — accidental match only |
 
 This is a QVM-side value. The engine cannot patch it without modifying the QVM
 binary (Ghidra patch) or having the QVM read it from a cvar.
