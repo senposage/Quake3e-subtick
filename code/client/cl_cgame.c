@@ -1051,6 +1051,8 @@ or bursted delayed packets.
 // that causes the 32↔48ms ping jitter and feelable lag.
 // RESET and FAST branches clear it since stale slow-drift history would
 // corrupt recovery from a large correction.
+// Applied unconditionally (both cl_adaptiveTiming=0 and =1) so the fix
+// works regardless of the adaptive timing setting.
 static int slowFrac = 0;
 
 static void CL_AdjustTimeDelta( void ) {
@@ -1108,38 +1110,26 @@ static void CL_AdjustTimeDelta( void ) {
 		// had to be extrapolated, nudge our sense of time back a little
 		// the granularity of +1 / -2 is too high for timescale modified frametimes
 		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
-			if ( cl_adaptiveTiming->integer ) {
-				// Use a half-millisecond fractional accumulator (4 units = 1 ms) so
-				// that at the equilibrium extrapolation rate (50% at 60 Hz, 1/3 at
-				// 20 Hz) the net per-snap adjustment is exactly zero and
-				// serverTimeDelta does not oscillate ±1 ms each snap.
-				if ( cl.extrapolatedSnapshot ) {
-					cl.extrapolatedSnapshot = qfalse;
-					slowFrac -= ( cl.snapshotMsec < 30 ) ? 2 : 4;
-				} else {
-					slowFrac += 2; // +½ ms per snap (half the old +1 ms step)
-				}
-				// Commit a whole-ms adjustment once the accumulator reaches ±1 ms.
-				if ( slowFrac >= 4 ) {
-					cl.serverTimeDelta++;
-					slowFrac -= 4;
-					SCR_NetMonitorAddSlowAdjust( +1 );
-				} else if ( slowFrac <= -4 ) {
-					cl.serverTimeDelta--;
-					slowFrac += 4;
-					SCR_NetMonitorAddSlowAdjust( -1 );
-				}
+			// Use a half-millisecond fractional accumulator (4 units = 1 ms) so
+			// that at the equilibrium extrapolation rate (50% at 60 Hz, 1/3 at
+			// 20 Hz) the net per-snap adjustment is exactly zero and
+			// serverTimeDelta does not oscillate ±1 ms each snap.
+			// Applied unconditionally so the fix works with cl_adaptiveTiming=0 too.
+			if ( cl.extrapolatedSnapshot ) {
+				cl.extrapolatedSnapshot = qfalse;
+				slowFrac -= ( cl.snapshotMsec < 30 ) ? 2 : 4;
 			} else {
-				// vanilla: integer ±1/-2 ms steps
-				if ( cl.extrapolatedSnapshot ) {
-					cl.extrapolatedSnapshot = qfalse;
-					cl.serverTimeDelta -= 2;
-					SCR_NetMonitorAddSlowAdjust( -2 );
-				} else {
-					cl.serverTimeDelta++;
-					SCR_NetMonitorAddSlowAdjust( +1 );
-				}
-				slowFrac = 0;
+				slowFrac += 2; // +½ ms per snap (half the old +1 ms step)
+			}
+			// Commit a whole-ms adjustment once the accumulator reaches ±1 ms.
+			if ( slowFrac >= 4 ) {
+				cl.serverTimeDelta++;
+				slowFrac -= 4;
+				SCR_NetMonitorAddSlowAdjust( +1 );
+			} else if ( slowFrac <= -4 ) {
+				cl.serverTimeDelta--;
+				slowFrac += 4;
+				SCR_NetMonitorAddSlowAdjust( -1 );
 			}
 		}
 	}
@@ -1352,8 +1342,10 @@ void CL_SetCGameTime( void ) {
 				SCR_NetMonitorAddExtrap();
 			}
 		} else {
-			// vanilla: hardcoded 5ms threshold
-			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
+			// vanilla: hardcoded 5ms threshold; include fractional accumulator
+			// state (in ¼ms units) so the self-stabilising feedback operates
+			// the same way as the adaptive path.
+			if ( ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime ) * 4 + slowFrac >= -20 ) {
 				cl.extrapolatedSnapshot = qtrue;
 			}
 		}
