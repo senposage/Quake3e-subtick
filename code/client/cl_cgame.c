@@ -1068,7 +1068,8 @@ static void CL_AdjustTimeDelta( void ) {
 	if ( cl_adaptiveTiming->integer ) {
 		resetTime  = cl.snapshotMsec * 10;
 		fastAdjust = cl.snapshotMsec * 2;
-		if ( resetTime < 500 ) resetTime = 500;
+		if ( resetTime  < 500 ) resetTime  = 500;
+		if ( fastAdjust <  50 ) fastAdjust =  50;
 	} else {
 		resetTime  = 500;
 		fastAdjust = 100;

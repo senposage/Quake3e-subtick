@@ -71,8 +71,8 @@ void SV_SmoothInit( void ) {
 SV_SmoothRecord
 
 Record a single client's current position + velocity into the ring buffer.
-Bot positions use velocity extrapolation (ps->origin doesn't update between game frames).
-Real player positions use actual ps->origin (updated by Pmove every usercmd).
+Bot: raw game-frame position (no extrapolation — bots excluded from prediction).
+Real player: actual ps->origin (updated by Pmove every usercmd).
 =============
 */
 static void SV_SmoothRecord( int clientNum ) {
@@ -88,18 +88,12 @@ static void SV_SmoothRecord( int clientNum ) {
 	slot = &hist->slots[idx];
 
 	if ( svs.clients[clientNum].netchan.remoteAddress.type == NA_BOT ) {
-		// Bot: ps->origin only updates at sv_gameHz rate (game-frame boundaries).
-		// Use ps->velocity (set by Pmove, not touched by BG_PlayerStateToEntityState)
-		// so the velocity is accurate even when the QVM packs trDelta differently.
-		// When sv_gameHz is disabled (sv.time == sv.gameTime), dt == 0 and the
-		// unmodified trBase is recorded.
+		// Bot: record raw game-frame position from entity state.
+		// No velocity extrapolation — bots are excluded from prediction
+		// because it creates sawtooth artifacts at direction changes.
 		sharedEntity_t *gent = SV_GentityNum( clientNum );
-		playerState_t *ps = SV_GameClientNum( clientNum );
-		float dt = (float)( sv.time - sv.gameTime ) * 0.001f;
-		slot->origin[0] = gent->s.pos.trBase[0] + ps->velocity[0] * dt;
-		slot->origin[1] = gent->s.pos.trBase[1] + ps->velocity[1] * dt;
-		slot->origin[2] = gent->s.pos.trBase[2] + ps->velocity[2] * dt;
-		VectorCopy( ps->velocity, slot->velocity );
+		VectorCopy( gent->s.pos.trBase, slot->origin );
+		VectorCopy( gent->s.pos.trDelta, slot->velocity );
 	} else {
 		// Real player: actual Pmove position + current velocity
 		playerState_t *ps = SV_GameClientNum( clientNum );
@@ -1203,24 +1197,16 @@ static void SV_BuildCommonSnapshot( void )
 		// ps->origin has the real post-Pmove position (updated every usercmd before
 		// SV_Frame). This gives every snapshot the true physics position — no prediction
 		// error, no sawtooth from direction changes between game frames.
+		// sv_smoothClients sets TR_LINEAR for cgame-side extrapolation.
+		// sv_bufferMs uses ring buffer for delayed position lookup.
 		//
-		// BOTS: velocity-based extrapolation (trBase += ps->velocity * dt). Bot AI only
-		// ticks at sv_gameHz so their velocity is constant between game frames —
-		// linear prediction is accurate. ps->velocity (set by Pmove, not touched by
-		// BG_PlayerStateToEntityState) is used instead of es->pos.trDelta to ensure
-		// correctness regardless of how the QVM packs the entity-state velocity field.
-		//
-		// sv_gameHz > 0 (e.g. 20): GAME_RUN_FRAME fires at sv_gameHz Hz. sv.gameTime
-		//   lags sv.time between game frames, so extrapolateMs = sv.time - sv.gameTime
-		//   is positive. The position fixup below activates and corrects stale ent->s.
-		//   Bot velocity extrapolation uses the positive dt; real players use ps->origin.
-		//
-		// sv_gameHz <= 0 (disabled, falls back to sv_fps): GAME_RUN_FRAME fires every
-		//   engine tick. sv.gameTime == sv.time always, so extrapolateMs == 0.
-		//   Bot velocity extrapolation: dt=0, position unchanged (harmless no-op).
-		//   Real player ps->origin read: same value BG_PlayerStateToEntityState wrote.
-		//   sv_bufferMs ring buffer queries still run and apply delayed positions.
-		//   sv_smoothClients TR_LINEAR also runs unconditionally on every tick.
+		// BOTS: excluded from position prediction entirely. Bot AI only ticks at
+		// sv_gameHz, so their velocity changes at every game frame boundary.
+		// Velocity prediction (linear extrapolation) creates sawtooth artifacts:
+		// drift in stale direction → snap to new direction every 50ms at sv_gameHz 20.
+		// Instead, bots keep their raw BG_PlayerStateToEntityState positions and the
+		// client interpolates between game-frame snapshots (standard Q3 behavior).
+		// At sv_gameHz 0 (disabled), bots update at sv_fps rate — no stale positions.
 		const int gameMsec = 1000 / ( sv_gameHz && sv_gameHz->integer > 0 ? sv_gameHz->integer : sv_fps->integer );
 		float extrapolateMs = (float)( sv.time - sv.gameTime );
 		if ( extrapolateMs > (float)gameMsec )
@@ -1249,8 +1235,8 @@ static void SV_BuildCommonSnapshot( void )
 			// blocked Phase 1 (sv_bufferMs ring buffer query) from running at game-frame
 			// boundaries and entirely when sv_gameHz is disabled — making sv_bufferMs silently
 			// ineffective for sv_extrapolate users in those cases.
-			// At extrapolateMs == 0: bot velocity extrapolation is dt=0 (position unchanged);
-			// real-player ps->origin read is harmless (same value BG_PlayerStateToEntityState wrote).
+			// At extrapolateMs == 0: real-player ps->origin read is harmless
+			// (same value BG_PlayerStateToEntityState wrote). Bots are skipped in Phase 2.
 			if ( ( sv_smoothClients && sv_smoothClients->integer ) ||
 				( sv_extrapolate && sv_extrapolate->integer ) ) {
 				entityState_t *es = &svs.snapshotEntities[ index ];
@@ -1261,11 +1247,9 @@ static void SV_BuildCommonSnapshot( void )
 					vec3_t origin, velocity;
 
 					// --- Phase 1: Resolve position source ---
-					// sv_bufferMs applies to real players only. Bots are excluded:
-					// their ring-buffer entries are extrapolated from trBase+ps->velocity and
-					// reset at every game-frame boundary, creating discontinuities that
-					// cause visible warping when a delayed lookup straddles that boundary.
-					// Bots fall through to the velocity-extrapolation path below instead.
+					// sv_bufferMs applies to real players only. Bots are excluded
+					// from both the ring buffer and position prediction (Phase 2
+					// skips bots entirely to avoid sawtooth artifacts).
 					if ( bufMs > 0 && !isBot ) {
 						vec3_t delayedOrigin, delayedVelocity;
 						if ( SV_SmoothGetPosition( es->number, sv.time - bufMs, delayedOrigin, delayedVelocity ) ) {
@@ -1276,13 +1260,8 @@ static void SV_BuildCommonSnapshot( void )
 					}
 					if ( !usedBuffer ) {
 						if ( isBot ) {
-							// Use trBase (= SnapVector(ps->origin) at last game frame) as position
-							// and ps->velocity as velocity. ps->velocity is set by Pmove and is not
-							// touched by BG_PlayerStateToEntityState, making it reliable regardless
-							// of how the QVM packs trDelta (some UT states may differ from Q3 standard).
-							playerState_t *ps = SV_GameClientNum( es->number );
 							VectorCopy( es->pos.trBase, origin );
-							VectorCopy( ps->velocity, velocity );
+							VectorCopy( es->pos.trDelta, velocity );
 						} else {
 							playerState_t *ps = SV_GameClientNum( es->number );
 							VectorCopy( ps->origin, origin );
@@ -1291,8 +1270,15 @@ static void SV_BuildCommonSnapshot( void )
 					}
 
 					// --- Phase 2: Resolve trajectory type ---
-					// Uses position/velocity resolved in Phase 1.
-					if ( sv_smoothClients && sv_smoothClients->integer ) {
+					// Bots excluded: velocity prediction (both TR_LINEAR and trBase +=)
+					// creates sawtooth artifacts at direction changes because bot AI only
+					// ticks at sv_gameHz. Without prediction, bots keep their game-frame
+					// positions — 20fps at sv_gameHz 20 (standard Q3 behavior). Choppy
+					// but stable; cgame lerps between snapshots for smooth visual motion.
+					// At sv_gameHz 0 this is moot (extrapolateMs == 0 always).
+					if ( isBot ) {
+						// Leave bot entity state untouched — no position prediction.
+					} else if ( sv_smoothClients && sv_smoothClients->integer ) {
 						// TR_LINEAR mode: set up trajectory for continuous cgame evaluation.
 						// IMPORTANT: only set TR_LINEAR when actually moving — idle players
 						// must stay TR_INTERPOLATE to prevent extrapolation drift/vibration.
@@ -1320,7 +1306,7 @@ static void SV_BuildCommonSnapshot( void )
 							VectorCopy( finalVel, es->pos.trDelta );
 						}
 					} else {
-						// TR_INTERPOLATE mode.
+						// TR_INTERPOLATE mode (real players only — bots excluded above).
 						if ( usedBuffer ) {
 							// Ring buffer position available: use delayed position,
 							// but only if actually moving (dead-zone guard prevents
@@ -1329,14 +1315,6 @@ static void SV_BuildCommonSnapshot( void )
 								VectorCopy( origin, es->pos.trBase );
 								VectorCopy( velocity, es->pos.trDelta );
 							}
-						} else if ( isBot ) {
-							// Bot without buffer: velocity-based extrapolation using ps->velocity
-							// (resolved in Phase 1). dt == 0 at game-frame boundaries or when
-							// sv_gameHz is disabled — harmless no-op in both cases.
-							const float dt = extrapolateMs * 0.001f;
-							es->pos.trBase[0] += velocity[0] * dt;
-							es->pos.trBase[1] += velocity[1] * dt;
-							es->pos.trBase[2] += velocity[2] * dt;
 						} else {
 							// Real player without buffer: always use ps->origin.
 							// No dead-zone needed — TR_INTERPOLATE never switches

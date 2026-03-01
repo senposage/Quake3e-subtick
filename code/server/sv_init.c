@@ -890,7 +890,7 @@ void SV_Init( void )
     sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
 
     sv_gameHz = Cvar_Get ("sv_gameHz", "0", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nNever set higher than sv_fps.\n>0: GAME_RUN_FRAME fires at sv_gameHz Hz; sv.gameTime lags sv.time between frames.\n    Entity positions — BOTH real players AND bots — only update at sv_gameHz rate\n    in vanilla snapshots (BG_PlayerStateToEntityState runs inside GAME_RUN_FRAME).\n    Without sv_extrapolate this causes stutter for all players when sv_fps > sv_gameHz.\n    sv_extrapolate 1 (default) fixes both: real players via ps->origin (exact, updated\n    every usercmd), bots via velocity extrapolation (ps->velocity * dt).\n    For UT4.3 QVM antiwarp compatibility set to 20 (requires sv_fps 20 for correct antiwarp).\n 0: disabled (falls back to sv_fps); GAME_RUN_FRAME fires every engine tick,\n    sv.gameTime == sv.time always. sv_extrapolate still runs but has no stale\n    positions to correct; sv_bufferMs ring buffer queries still apply.\nDefault: 0");
+    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nNever set higher than sv_fps.\n>0: GAME_RUN_FRAME fires at sv_gameHz Hz; sv.gameTime lags sv.time between frames.\n    Bot positions only update at this rate — velocity extrapolation fills the gaps\n    but creates sawtooth artifacts at direction changes (inherent limitation).\n    20 matches UT4.3 antiwarp assumptions (may not be needed for 4.3.4).\n 0: disabled (falls back to sv_fps); GAME_RUN_FRAME fires every engine tick,\n    sv.gameTime == sv.time always, no extrapolation needed.\nDefault: 0");
 
     sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "-1", CVAR_ARCHIVE | CVAR_SERVERINFO );
     Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients.\n-1 = match sv_fps (default, live-tracks sv_fps changes).\n 0 = fall back to per-client 'snaps' userinfo (vanilla Q3 behavior).\n>0 = explicit rate, capped to sv_fps.\nDefault: -1");
@@ -904,11 +904,9 @@ void SV_Init( void )
 
     sv_extrapolate = Cvar_Get ("sv_extrapolate", "1", CVAR_ARCHIVE );
     Cvar_SetDescription(sv_extrapolate, "Engine-side position correction for high sv_fps snapshots.\n"
-        "Affects both real players AND bots when sv_fps > sv_gameHz > 0.\n"
-        "0 = disabled (vanilla: all players stutter — entity state only refreshes at sv_gameHz rate)\n"
-        "1 = enabled: real players use ps->origin (exact, fresh every usercmd);\n"
-        "    bots use velocity extrapolation (ps->velocity * dt, accurate between AI ticks)\n"
-        "No effect when sv_gameHz 0 (game runs at sv_fps rate; entity state always fresh).\n"
+        "0 = disabled (vanilla: players stutter when sv_fps > sv_gameHz)\n"
+        "1 = enabled (real players use actual Pmove position, bots use velocity extrapolation)\n"
+        "Interpolation windows: sv_fps 20=50ms, 60=16.7ms, 90=11.1ms, 125=8ms\n"
         "Default: 1");
 
     sv_smoothClients = Cvar_Get ("sv_smoothClients", "0", CVAR_ARCHIVE );

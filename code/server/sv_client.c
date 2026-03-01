@@ -2210,8 +2210,8 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 
 	// sv_pmoveMsec: enforce a maximum Pmove physics step size per usercmd.
 	// Equivalent to Q3's pmove_fixed but server-side.
-	// Bots excluded — they submit one usercmd per game frame with serverTime = level.time
-	// (step = 1000/sv_fps ms). Clamping their step would cause warpy movement.
+	// Bots excluded — they use 50ms steps from level.time and only get one
+	// ClientThink_real per game frame; clamping would cause warpy movement.
 	//
 	// When the real delta exceeds maxStep we fire multiple QVM calls, each
 	// advancing serverTime by maxStep. This means:
