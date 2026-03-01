@@ -45,44 +45,96 @@ Key observations:
 
 ```
 [HH:MM:SS] STATS  snap=62Hz  ping=32(28..38)ms  fI=0.625(INTERP)  dT=-21189..-21188ms
-           drop=0/s  in=4677B/s  out=4163B/s  ft=14/16/23ms  snapgap=1/2ms  caps=1  extrap=3
+           drop=0/s  in=4677B/s  out=4163B/s  ft=14/16/23ms  snapgap=1/2ms
+           caps=1  extrap=3  fast=0  reset=0
 ```
 
 | Field | Meaning | What a bad value tells us |
 |-------|---------|--------------------------|
-| `ping=avg(min..max)` | RTT per-snap: average and jitter range | Wide spread (e.g. `32(18..52)`) = network RTT jitter; suspect bufferbloat, WiFi, or ISP |
-| `dT=min..max` | serverTimeDelta range over the second | Wide range → brief dT spike invisible in old point-in-time sample |
-| `ft=min/avg/max` | Client frame time min / average / peak (ms) | `max` spike → OS jitter; very low `min` alongside high `max` = occasional freeze, not sustained |
-| `snapgap=avg/max` | Snap arrival interval deviation: average and peak | High `avg` = sustained delivery jitter (network); single `max` spike with low `avg` = one late snap |
+| `ping=avg(min..max)` | RTT per-snap: average and jitter range | Wide spread (e.g. `32(18..52)`) = RTT jitter; suspect bufferbloat, WiFi, or ISP |
+| `dT=min..max` | serverTimeDelta range over the second | Wide range → brief dT spike invisible in a point-in-time sample |
+| `ft=min/avg/max` | Client frame time min / average / peak (ms) | `max` spike → OS jitter; very low `min` + high `max` = occasional freeze, not sustained |
+| `snapgap=avg/max` | Snap arrival interval deviation: average and peak | High `avg` = sustained delivery jitter; single `max` spike + low `avg` = one late snap |
 | `caps=N` | Times the `-1ms` serverTime cap fired | Nonzero + `ftmax` spike = client frame caused the boundary hit |
-| `extrap=N` | Frames where `extrapolatedSnapshot` set | Expected nonzero (normal drift control); zero = very healthy |
+| `extrap=N` | Frames where `extrapolatedSnapshot` set | Expected nonzero (normal drift control) |
+| `fast=N` | FAST adjustments per second | **Key oscillation indicator** — nonzero most seconds = sustained serverTimeDelta oscillation |
+| `reset=N` | RESET adjustments per second | >0 = large sudden dT shift (>500ms); typically a one-off event |
 
 ### Event lines (`cl_netlog 1`)
 
 ```
-[01:13:55] SNAP LATE  +12ms  (expected 16ms  got 28ms)   ← network-side: snap 1.5× late
-[01:14:32] DELTA FAST  dT=-21192ms  dd=8ms               ← existing
-[01:14:32] DELTA RESET  dT=-21200ms  dd=500ms             ← existing
+[01:13:55] PING JITTER  32ms->50ms  (+18ms)   ← ping jumped 18ms this snap
+[01:13:55] PING JITTER  50ms->32ms  (-18ms)   ← and back the next snap  ← oscillation signature
+[01:13:55] SNAP LATE  +12ms  (expected 16ms  got 28ms)
+[01:14:32] DELTA FAST  dT=-21192ms  dd=32ms
+[01:14:32] DELTA RESET  dT=-21200ms  dd=500ms
 ```
 
-`SNAP LATE` fires whenever a snap arrives more than 1.5× the expected interval. This is a direct timestamp for the network-side cause of top-line chop, without needing level-2 logging.
+`PING JITTER` fires per-snap when `|ping − prevPing| ≥ max(snapshotMsec/2, 10ms)`.
+An alternating `+N / −N` pattern on consecutive lines is the **oscillation signature** — see below.
 
-**Files changed this session:** `cl_scrn.c`, `cl_cgame.c`, `cl_parse.c`, `client.h`
+---
+
+## The Oscillation: What cg_drawfps Jitter Actually Means
+
+`cg_drawfps` shows `1000 / cg.frametime` where `cg.frametime = cg.time_now − cg.time_prev`
+and `cg.time = cl.serverTime` (passed from the client each frame).
+
+So **cg_drawfps oscillating wildly = cl.serverTime oscillating wildly**.
+
+### Causal chain
+
+```
+cl.serverTime oscillates
+    → p_serverTime in outgoing command packets oscillates
+        → ping loop matches different packet (N vs N-1) on alternate snaps
+            → ping alternates between two values (e.g. 32ms / 50ms)
+                → newDelta = snap.serverTime - cls.realtime alternates
+                    → CL_AdjustTimeDelta fires FAST alternately +/−
+                        → serverTimeDelta oscillates
+                            → cl.serverTime oscillates   ← feedback loop
+```
+
+The FAST threshold at 60Hz is `2 × snapshotMsec = 32ms`.
+If ping oscillates by ≥ 32ms → FAST fires every other snap → `fast=~30/s` in STATS.
+If ping oscillates by < 32ms → handled only by +1/−2ms slow drift → takes many seconds to
+converge → sustained chop without triggering FAST events.
+
+### What the log will show during oscillation
+
+```
+[01:13:55] PING JITTER  32ms->50ms  (+18ms)
+[01:13:55] PING JITTER  50ms->32ms  (-18ms)
+[01:13:55] PING JITTER  32ms->50ms  (+18ms)
+[01:13:55] PING JITTER  50ms->32ms  (-18ms)
+[01:13:56] STATS  ...  ping=41(32..50)ms  dT=-21170..-21150ms  fast=30  reset=0
+```
+
+The alternating sign and the high `fast=` count together confirm the self-sustaining oscillation.
+
+### Breaking the loop
+
+The oscillation is self-sustaining once started. The trigger is whatever first caused
+`cl.serverTime` to overshoot a snap boundary. Candidates in order of likelihood:
+
+1. A single `SNAP LATE` event (network) pushed `newDelta` far enough to trigger FAST
+2. A single `ft=max` spike (OS frame-time) pushed `cl.serverTime` past the cap
+3. A `cl_timeNudge` change or connect/reconnect
 
 ---
 
 ## What to Look for Next Time the Chop Occurs
 
-Enable `cl_netlog 2` before play.  When chop is seen, look at the log around that time:
+Enable `cl_netlog 2` before play. When chop is seen, look at the log around that time:
 
-| What you see | Cause | Next step |
+| What you see | Diagnosis | Action |
 |---|---|---|
-| `SNAP LATE` event + high `snapgap avg` | Sustained network jitter; snap arrived late | Check path jitter / server tick consistency |
-| `SNAP LATE` event + low `snapgap avg` | One-off late snap (single burst loss) | Check for packet loss (`drop=N`) |
-| Wide `ping` spread (e.g. `32(18..52)`) | RTT jitter (WiFi, bufferbloat, ISP) | Use wired connection; check QoS/router |
-| `caps=N` (N>0) + `ft` max spike | Client frame too long — hit snap boundary | Investigate OS scheduler / vsync / frame limiter |
-| `caps=N` (N>0), no `ft` spike | dT drift alone hit the boundary | Check `dT` range — wider than ±1ms? |
-| None of the above | Something else | Next step: add per-frame serverTimeDelta logging |
+| Alternating `PING JITTER +N/-N` + `fast=~30/s` | Self-sustaining oscillation (see above) | Find what triggered it: look for a `SNAP LATE` or `ft max` spike just before |
+| Single `SNAP LATE` then oscillation starts | Network spike triggered the loop | Check path jitter / server tick consistency |
+| `ft max` spike then oscillation starts | OS frame-time spike triggered the loop | Investigate OS scheduler / vsync / frame limiter |
+| `fast=0 reset=0`, wide `ping` spread | RTT jitter in slow-drift zone (< 32ms swing) | Check bufferbloat/WiFi; may need lower sv_fps |
+| `caps=N` + `ft max` spike, no oscillation | One-off cap hit (frame too long) | Single event, not a loop; check frame pacing |
+| None of the above | Unknown | Next step: per-frame serverTimeDelta logging |
 
 ---
 
@@ -91,8 +143,8 @@ Enable `cl_netlog 2` before play.  When chop is seen, look at the log around tha
 | Tool | How to activate | What it shows |
 |------|----------------|---------------|
 | `cl_netgraph 1` | in-game cvar | Live overlay: snap Hz, ping, smoothed fI, dT, drop, in/out, seq |
-| `cl_netlog 1` | in-game cvar | Continuous log: cmds + FAST/RESET delta events + **SNAP LATE events** |
-| `cl_netlog 2` | in-game cvar | Level 1 + per-second STATS: `ping jitter`, `dT range`, `ft jitter`, `snapgap`, `caps`, `extrap` |
+| `cl_netlog 1` | in-game cvar | Events: FAST/RESET deltas + SNAP LATE + **PING JITTER** |
+| `cl_netlog 2` | in-game cvar | Level 1 + per-second STATS: all jitter fields + `fast`/`reset` counts |
 | `netgraph_dump` | console command | Point-in-time: full timing state + all server cvars |
 
 Log location: **game folder** → `netdebug_YYYYMMDD_HHMMSS.log`

@@ -1075,6 +1075,7 @@ static void CL_AdjustTimeDelta( void ) {
 		if ( cl_showTimeDelta->integer ) {
 			Com_Printf( "<RESET> " );
 		}
+		SCR_NetMonitorAddResetAdjust();
 		SCR_LogTimingEvent( "RESET", cl.serverTimeDelta, deltaDelta );
 	} else if ( deltaDelta > fastAdjust ) {
 		// fast adjust, cut the difference in half
@@ -1082,6 +1083,7 @@ static void CL_AdjustTimeDelta( void ) {
 			Com_Printf( "<FAST> " );
 		}
 		cl.serverTimeDelta = ( cl.serverTimeDelta + newDelta ) >> 1;
+		SCR_NetMonitorAddFastAdjust();
 		SCR_LogTimingEvent( "FAST ", cl.serverTimeDelta, deltaDelta );
 	} else {
 		// slow drift adjust, only move 1 or 2 msec

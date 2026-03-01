@@ -522,6 +522,24 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
 
 	SCR_NetMonitorAddPing( cl.snap.ping );
 
+	// Log a PING JITTER event when the per-snap ping change exceeds half a snapshot
+	// interval. At 60Hz that is 8ms; at 20Hz it is 25ms. Rapid alternating events
+	// (e.g. 32ms->50ms->32ms every snap) indicate that cl.serverTime oscillation is
+	// causing the ping loop to match different outgoing packets on consecutive snaps,
+	// which in turn drives serverTimeDelta oscillation and the cg_drawfps jitter.
+	if ( cl.snap.ping < 999 ) {
+		static int prevPing = -1;
+		if ( prevPing > 0 ) {
+			int delta    = cl.snap.ping - prevPing;
+			int absDelta = delta < 0 ? -delta : delta;
+			int thresh   = cl.snapshotMsec / 2;
+			if ( thresh < 10 ) thresh = 10;
+			if ( absDelta >= thresh )
+				SCR_LogPingJitter( cl.snap.ping, prevPing );
+		}
+		prevPing = cl.snap.ping;
+	}
+
 	if (cl_shownet->integer == 3) {
 		Com_Printf( "   snapshot:%i  delta:%i  ping:%i\n", cl.snap.messageNum,
 		cl.snap.deltaNum, cl.snap.ping );

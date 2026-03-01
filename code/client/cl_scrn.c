@@ -71,6 +71,10 @@ static int	netMonPingMin;
 static int	netMonPingMax;
 static qboolean	netMonPingValid;
 
+// FAST/RESET adjustment counts (reset each second; counted regardless of log level)
+static int	netMonFastCount;
+static int	netMonResetCount;
+
 // Session log file (opened lazily when cl_netlog > 0)
 static fileHandle_t	netLogFile;
 
@@ -735,6 +739,14 @@ void SCR_NetMonitorAddPing( int ping ) {
 	}
 }
 
+void SCR_NetMonitorAddFastAdjust( void ) {
+	netMonFastCount++;
+}
+
+void SCR_NetMonitorAddResetAdjust( void ) {
+	netMonResetCount++;
+}
+
 /* ----- session log helpers ----- */
 
 static void SCR_OpenNetLog( void ) {
@@ -810,6 +822,21 @@ void SCR_LogSnapLate( int measured, int expected ) {
 	Com_RealTime( &t );
 	Com_sprintf( line, sizeof(line), "[%02d:%02d:%02d] SNAP LATE  +%dms  (expected %dms  got %dms)\n",
 		t.tm_hour, t.tm_min, t.tm_sec, measured - expected, expected, measured );
+	SCR_WriteLog( line );
+}
+
+void SCR_LogPingJitter( int ping, int prevPing ) {
+	qtime_t t;
+	char    line[128];
+	int     delta = ping - prevPing;
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line), "[%02d:%02d:%02d] PING JITTER  %dms->%dms  (%+dms)\n",
+		t.tm_hour, t.tm_min, t.tm_sec, prevPing, ping, delta );
 	SCR_WriteLog( line );
 }
 
@@ -947,6 +974,8 @@ static void SCR_DrawNetMonitor( void ) {
 		int pingAvg    = ( netMonPingCount > 0 ) ? ( netMonPingSum / netMonPingCount ) : cl.snap.ping;
 		int pingMin    = netMonPingValid  ? netMonPingMin : cl.snap.ping;
 		int pingMax    = netMonPingValid  ? netMonPingMax : cl.snap.ping;
+		int fastCnt    = netMonFastCount;
+		int resetCnt   = netMonResetCount;
 
 		netMonInRate      = netMonInBytes;
 		netMonOutRate     = netMonOutBytes;
@@ -961,7 +990,7 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonFtMax       = 0;
 		netMonFtValid     = qfalse;
 		netMonSnapGapSum  = 0;
-		netMonSnapGapCount= 0;
+		netMonSnapGapCount = 0;
 		netMonSnapGapMax  = 0;
 		netMonCapHits     = 0;
 		netMonExtrapCount = 0;
@@ -969,6 +998,8 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonPingSum     = 0;
 		netMonPingCount   = 0;
 		netMonPingValid   = qfalse;
+		netMonFastCount   = 0;
+		netMonResetCount  = 0;
 
 		/* optional periodic stats line in the log */
 		if ( cl_netlog->integer >= 2 && netLogFile ) {
@@ -979,7 +1010,7 @@ static void SCR_DrawNetMonitor( void ) {
 			Com_sprintf( logline, sizeof(logline),
 				"[%02d:%02d:%02d] STATS  snap=%dHz  ping=%d(%d..%d)ms  fI=%.3f(INTERP)"
 				"  dT=%d..%dms  drop=%d/s  in=%dB/s  out=%dB/s"
-				"  ft=%d/%d/%dms  snapgap=%d/%dms  caps=%d  extrap=%d\n",
+				"  ft=%d/%d/%dms  snapgap=%d/%dms  caps=%d  extrap=%d  fast=%d  reset=%d\n",
 				t.tm_hour, t.tm_min, t.tm_sec,
 				snapHz, pingAvg, pingMin, pingMax,
 				cl.frameInterpolation,
@@ -987,7 +1018,8 @@ static void SCR_DrawNetMonitor( void ) {
 				netMonInRate, netMonOutRate,
 				ftMin, ftAvg, ftMax,
 				snapGapAvg, snapGapMax,
-				capHits, extrapCnt );
+				capHits, extrapCnt,
+				fastCnt, resetCnt );
 			SCR_WriteLog( logline );
 		}
 	}
@@ -1120,11 +1152,15 @@ void SCR_Init( void ) {
     Cvar_SetDescription( cl_netlog,
         "Net debug session logging.\n"
         "0 = off\n"
-        "1 = log timestamped console commands + FAST/RESET delta events + SNAP LATE events\n"
+        "1 = log FAST/RESET delta events + SNAP LATE events + PING JITTER events\n"
+        "    PING JITTER fires when per-snap ping change >= max(snapshotMsec/2, 10ms);\n"
+        "    rapid alternating events (e.g. +18ms/-18ms every snap) mean cl.serverTime\n"
+        "    oscillation is driving ping measurement to match different outgoing packets.\n"
         "2 = log level 1 events + periodic per-second stats\n"
         "  STATS fields: snap Hz, ping=avg(min..max), fI, dT=min..max, drop, in/out rates,\n"
         "                ft=min/avg/max client frame-time, snapgap=avg/max snap-interval jitter,\n"
-        "                caps=serverTime cap fires, extrap=extrapolated-frame count\n"
+        "                caps=serverTime cap fires, extrap=extrapolated-frame count,\n"
+        "                fast=FAST-adjust count, reset=RESET-adjust count\n"
         "Log file written to netdebug_<date>_<time>.log in the game folder.\n"
         "Default: 0" );
 
