@@ -1201,9 +1201,11 @@ void SCR_Init( void ) {
         "Enable the adaptive timing system that scales timing thresholds to the\n"
         "measured server snapshot interval (improves accuracy at 60Hz+ sv_fps).\n"
         "0 = off: vanilla Q3e behaviour — hardcoded resetTime=500, fastAdjust=100,\n"
-        "         pullback=-2/+1ms, extrapolateThresh=5ms, download throttle=50ms.\n"
-        "1 = on:  all snapshotMsec-scaled thresholds, fractional slowFrac accumulator,\n"
-        "         serverTime cap, adaptive extrapolateThresh, adaptive throttle.\n"
+        "         extrapolateThresh=5ms, download throttle=50ms.\n"
+        "         The fractional slowFrac accumulator is still active (no ±1ms\n"
+        "         oscillation) but thresholds are not scaled to snapshotMsec.\n"
+        "1 = on:  all snapshotMsec-scaled thresholds, serverTime cap,\n"
+        "         adaptive extrapolateThresh, adaptive throttle.\n"
         "Default: 0" );
 
     Cmd_AddCommand( "netgraph_dump", SCR_NetgraphDump_f );
