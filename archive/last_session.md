@@ -59,6 +59,7 @@ Key observations:
 | `extrap=N` | Frames where `extrapolatedSnapshot` set | Expected nonzero (normal drift control) |
 | `fast=N` | FAST adjustments per second | **Key oscillation indicator** — nonzero most seconds = sustained serverTimeDelta oscillation |
 | `reset=N` | RESET adjustments per second | >0 = large sudden dT shift (>500ms); typically a one-off event |
+| `slow=N` | abs(up-commits − down-commits) per second | 0 at equilibrium (green); sustained non-zero = serverTimeDelta drifting one direction |
 
 ### Event lines (`cl_netlog 1`)
 

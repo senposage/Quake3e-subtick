@@ -1131,11 +1131,11 @@ static void CL_AdjustTimeDelta( void ) {
 			if ( slowFrac >= 4 ) {
 				cl.serverTimeDelta++;
 				slowFrac -= 4;
-				SCR_NetMonitorAddSlowAdjust();
+				SCR_NetMonitorAddSlowAdjust( +1 );
 			} else if ( slowFrac <= -4 ) {
 				cl.serverTimeDelta--;
 				slowFrac += 4;
-				SCR_NetMonitorAddSlowAdjust();
+				SCR_NetMonitorAddSlowAdjust( -1 );
 			}
 		}
 	}

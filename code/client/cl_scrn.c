@@ -74,11 +74,13 @@ static qboolean	netMonPingValid;
 // FAST/RESET adjustment counts (reset each second; counted regardless of log level)
 static int	netMonFastCount;
 static int	netMonResetCount;
-// Slow-path ms-commit count (reset each second).
-// With the fractional-accumulator fix, this is 0 at 60Hz equilibrium — a non-zero
-// value here means serverTimeDelta is genuinely drifting (expected after late packets)
-// or, if combined with PING JITTER events, that the oscillation issue has recurred.
+// Slow-path net drift (signed: +1 per up-commit, -1 per down-commit; reset each second).
+// At ~50% extrap equilibrium the equal up/down commits cancel → net = 0.
+// A non-zero net means serverTimeDelta is genuinely drifting one direction; a large
+// non-zero net combined with PING JITTER events means the oscillation issue has recurred.
 static int	netMonSlowCount;
+// Per-second abs(netMonSlowCount) snapshot used by the display widget (stable for 1 s).
+static int	netMonSlowRate;
 
 // Session log file (opened lazily when cl_netlog > 0)
 static fileHandle_t	netLogFile;
@@ -752,8 +754,8 @@ void SCR_NetMonitorAddResetAdjust( void ) {
 	netMonResetCount++;
 }
 
-void SCR_NetMonitorAddSlowAdjust( void ) {
-	netMonSlowCount++;
+void SCR_NetMonitorAddSlowAdjust( int delta ) {
+	netMonSlowCount += delta;
 }
 
 /* ----- session log helpers ----- */
@@ -1010,6 +1012,7 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonPingValid   = qfalse;
 		netMonFastCount   = 0;
 		netMonResetCount  = 0;
+		netMonSlowRate    = slowCnt < 0 ? -slowCnt : slowCnt;
 		netMonSlowCount   = 0;
 
 		/* optional periodic stats line in the log */
@@ -1117,15 +1120,15 @@ static void SCR_DrawNetMonitor( void ) {
 		cl.snap.messageNum - cl.snap.deltaNum );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 10 – time-delta adjustment counts (current second so far).
-	 * slow = slow-path ms-commits; with the ½ms accumulator fix this is 0 at
-	 * 60Hz equilibrium.  A non-zero slow paired with PING JITTER in the log
-	 * means the oscillation issue has recurred.
+	/* row 10 – slow-path net drift per second: abs( up-commits − down-commits ).
+	 * At ~50 % extrap equilibrium equal up/down commits cancel → 0 (green).
+	 * A sustained non-zero value means serverTimeDelta is genuinely drifting;
+	 * combined with PING JITTER events it signals the oscillation issue.
 	 * fast = FAST-path fires (large snap-to-snap delta > 2×snapshotMsec). */
 	{
 		col = ( netMonFastCount > 0 ) ? colorRed :
-		      ( netMonSlowCount > 0 ) ? colorYellow : colorGreen;
-		Com_sprintf( line, sizeof(line), "Adj: slo=%d fst=%d", netMonSlowCount, netMonFastCount );
+		      ( netMonSlowRate  > 0 ) ? colorYellow : colorGreen;
+		Com_sprintf( line, sizeof(line), "Adj: slo=%d fst=%d", netMonSlowRate, netMonFastCount );
 		NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 	}
 
