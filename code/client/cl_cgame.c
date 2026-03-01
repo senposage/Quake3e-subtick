@@ -1264,12 +1264,29 @@ void CL_SetCGameTime( void ) {
 		if ( cl.serverTime - cl.oldServerTime < 0 ) {
 			cl.serverTime = cl.oldServerTime;
 		}
+		// cap serverTime to one snapshot interval ahead of the latest snap;
+		// without this, a realtime spike (e.g. alt-tab return) lets serverTime
+		// overshoot, causing cgame frameInterpolation > 1 and a visible snap-back
+		// once serverTimeDelta is next corrected — occurs at any sv_fps setting.
+		if ( cl.serverTime - (cl.snap.serverTime + cl.snapshotMsec) > 0 ) {
+			cl.serverTime = cl.snap.serverTime + cl.snapshotMsec;
+		}
 		cl.oldServerTime = cl.serverTime;
 
 		// note if we are almost past the latest frame (without timeNudge),
 		// so we will try and adjust back a bit when the next snapshot arrives.
-		if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
-			cl.extrapolatedSnapshot = qtrue;
+		// Scale the detection window with the measured snapshot interval:
+		// the vanilla hardcode of 5ms equals snapshotMsec/3 at ~60Hz but is
+		// too tight at lower rates (e.g. 20Hz needs ~16ms), causing excessive
+		// drift-back oscillation that shows as a sawtooth in the netgraph for
+		// several seconds regardless of sv_fps.
+		{
+			int extrapolateThresh = cl.snapshotMsec / 3;
+			if ( extrapolateThresh <  3 ) extrapolateThresh =  3;
+			if ( extrapolateThresh > 16 ) extrapolateThresh = 16;
+			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -extrapolateThresh ) {
+				cl.extrapolatedSnapshot = qtrue;
+			}
 		}
 	}
 
