@@ -20,9 +20,9 @@ Engine tick and input sampling rate (Hz). Controls how often the server processe
 ---
 
 ### sv_gameHz
-**Default:** 20 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
+**Default:** 0 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
 
-Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 20 matches UT4.3's QVM antiwarp assumption (`serverTime += 50` in `g_active.c`). Some constraints may have been relaxed in UT4.3.4 — testing at higher values is ongoing; do not assume 20 is still a hard requirement until confirmed.
+Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 0 (disabled, falls back to sv_fps). Set to 20 for UT4.3 QVM antiwarp compatibility (`serverTime += 50` in `g_active.c` assumes 50ms game frames).
 
 **Why:** Decouples game logic rate from engine tick rate so sv_fps can be raised without breaking QVM timers (bleed, bandage, inactivity) or antiwarp. At `sv_gameHz 20`, g_antiwarp is correct at any `sv_fps` — `G_RunClient` fires at 20Hz regardless of `sv_fps`, so the 50ms blank-cmd step always matches the game frame exactly. No stale or unnecessary latency is added.
 
@@ -52,7 +52,7 @@ Maximum physics step size (ms). 8ms = 125fps equivalent Pmove. Set to 0 to disab
 
 **Why:** Without this, a player at 333fps gets 3ms Pmove steps while a player at 60fps gets 16ms steps — different physics behavior (jump height, strafe speed). Clamping to 8ms equalizes everyone.
 
-**How:** `sv_client.c:SV_ClientThink()` fires multiple `GAME_CLIENT_THINK` calls per usercmd, each clamped to `sv_pmoveMsec` ms. Full real delta consumed across all steps so timers (bleed, bandage) stay correct. Bots excluded (they use 50ms steps from `level.time`). Safety: if `commandTime` doesn't advance on first call (intermission/pause), falls through to single call via `goto single_call`.
+**How:** `sv_client.c:SV_ClientThink()` fires multiple `GAME_CLIENT_THINK` calls per usercmd, each clamped to `sv_pmoveMsec` ms. Full real delta consumed across all steps so timers (bleed, bandage) stay correct. Bots excluded (they submit one usercmd per game frame with serverTime = level.time; clamping warps movement). Safety: if `commandTime` doesn't advance on first call (intermission/pause), falls through to single call via `goto single_call`.
 
 ---
 

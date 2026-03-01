@@ -5,7 +5,7 @@
 Urban Terror 4.3 (UT4.3) server engine enhancements built on top of **Quake3e** (an enhanced Q3 engine). The goal is a competitive-grade dedicated server with:
 
 - `sv_fps 60` (or higher) input sampling rate
-- `sv_gameHz 20` game logic rate (locked — see constraints)
+- `sv_gameHz 0` (disabled, default — falls back to sv_fps)
 - Engine-side antilag with sub-tick position history
 - Correct physics and game timer behaviour at elevated tick rates
 - Visual smoothness improvements for clients
@@ -83,7 +83,7 @@ Flags used in code (note: not all are ARCHIVE — antilag cvars are SERVERINFO o
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
-| `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (locked at 20 — see constraints) |
+| `sv_gameHz` | `0` | QVM GAME_RUN_FRAME rate (0 = disabled, falls back to sv_fps; set to 20 for UT4.3 antiwarp) |
 | `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step size (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame instead of sleeping |

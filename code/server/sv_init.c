@@ -889,8 +889,8 @@ void SV_Init( void )
 
     sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
 
-    sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nDefault 20 matches UT4.3 QVM antiwarp assumptions. Some constraints may be\nrelaxed in UT4.3.4 -- test before raising above 20. Never set higher than sv_fps.\n>0: GAME_RUN_FRAME fires at sv_gameHz Hz; sv.gameTime lags sv.time between frames,\n    enabling sv_extrapolate to correct stale player positions in between.\n 0: disabled (falls back to sv_fps); GAME_RUN_FRAME fires every engine tick,\n    sv.gameTime == sv.time always. sv_extrapolate still runs but has no stale\n    positions to correct; sv_bufferMs ring buffer queries still apply.\nDefault: 20");
+    sv_gameHz = Cvar_Get ("sv_gameHz", "0", CVAR_ARCHIVE | CVAR_SERVERINFO );
+    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nNever set higher than sv_fps.\n>0: GAME_RUN_FRAME fires at sv_gameHz Hz; sv.gameTime lags sv.time between frames,\n    enabling sv_extrapolate to correct stale player positions in between.\n    NOTE: bot positions update at sv_gameHz rate — bots appear laggy if sv_gameHz < sv_fps.\n    For UT4.3 QVM antiwarp compatibility set to 20 (requires sv_fps 20 for correct antiwarp).\n 0: disabled (falls back to sv_fps); GAME_RUN_FRAME fires every engine tick,\n    sv.gameTime == sv.time always. sv_extrapolate still runs but has no stale\n    positions to correct; sv_bufferMs ring buffer queries still apply.\nDefault: 0");
 
     sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "-1", CVAR_ARCHIVE | CVAR_SERVERINFO );
     Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients.\n-1 = match sv_fps (default, live-tracks sv_fps changes).\n 0 = fall back to per-client 'snaps' userinfo (vanilla Q3 behavior).\n>0 = explicit rate, capped to sv_fps.\nDefault: -1");

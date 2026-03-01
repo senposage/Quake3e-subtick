@@ -59,7 +59,7 @@ Urban Terror 4.3 (UT4.3) competitive server engine enhancement built on **Quake3
 
 Current runtime model:
 - `sv_fps 60` for high-rate input sampling
-- `sv_gameHz 20` for QVM game logic compatibility (may be raiseable in 4.3.4 — pending testing)
+- `sv_gameHz 0` (disabled, default — falls back to sv_fps)
 - `sv_snapshotFps -1` (= sv_fps) for downstream snapshot cadence
 
 UT4.3 QVM binaries (`qagame`, `cgame`, `ui`) are closed-source.
@@ -98,7 +98,7 @@ code/qcommon/
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
-| `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (20 matches UT4.3 antiwarp; some constraints may be relaxed in 4.3.4 — pending testing) |
+| `sv_gameHz` | `0` | QVM GAME_RUN_FRAME rate (0 = disabled/sv_fps; set to 20 for UT4.3 antiwarp compatibility) |
 | `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame |
