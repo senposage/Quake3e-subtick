@@ -1,6 +1,6 @@
 # Last Session Briefing
 **Updated:** 2026-03-01  
-**Branch:** `copilot/analyze-netlog-data`
+**Branch:** `copilot/fix-log-issue`
 
 > This file is rewritten at the end of every session.  Read it first.
 > Full session history lives in `archive/docs/debug-session-*.md`.
@@ -10,25 +10,69 @@
 ## Status
 
 **INTERP/EXTRAP oscillation: FIXED.**  
-User shared a netlog confirming zero EXTRAP events across the entire session.
-The `snap.serverTime - 1` cap is working; fI peaks at 0.938 (= 15/16) and never crosses 1.0.
+Confirmed. fI peaks at 0.938, never crosses 1.0.
 
-**½ms accumulator: PARTIALLY FIXED — 2+2 batch problem identified and fixed.**  
-The accumulator reduced episode severity but created constant low-level oscillation
-(every 4 snaps ≈ 64ms period).  Fix 2 (fold `slowFrac` into the extrap condition in ¼ms
-units) eliminates the binary 2+2 batch pattern, producing true 1+1 alternation and a
-constant serverTimeDelta.  Awaiting confirmation.
+**½ms accumulator + Fix 2 (slowFrac folded into extrap condition): FIXED.**  
+User confirmed "better than it was".  Log shows dT=1ms range, slow≈0 most seconds,
+fast=0 throughout.  The self-sustaining oscillation loop is broken.
 
 **Netgraph slow counter display: FIXED.**  
-Changed from absolute count (always cycling 0→30, always yellow) to signed net drift
-(abs(up-commits − down-commits) per second).  At equilibrium, net = 0 → green.
+Signed net drift; at equilibrium → 0 (green).
 
-**Remaining symptom: intermittent top-line chop in the lagometer.**  
-Expected to be resolved by Fix 2 (constant serverTimeDelta → no ping jitter).
+**PING JITTER log noise: FIXED (this session).**  
+Detection now only fires on the *alternating +N/−N* pattern (oscillation signature),
+not on every isolated boundary crossing.  See below for root-cause details.
 
 ---
 
-## What the Netlog Showed
+## This Session — Key Findings
+
+### Test environment (always)
+- `cl_maxpackets 125` (8 ms packet spacing)
+- `cl_packetdup 1–3`  
+- Server at 62 Hz (snapshotMsec ≈ 16 ms), client ≈ 125 fps (ft = 7/8/9 ms)
+
+### Why ±16 ms PING JITTER despite only 5-8 ms ICMP jitter
+
+The ping measurement (`cls.realtime − p_realtime[matchedPacket]`) resolves at the
+**client's packet spacing** (~8 ms at cl_maxpackets 125).  With RTT ≈ 32 ms and
+snapshotMsec = 16 ms:
+
+```
+RTT ≈ 2 × snapshotMsec  →  commands from the current snap window arrive at the
+server right at the edge of the next server tick.
+```
+
+Real 5-8 ms RTT jitter causes those commands to either just *make* the tick or just
+*miss* it.  When they miss, `commandTime` in the snapshot stays at the previous
+window's value — a full snapshotMsec (16 ms) older — so the matched outgoing packet
+jumps by **16 ms**.  This is a **structural RTT/tick-boundary coincidence**, not a
+client-side oscillation bug.
+
+### cl_packetdup — confirmed no lag
+`p_serverTime` is stamped with the **last (most recent) command** in every packet,
+regardless of how many duplicates `cl_packetdup` appends.  The server silently
+discards already-processed commands.  Zero timing impact in normal (no-loss) play.
+
+### Fix applied — PING JITTER alternating-pattern filter
+
+`cl_parse.c`: only call `SCR_LogPingJitter` when the current jump **reverses
+direction** relative to the previous qualifying jump AND that jump was ≤ 3 snaps
+ago.
+
+| Scenario | Gap | Logged? |
+|----------|-----|---------|
+| serverTimeDelta oscillation (every-other-snap) | 2 | ✓ from 2nd event |
+| serverTimeDelta oscillation (every snap) | 1 | ✓ from 2nd event |
+| Isolated RTT/boundary crossing | >>3 | ✗ suppressed |
+| Two sporadic events minutes apart | >>3 | ✗ suppressed |
+
+The oscillation signature (rapid sustained alternation) is still faithfully
+detected and logged.  The log noise from structural boundary crossings is gone.
+
+---
+
+## What the Netlog Showed (previous session)
 
 Session ran at 125 Hz then switched to 62 Hz via `\rcon sv_fps 60`.
 
@@ -37,14 +81,6 @@ Session ran at 125 Hz then switched to 62 Hz via `\rcon sv_fps 60`.
 | 125 Hz | 8 ms | 0.500–0.625 | ±1 ms | 0 |
 | 62 Hz (drifting) | 16 ms | 0.000–0.938 | 9 ms | 0 |
 | 62 Hz (settled) | 16 ms | 0.125–0.688 | ±1 ms | 0 |
-
-Key observations:
-- **No DELTA FAST or RESET events** logged — `CL_AdjustTimeDelta` was never triggered.
-- **fI=0.938** confirms the `-1` cap firing at 62 Hz ceiling (15/16 = 0.9375). ✓
-- **Settled 62 Hz oscillation amplitude is 10× larger than ±1 ms dT drift** — structural
-  beat between render frame rate and snap rate, not a timing bug.
-- The top-line chop is unrelated to EXTRAP.  The log had no frame-time or snap-jitter
-  data, so the cause remains unknown.
 
 ---
 

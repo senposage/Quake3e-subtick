@@ -522,20 +522,41 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
 
 	SCR_NetMonitorAddPing( cl.snap.ping );
 
-	// Log a PING JITTER event when the per-snap ping change exceeds half a snapshot
-	// interval. At 60Hz that is 8ms; at 20Hz it is 25ms. Rapid alternating events
-	// (e.g. 32ms->50ms->32ms every snap) indicate that cl.serverTime oscillation is
-	// causing the ping loop to match different outgoing packets on consecutive snaps,
-	// which in turn drives serverTimeDelta oscillation and the cg_drawfps jitter.
+	// Log a PING JITTER event only when an alternating +N/-N pattern is confirmed
+	// across consecutive snaps (i.e. two or more sign-reversing jumps within 3 snaps).
+	//
+	// Background: the ping measurement resolves at the client's outgoing-packet
+	// spacing (~8ms at cl_maxpackets 125).  Even with a perfectly stable
+	// serverTimeDelta, real network RTT jitter of 5-8ms can cause the server-side
+	// commandTime to straddle a packet boundary each snap, producing a ±snapshotMsec
+	// (~16ms) measured-ping jump with no client-side oscillation at all.
+	// Logging every such crossing floods the log with noise unrelated to the
+	// oscillation bug.
+	//
+	// The serverTimeDelta oscillation signature is a *sustained* alternating
+	// +N/-N pattern on back-to-back snaps (gap <= 3 snap sequences).  A single
+	// isolated crossing is structural RTT/tick-boundary coincidence and is
+	// suppressed.  See also: slow= field in STATS.
 	if ( cl.snap.ping < 999 ) {
-		static int prevPing = -1;
+		static int prevPing       = -1;
+		static int prevJitterDir  = 0;   // sign of the most recent qualifying jump
+		static int prevJitterMsgNum = 0; // cl.snap.messageNum when it occurred
 		if ( prevPing > 0 ) {
 			int delta    = cl.snap.ping - prevPing;
 			int absDelta = delta < 0 ? -delta : delta;
 			int thresh   = cl.snapshotMsec / 2;
 			if ( thresh < 10 ) thresh = 10;
-			if ( absDelta >= thresh )
-				SCR_LogPingJitter( cl.snap.ping, prevPing );
+			if ( absDelta >= thresh ) {
+				int dir = delta > 0 ? 1 : -1;
+				// Confirm oscillation: direction reversed and the previous jump
+				// was recent (within 3 snap intervals).
+				if ( prevJitterDir != 0 && dir != prevJitterDir
+				     && ( cl.snap.messageNum - prevJitterMsgNum ) <= 3 ) {
+					SCR_LogPingJitter( cl.snap.ping, prevPing );
+				}
+				prevJitterDir    = dir;
+				prevJitterMsgNum = cl.snap.messageNum;
+			}
 		}
 		prevPing = cl.snap.ping;
 	}

@@ -76,8 +76,8 @@ static int	netMonFastCount;
 static int	netMonResetCount;
 // Slow-path net drift (signed: +1 per up-commit, -1 per down-commit; reset each second).
 // At ~50% extrap equilibrium the equal up/down commits cancel → net = 0.
-// A non-zero net means serverTimeDelta is genuinely drifting one direction; a large
-// non-zero net combined with PING JITTER events means the oscillation issue has recurred.
+// A non-zero net means serverTimeDelta is genuinely drifting one direction; combined
+// with PING JITTER log events (alternating pattern confirmed) the oscillation has recurred.
 static int	netMonSlowCount;
 // Per-second abs(netMonSlowCount) snapshot used by the display widget (stable for 1 s).
 static int	netMonSlowRate;
@@ -1123,7 +1123,7 @@ static void SCR_DrawNetMonitor( void ) {
 	/* row 10 – slow-path net drift per second: abs( up-commits − down-commits ).
 	 * At ~50 % extrap equilibrium equal up/down commits cancel → 0 (green).
 	 * A sustained non-zero value means serverTimeDelta is genuinely drifting;
-	 * combined with PING JITTER events it signals the oscillation issue.
+	 * combined with PING JITTER log events (alternating pattern) it signals oscillation.
 	 * fast = FAST-path fires (large snap-to-snap delta > 2×snapshotMsec). */
 	{
 		col = ( netMonFastCount > 0 ) ? colorRed :
@@ -1180,9 +1180,11 @@ void SCR_Init( void ) {
         "Net debug session logging.\n"
         "0 = off\n"
         "1 = log FAST/RESET delta events + SNAP LATE events + PING JITTER events\n"
-        "    PING JITTER fires when per-snap ping change >= max(snapshotMsec/2, 10ms);\n"
-        "    rapid alternating events (e.g. 32ms->40ms / 40ms->32ms every snap) paired\n"
-        "    with slow>0 in STATS means the serverTimeDelta oscillation has recurred.\n"
+        "    PING JITTER fires when a sign-reversing ping jump >= max(snapshotMsec/2,\n"
+        "    10ms) recurs within 3 snaps of the previous one (alternating +N/-N\n"
+        "    pattern = serverTimeDelta oscillation signature).  Isolated single\n"
+        "    crossings are suppressed as structural RTT/tick-boundary noise.\n"
+        "    Pair with slow>0 in STATS to confirm oscillation has recurred.\n"
         "2 = log level 1 events + periodic per-second stats\n"
         "  STATS fields: snap Hz, ping=avg(min..max), fI, dT=min..max, drop, in/out rates,\n"
         "                ft=min/avg/max client frame-time, snapgap=avg/max snap-interval jitter,\n"
