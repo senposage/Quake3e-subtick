@@ -247,7 +247,7 @@ Reference: `docs/ghidra-cgame-patches.md`.
 - Extrapolation detection: `snapshotMsec / 3` (clamped `[3, 16]`) — flag drift correction when client time is running ahead.
 - Drift pullback: stronger at high snapshot rates (`-4ms/frame` high-rate vs `-2ms/frame` vanilla-rate behavior).
 
-**serverTime clamp:** `cl.serverTime` capped to `cl.snap.serverTime + cl.snapshotMsec` to prevent interpolation overshoot/snap-back behavior.
+**serverTime clamp:** `cl.serverTime` capped to `cl.snap.serverTime - 1` to prevent both interpolation overshoot/snap-back behavior *and* premature QVM snapshot-window advancement. Capping at exactly `snap.serverTime` triggered the QVM's `cg.time >= cg.nextSnap->serverTime` transition, setting `cg.nextSnap = NULL` and entering EXTRAP mode intermittently (inducible via `sv_fps` changes or network jitter).
 
 ### Antiwarp Analysis
 

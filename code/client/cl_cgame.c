@@ -1268,25 +1268,29 @@ void CL_SetCGameTime( void ) {
 		if ( cl.serverTime - cl.oldServerTime < 0 ) {
 			cl.serverTime = cl.oldServerTime;
 		}
-		// cap serverTime to the latest received snapshot so the QVM's
-		// frameInterpolation stays in [0, 1].  Without this cap, any drift
-		// past cl.snap.serverTime produces a ratio > 1 in the QVM's:
-		//   cg.frameInterpolation = (cg.time - cg.snap->serverTime) / delta
-		// At 20Hz (50ms windows) a 1-2ms overshoot is barely visible (1.04);
-		// at 60Hz (16ms windows) the same drift yields 1.12 — a 12% overshoot
-		// where every entity jumps past its target, then snaps back on the
-		// next snapshot.  This is the primary source of player-model "popping"
-		// at high snapshot rates.  Clamping here is the engine-side equivalent
-		// of the QVM binary Patch 2 described in archive/docs/ghidra-cgame-patches.md.
-		if ( cl.serverTime > cl.snap.serverTime ) {
-			cl.serverTime = cl.snap.serverTime;
+		// Cap serverTime one millisecond below the latest received snapshot.
+		// The QVM advances its snapshot window the moment cg.time reaches
+		// cg.nextSnap->serverTime (== cl.snap.serverTime).  With a cap at
+		// exactly cl.snap.serverTime, the cap itself triggers the transition:
+		// the QVM finds no snapshot beyond cl.snap yet, sets cg.nextSnap=NULL,
+		// and enters EXTRAP mode — producing the intermittent INTERP/EXTRAP
+		// flicker seen in cg_lagometer when network jitter or an sv_fps change
+		// briefly pushes serverTimeDelta above its equilibrium.  Capping one
+		// millisecond short keeps cg.time strictly less than cg.nextSnap->serverTime,
+		// so the QVM never triggers that transition prematurely.
+		// The -1ms penalty: fI at the cap is (snapshotMsec-1)/snapshotMsec
+		// (~0.94 at 60 Hz, ~0.98 at 20 Hz) — imperceptible vs. the visual
+		// artefact it eliminates.
+		if ( cl.serverTime >= cl.snap.serverTime ) {
+			cl.serverTime = cl.snap.serverTime - 1;
 		}
 		cl.oldServerTime = cl.serverTime;
 
 		// Compute estimated QVM frameInterpolation: mirrors the calculation the
 		// cgame QVM performs internally between its cg.snap (prev) and cg.nextSnap
-		// (cl.snap).  Because cl.serverTime is now capped at cl.snap.serverTime,
-		// this value is always in [0, 1].  Used by the net monitor widget.
+		// (cl.snap).  cl.serverTime is capped at cl.snap.serverTime - 1, so this
+		// value is always in [0, ~0.94] at 60 Hz / [0, ~0.98] at 20 Hz.
+		// Used by the net monitor widget.
 		{
 			const clSnapshot_t *prevSnap = &cl.snapshots[ (cl.snap.messageNum - 1) & PACKET_MASK ];
 			int interval = cl.snap.serverTime - prevSnap->serverTime;

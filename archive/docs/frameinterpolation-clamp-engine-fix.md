@@ -48,7 +48,7 @@ snapshot).  This allowed the QVM to see `cg.time > cg.nextSnap->serverTime`, kee
 **Commit:** This change
 
 The serverTime cap was tightened from `cl.snap.serverTime + cl.snapshotMsec` to
-exactly `cl.snap.serverTime`:
+`cl.snap.serverTime - 1` (via an intermediate step at exactly `cl.snap.serverTime`):
 
 ```c
 // Before (allowed frameInterpolation > 1 at 60 Hz):
@@ -56,11 +56,28 @@ if ( cl.serverTime - (cl.snap.serverTime + cl.snapshotMsec) > 0 ) {
     cl.serverTime = cl.snap.serverTime + cl.snapshotMsec;
 }
 
-// After (frameInterpolation always in [0, 1]):
+// Intermediate (fixed overshoot; introduced intermittent EXTRAP — see below):
 if ( cl.serverTime > cl.snap.serverTime ) {
     cl.serverTime = cl.snap.serverTime;
 }
+
+// Final (prevents both overshoot and the QVM snapshot-boundary EXTRAP):
+if ( cl.serverTime >= cl.snap.serverTime ) {
+    cl.serverTime = cl.snap.serverTime - 1;
+}
 ```
+
+The intermediate fix at exactly `cl.snap.serverTime` introduced a new intermittent
+symptom: whenever the cap fired, `cg.time` equalled `cg.nextSnap->serverTime` exactly.
+The QVM's `CG_TransitionSnapshot` advances the snapshot window the moment
+`cg.time >= cg.nextSnap->serverTime`.  After advancing, the QVM looked for the next
+snapshot (one beyond `cl.snap`), found none buffered yet, set `cg.nextSnap = NULL`,
+and entered EXTRAP mode — producing the same INTERP/EXTRAP flicker as before, but
+only in transient bursts (network jitter, frame spike, or `sv_fps` change) rather than
+continuously.
+
+Capping one millisecond short keeps `cg.time` strictly below `cg.nextSnap->serverTime`
+at all times; the QVM never transitions prematurely.
 
 This is the engine-side equivalent of the QVM binary Patch 2 described in
 `archive/docs/ghidra-cgame-patches.md`.
@@ -74,14 +91,12 @@ also explicitly clamped to `[0, 1]` as a defence-in-depth measure.
 
 | Scenario | Before | After |
 |---|---|---|
-| Normal play, sv_fps 60 | Entity positions overshoot target by up to 12%, then snap back | Smooth: entities hold at target position until next snapshot |
-| Alt-tab / large realtime spike | serverTime jumped forward by many seconds, large overshoot | Clamped to latest snapshot time immediately |
-| Waiting for next snapshot (no new snap yet) | `cg.time` advances past `cg.nextSnap`, frameInterpolation > 1 | `cg.time` held at `cg.nextSnap->serverTime`, frameInterpolation = 1.0 |
+| Normal play, sv_fps 60 | Entity positions overshoot target by up to 12%, then snap back | Smooth: entities hold at ~94% interpolation until next snapshot |
+| Network jitter / sv_fps change | serverTimeDelta spike → cap fires → QVM enters EXTRAP briefly | cap fires at snap-1 → cg.time stays in INTERP window, no EXTRAP |
+| Alt-tab / large realtime spike | serverTime jumped forward by many seconds, large overshoot | Clamped immediately |
 
-The tradeoff is that the engine no longer extrapolates past the latest snapshot.
-When a snapshot is late, entities hold at their last known position (frameInterpolation = 1.0)
-rather than extrapolating forward.  At 60 Hz this latency is at most 16 ms, which is
-imperceptible compared to the visible popping it replaces.
+The tradeoff: when the cap is actively holding, entities hold at ~94% interpolation
+(60 Hz) rather than exactly 100%.  This is imperceptible in practice.
 
 ---
 

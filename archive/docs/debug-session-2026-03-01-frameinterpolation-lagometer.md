@@ -115,7 +115,61 @@ readout (net monitor) was enough to identify the root cause in a single session.
 
 ---
 
-## Key Lessons
+## Residual Intermittent Oscillation (Follow-up, 2026-03-01)
+
+### New Diagnostic Information
+
+After the initial fix, the oscillation was found to be **intermittent** — often absent for
+an entire 20-minute round, but reproducible by changing `sv_fps` or related cvars
+mid-session.
+
+### Refined Root Cause
+
+The cap at exactly `cl.snap.serverTime` introduced a boundary-touching problem:
+
+- The QVM advances its snapshot window (`cg.snap = cg.nextSnap`) the instant
+  `cg.time >= cg.nextSnap->serverTime`.
+- `cg.nextSnap->serverTime == cl.snap.serverTime` (engine's current snapshot IS the QVM's
+  next interpolation target).
+- When the cap fires: `cg.time = cl.snap.serverTime = cg.nextSnap->serverTime` — the
+  transition condition is met.
+- After the transition, the QVM looks for the snapshot *after* `cl.snap`. That snapshot has
+  not arrived yet. The QVM sets `cg.nextSnap = NULL` and enters **EXTRAP mode**.
+
+Under **steady-state play** the cap rarely fires (equilibrium from `+1/-1` drift holds
+`cl.serverTime ≈ snap.serverTime - 5ms`), so the oscillation was intermittent rather than
+continuous.
+
+**Induction path via `sv_fps` change:** when `sv_fps` drops (e.g. 60→20), no new snapshot
+arrives for ~34ms extra. During that wait `cl.serverTime` advances with realtime, hits the
+cap at exactly `snap.serverTime`, and the QVM sees the boundary condition for the full
+duration of the delay.
+
+### Refined Fix
+
+Cap changed from `cl.snap.serverTime` to `cl.snap.serverTime - 1`:
+
+```c
+// Before:
+if ( cl.serverTime > cl.snap.serverTime )
+    cl.serverTime = cl.snap.serverTime;
+
+// After:
+if ( cl.serverTime >= cl.snap.serverTime )
+    cl.serverTime = cl.snap.serverTime - 1;
+```
+
+`cg.time` is now always strictly less than `cg.nextSnap->serverTime`.  The QVM never
+triggers a premature snapshot transition regardless of jitter, rate changes, or frame spikes.
+
+The fI ceiling at the cap becomes `(snapshotMsec - 1) / snapshotMsec`:
+
+| Rate | snapshotMsec | fI ceiling |
+|------|-------------|------------|
+| 60 Hz | 16 ms | 0.9375 |
+| 20 Hz | 50 ms | 0.9800 |
+
+Both are well within the INTERP range and imperceptible in practice.
 
 1. **Lagometer top bar = QVM's view of `frameInterpolation`.** If the top bar flickers
    at 60Hz but not at 20Hz, the interpolation ratio is crossing 1.0 near every
