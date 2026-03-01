@@ -746,9 +746,8 @@ static void SCR_NetgraphDump_f( void ) {
 	/* --- client timing & network stats --- */
 	Com_sprintf( line, sizeof(line), "Snapshot Rate : %d Hz  (%d ms interval EMA)\n",  snapHz, cl.snapshotMsec );               SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Ping          : %d ms\n",                         cl.snap.ping );                          SCR_WriteLog( line );
-	Com_sprintf( line, sizeof(line), "Interp Mode   : fI=%.3f  %s\n",
-		cl.frameInterpolation,
-		( cl.frameInterpolation > 1.0f ) ? "EXTRAPOLATING" : "INTERPOLATING" );
+	Com_sprintf( line, sizeof(line), "Interp Mode   : fI=%.3f  INTERPOLATING\n",
+		cl.frameInterpolation );
 	SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Server Time   : %d  (delta %d ms)\n",             cl.snap.serverTime, cl.serverTimeDelta );SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Snap Seq      : #%d  (delta from #%d, gap %d)\n", cl.snap.messageNum, cl.snap.deltaNum, cl.snap.messageNum - cl.snap.deltaNum ); SCR_WriteLog( line );
@@ -842,12 +841,11 @@ static void SCR_DrawNetMonitor( void ) {
 			Com_RealTime( &t );
 			snapHz = ( cl.snapshotMsec > 0 ) ? ( 1000 / cl.snapshotMsec ) : 0;
 			Com_sprintf( logline, sizeof(logline),
-				"[%02d:%02d:%02d] STATS  snap=%dHz  ping=%dms  fI=%.3f(%s)"
+				"[%02d:%02d:%02d] STATS  snap=%dHz  ping=%dms  fI=%.3f(INTERP)"
 				"  dT=%dms  drop=%d/s  in=%dB/s  out=%dB/s\n",
 				t.tm_hour, t.tm_min, t.tm_sec,
 				snapHz, cl.snap.ping,
 				cl.frameInterpolation,
-				( cl.frameInterpolation > 1.0f ) ? "EXTRAP" : "INTERP",
 				cl.serverTimeDelta, netMonDropRate,
 				netMonInRate, netMonOutRate );
 			SCR_WriteLog( logline );
@@ -896,11 +894,10 @@ static void SCR_DrawNetMonitor( void ) {
 	Com_sprintf( line, sizeof(line), "Ping: %dms", cl.snap.ping );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
-	/* row 4 – estimated QVM frameInterpolation: [0,1] = interpolating, >1 = extrapolating */
-	col = ( cl.frameInterpolation > 1.0f ) ? colorYellow : colorGreen;
-	Com_sprintf( line, sizeof(line), "fI:   %.3f %s",
-		cl.frameInterpolation,
-		( cl.frameInterpolation > 1.0f ) ? "EXTRAP" : "INTERP" );
+	/* row 4 – estimated QVM frameInterpolation: always [0,1] now that serverTime is capped at snap time */
+	col = colorGreen;
+	Com_sprintf( line, sizeof(line), "fI:   %.3f INTERP",
+		cl.frameInterpolation );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
 	/* row 5 – server time delta */

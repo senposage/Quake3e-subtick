@@ -33,7 +33,7 @@ Quick reference for finding key code paths. All custom changes are in `code/serv
 
 ### Time Sync
 - **`code/client/cl_cgame.c`** — `CL_AdjustTimeDelta()`: vanilla +1/-2 drift, RESET_TIME, fast adjust thresholds
-- **`code/client/cl_cgame.c`** — `CL_SetCGameTime()`: serverTime advancement, extrapolation detection
+- **`code/client/cl_cgame.c`** — `CL_SetCGameTime()`: serverTime advancement, extrapolation detection; `cl.serverTime` capped at `cl.snap.serverTime` to prevent QVM `frameInterpolation > 1.0` (see `docs/frameinterpolation-clamp-engine-fix.md`)
 - **QVM intercept (client-side):** `cl_cgame.c` → `case CG_CVAR_SET` — blocks QVM from setting `snaps`, `cg_smoothClients`
 
 ### Snapshot Parsing
@@ -57,7 +57,7 @@ These files are in `UrbanTerror42_Source/` and are reference only. We cannot mod
 - **`bg_misc.c`** — `BG_PlayerStateToEntityState()`: copies `ps->velocity` → `s->pos.trDelta`, sets `TR_INTERPOLATE`. `BG_EvaluateTrajectory()`: switch on trType (TR_INTERPOLATE just does VectorCopy — the Ghidra patch target).
 
 ### cgame Rendering
-- **`cg_ents.c`** — `CG_AddPacketEntities()`: frameInterpolation computation (unclamped — Ghidra Patch 2). `CG_CalcEntityLerpPositions()`: interpolate vs extrapolate decision, nextSnap null check (Ghidra Patch 3). `cg_smoothClients` TR_INTERPOLATE force.
+- **`cg_ents.c`** — `CG_AddPacketEntities()`: frameInterpolation computation (unclamped in QVM — mitigated engine-side by serverTime cap; see `docs/frameinterpolation-clamp-engine-fix.md`; full QVM fix is Ghidra Patch 2). `CG_CalcEntityLerpPositions()`: interpolate vs extrapolate decision, nextSnap null check (Ghidra Patch 3). `cg_smoothClients` TR_INTERPOLATE force.
 - **`cg_local.h`** — `cg_t` struct: `frameInterpolation`, `snap`, `nextSnap`, `time`
 
 ---
@@ -67,6 +67,7 @@ These files are in `UrbanTerror42_Source/` and are reference only. We cannot mod
 - **`CLAUDE_CONTEXT.md`** — Full project context, architecture, all custom changes explained
 - **`CLAUDE.md`** — Claude Code project instructions
 - **`CVARS.md`** — All custom cvars with defaults, flags, rationale, and interaction table
+- **`docs/frameinterpolation-clamp-engine-fix.md`** — Engine-side fix for frameInterpolation > 1.0 popping at 60Hz (cl.serverTime cap tightened); includes upgrade path for Ghidra patches
 - **`docs/ghidra-cgame-patches.md`** — Three QVM binary patches for cgame (frameInterpolation clamp, TR_INTERPOLATE velocity extrapolation, nextSnap null fallback)
 - **`docs/g-antiwarp-engine-feasibility.md`** — Feasibility analysis for moving g_antiwarp into sv_antilag.c; covers what is/isn't engine-fixable and the recommended approach
 - **`docs/debug-session-2026-02-26-cl_snapScaling-stutter.md`** — cl_snapScaling oscillation investigation and removal
