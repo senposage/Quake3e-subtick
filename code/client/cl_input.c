@@ -692,7 +692,7 @@ static qboolean CL_ReadyToSendPacket( void ) {
 
 	// If we are downloading, throttle packet rate to avoid flooding
 	{
-		int throttleMs = ( cl_snapScaling && cl_snapScaling->integer && cl.snapshotMsec ) ? cl.snapshotMsec : 50;
+		int throttleMs = cl.snapshotMsec > 0 ? cl.snapshotMsec : 50;
 		if ( *clc.downloadTempName && cls.realtime - clc.lastPacketSentTime < throttleMs ) {
 			return qfalse;
 		}

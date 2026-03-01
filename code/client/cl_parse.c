@@ -475,22 +475,20 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
 	}
 
 	// measure snapshot interval for adaptive time management
-	if ( cl_snapScaling && cl_snapScaling->integer ) {
-		if ( cl.snap.valid && newSnap.serverTime > cl.snap.serverTime ) {
-			int measured = newSnap.serverTime - cl.snap.serverTime;
-			if ( measured >= 1 && measured <= 200 ) {
-				if ( cl.snapshotMsec == 0 ) {
-					cl.snapshotMsec = measured; // first measurement
-				} else {
-					cl.snapshotMsec = ( cl.snapshotMsec * 3 + measured ) >> 2; // exponential moving average
-				}
-				if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
-				if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
+	if ( cl.snap.valid && newSnap.serverTime > cl.snap.serverTime ) {
+		int measured = newSnap.serverTime - cl.snap.serverTime;
+		if ( measured >= 1 && measured <= 200 ) {
+			if ( cl.snapshotMsec == 0 ) {
+				cl.snapshotMsec = measured; // first measurement
+			} else {
+				cl.snapshotMsec = ( cl.snapshotMsec * 3 + measured ) >> 2; // exponential moving average
 			}
+			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
+			if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
 		}
 	}
 	if ( cl.snapshotMsec == 0 ) {
-		cl.snapshotMsec = 50; // default to 20Hz until measured
+		cl.snapshotMsec = 50; // default to 20Hz until first measurement
 	}
 
 	// copy to the current good spot
@@ -688,7 +686,8 @@ static void CL_ParseServerInfo( void )
 		clc.sv_dlURL[len-1] = '\0';
 
 	// pre-compute snapshot interval from server's advertised rate
-	if ( cl_snapScaling && cl_snapScaling->integer ) {
+	// (gives accurate snapshotMsec from the first frame before EMA converges)
+	{
 		int snapFps = atoi( Info_ValueForKey( serverInfo, "sv_snapshotFps" ) );
 		if ( snapFps > 0 ) {
 			cl.snapshotMsec = 1000 / snapFps;

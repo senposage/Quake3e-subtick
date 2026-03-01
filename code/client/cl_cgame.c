@@ -1045,17 +1045,14 @@ static void CL_AdjustTimeDelta( void ) {
 	int		resetTime;
 	int		fastAdjust;
 
-	if ( cl_snapScaling && cl_snapScaling->integer ) {
-		// Scale thresholds with snapshot interval — at higher rates, desync of the
-		// same number of frames represents fewer milliseconds, so react sooner.
-		resetTime = cl.snapshotMsec * 10;       // 10 snapshots worth of desync
-		fastAdjust = cl.snapshotMsec * 2;       // 2 snapshots worth of desync
-		if ( resetTime < 200 ) resetTime = 200;
-		if ( fastAdjust < 50 ) fastAdjust = 50;
-	} else {
-		resetTime = 500;   // vanilla Q3 RESET_TIME
-		fastAdjust = 100;  // vanilla Q3 fast adjust threshold
-	}
+	// Scale thresholds proportionally to the measured snapshot interval so the
+	// system reacts at the same number-of-snapshots equivalent across all rates.
+	// At 20Hz (snapshotMsec=50): resetTime=500, fastAdjust=100 — same as vanilla.
+	// At 60Hz (snapshotMsec=16): resetTime=500 (floor), fastAdjust=50 (floor).
+	resetTime  = cl.snapshotMsec * 10;
+	fastAdjust = cl.snapshotMsec * 2;
+	if ( resetTime  < 500 ) resetTime  = 500;   // floor: don't hard-reset on small drifts
+	if ( fastAdjust <  50 ) fastAdjust =  50;   // floor: don't fast-adjust too aggressively
 
 	cl.newSnapshots = qfalse;
 
@@ -1089,13 +1086,12 @@ static void CL_AdjustTimeDelta( void ) {
 		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
 			if ( cl.extrapolatedSnapshot ) {
 				cl.extrapolatedSnapshot = qfalse;
-				// faster pullback at high snapshot rates where the interpolation
-				// window is tighter and recovery needs to be more aggressive
-				if ( cl_snapScaling && cl_snapScaling->integer ) {
-					cl.serverTimeDelta -= ( cl.snapshotMsec < 30 ) ? 4 : 2;
-				} else {
-					cl.serverTimeDelta -= 2; // vanilla
-				}
+				// Scale pullback with snapshot rate: vanilla -2ms was tuned for 20Hz
+				// (50ms windows). At 60Hz (16ms windows) it is disproportionately
+				// aggressive and creates a visible sawtooth in the netgraph.
+				// Use -1ms at 60Hz+ so the +1/-1 balance stabilises at 50% instead
+				// of the +1/-2 equilibrium that causes the oscillation cycle.
+				cl.serverTimeDelta -= ( cl.snapshotMsec < 30 ) ? 1 : 2;
 			} else {
 				// otherwise, move our sense of time forward to minimize total latency
 				cl.serverTimeDelta++;
@@ -1270,34 +1266,10 @@ void CL_SetCGameTime( void ) {
 		}
 		cl.oldServerTime = cl.serverTime;
 
-		// Clamp serverTime to not overshoot the current interpolation window.
-		// Without this, cgame computes frameInterpolation > 1.0 when cg.time
-		// passes cg.nextSnap->serverTime, causing entity positions to overshoot
-		// ahead and then snap back. At high snapshot rates (16ms windows at 60Hz)
-		// this happens frequently due to render frame timing variance.
-		if ( cl_snapScaling && cl_snapScaling->integer ) {
-			int maxTime = cl.snap.serverTime + cl.snapshotMsec;
-			if ( cl.serverTime > maxTime ) {
-				cl.serverTime = maxTime;
-			}
-		}
-
 		// note if we are almost past the latest frame (without timeNudge),
 		// so we will try and adjust back a bit when the next snapshot arrives.
-		if ( cl_snapScaling && cl_snapScaling->integer ) {
-			// Scale the margin with snapshot interval — at higher snapshot rates the
-			// interpolation window is tighter so we need earlier detection.
-			int extrapMargin = cl.snapshotMsec / 3;
-			if ( extrapMargin < 3 ) extrapMargin = 3;
-			if ( extrapMargin > 16 ) extrapMargin = 16;
-			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -extrapMargin ) {
-				cl.extrapolatedSnapshot = qtrue;
-			}
-		} else {
-			// vanilla: hardcoded 5ms margin
-			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
-				cl.extrapolatedSnapshot = qtrue;
-			}
+		if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
+			cl.extrapolatedSnapshot = qtrue;
 		}
 	}
 
@@ -1325,8 +1297,7 @@ void CL_SetCGameTime( void ) {
 			clc.timeDemoStart = Sys_Milliseconds();
 		}
 		clc.timeDemoFrames++;
-		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames *
-			( ( cl_snapScaling && cl_snapScaling->integer && cl.snapshotMsec ) ? cl.snapshotMsec : 50 );
+		cl.serverTime = clc.timeDemoBaseTime + clc.timeDemoFrames * cl.snapshotMsec;
 	}
 
 	//while ( cl.serverTime >= cl.snap.serverTime ) {

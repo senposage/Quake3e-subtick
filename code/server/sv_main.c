@@ -1491,11 +1491,12 @@ void SV_Frame( int msec ) {
 
 	sv.timeResidual += msec;
 
-	// Hard clamp: never accumulate more than one frame worth of residual.
-	// Prevents burst-ticking after sv_fps changes regardless of whether
-	// the modified flag was caught. Safe to do every frame.
-	if ( sv.timeResidual >= frameMsec * 2 )
-		sv.timeResidual = frameMsec - 1;
+	// Safety cap: allow at most 2 ticks of catch-up per Com_Frame so normal OS
+	// scheduling jitter is absorbed gracefully. sv_fps change protection is handled
+	// precisely in SV_TrackCvarChanges; this is only a backstop for extreme lag
+	// (debugger pause, system suspend, etc.).
+	if ( sv.timeResidual > frameMsec * 2 )
+		sv.timeResidual = frameMsec * 2;
 
 	// if time is about to hit the 32nd bit, kick all clients
 	// and clear sv.time, rather

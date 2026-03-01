@@ -1328,11 +1328,15 @@ static void SV_BuildCommonSnapshot( void )
 							es->pos.trBase[1] += es->pos.trDelta[1] * dt;
 							es->pos.trBase[2] += es->pos.trDelta[2] * dt;
 						} else {
-							// Real player without buffer: use current position with dead-zone check.
-							if ( DotProduct( velocity, velocity ) > 100.0f ) {
-								VectorCopy( origin, es->pos.trBase );
-								VectorCopy( velocity, es->pos.trDelta );
-							}
+							// Real player without buffer: always use ps->origin.
+							// No dead-zone needed — TR_INTERPOLATE never switches
+							// trajectory type, so idle micro-oscillations are
+							// imperceptible after cgame lerp. The old dead-zone
+							// caused a position pop at direction changes: velocity
+							// briefly drops below 10 ups and the entity kept the
+							// stale QVM position (up to 50ms old at sv_gameHz 20).
+							VectorCopy( origin, es->pos.trBase );
+							VectorCopy( velocity, es->pos.trDelta );
 						}
 					}
 				}
