@@ -77,10 +77,25 @@ An alternating `+N / −N` pattern on consecutive lines is the **oscillation sig
 
 ## The Oscillation: What cg_drawfps Jitter Actually Means
 
-`cg_drawfps` shows `1000 / cg.frametime` where `cg.frametime = cg.time_now − cg.time_prev`
-and `cg.time = cl.serverTime` (passed from the client each frame).
+### cg_drawfps is NOT ping — but both oscillate for the same reason
 
-So **cg_drawfps oscillating wildly = cl.serverTime oscillating wildly**.
+| Display | What it measures | Units |
+|---|---|---|
+| `cg_drawfps` | Render framerate — `1000 / cls.frametime` (wall-clock time between rendered frames) | frames/second |
+| `cl_drawping` | Network RTT — `cls.realtime − cl.outPackets[N].p_realtime` | milliseconds |
+
+During the oscillation episode **both gauges jitter wildly**, but for different immediate reasons:
+
+- **`cg_drawfps` jitters** because `cl.serverTime` (passed as `cg.time` via `CG_DRAW_ACTIVE_FRAME`)
+  bounces each frame → cgame does alternating amounts of rendering work → wall-clock frame time
+  varies → FPS display oscillates.
+- **`cl_drawping` jitters** because the same `cl.serverTime` oscillation corrupts `p_serverTime`
+  in outgoing packets → the ping loop matches packet N on one snap, packet N−1 on the next →
+  ping alternates between two values (e.g. 32ms / 50ms).
+
+`cg_drawfps` oscillation is the more direct symptom: it means `cl.serverTime` itself is
+bouncing. The ping oscillation is a knock-on effect of that same bounce. **Seeing both
+oscillate simultaneously confirms the self-sustaining feedback loop is active.**
 
 ### Causal chain
 
