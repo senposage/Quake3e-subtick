@@ -83,6 +83,14 @@ static int	netMonSlowCount;
 // Per-second abs(netMonSlowCount) snapshot used by the display widget (stable for 1 s).
 static int	netMonSlowRate;
 
+// Per-second display snapshots (survive into widget rendering)
+static int	netMonDispPingMin;
+static int	netMonDispPingMax;
+static int	netMonDispCapHits;
+static int	netMonDispExtrapCnt;
+static int	netMonDispSnapGapAvg;
+static int	netMonDispSnapGapMax;
+
 // Session log file (opened lazily when cl_netlog > 0)
 static fileHandle_t	netLogFile;
 
@@ -926,7 +934,7 @@ static void SCR_NetgraphDump_f( void ) {
 /* < NM_PING_MEDIUM    green — acceptable                             */
 
 /* Widget columns and rows (character cells). */
-#define NM_COLS 21
+#define NM_COLS 24
 #define NM_ROWS 10
 
 /*
@@ -1016,6 +1024,13 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonSlowRate    = slowCnt < 0 ? -slowCnt : slowCnt;
 		netMonSlowCount   = 0;
 
+		netMonDispPingMin    = pingMin;
+		netMonDispPingMax    = pingMax;
+		netMonDispCapHits    = capHits;
+		netMonDispExtrapCnt  = extrapCnt;
+		netMonDispSnapGapAvg = snapGapAvg;
+		netMonDispSnapGapMax = snapGapMax;
+
 		/* optional periodic stats line in the log */
 		if ( cl_netlog->integer >= 2 && netLogFile ) {
 			qtime_t t;
@@ -1076,10 +1091,11 @@ static void SCR_DrawNetMonitor( void ) {
 	Com_sprintf( line, sizeof(line), "Snap: %3dHz %3dms", snapHz, cl.snapshotMsec );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 3 – ping (colour-coded by threshold) */
+	/* row 3 – ping with min..max range (colour-coded by threshold) */
 	col = ( cl.snap.ping >= NM_PING_HIGH   ) ? colorRed    :
 	      ( cl.snap.ping >= NM_PING_MEDIUM ) ? colorYellow : colorGreen;
-	Com_sprintf( line, sizeof(line), "Ping: %dms", cl.snap.ping );
+	Com_sprintf( line, sizeof(line), "Ping:%d(%d..%d)ms",
+		cl.snap.ping, netMonDispPingMin, netMonDispPingMax );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
 	/* row 4 – smoothed fI: EMA (alpha=0.2) reduces per-frame flicker at high
@@ -1096,24 +1112,28 @@ static void SCR_DrawNetMonitor( void ) {
 	Com_sprintf( line, sizeof(line), "dT:   %+dms", cl.serverTimeDelta );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 6 – dropped packets/s */
-	col = ( netMonDropRate > 0 ) ? colorRed : colorGreen;
-	Com_sprintf( line, sizeof(line), "Drop: %d/s", netMonDropRate );
+	/* row 6 – drops + extrapolations + caps (merged) */
+	col = ( netMonDropRate > 0 || netMonDispExtrapCnt > 0 ) ? colorRed :
+	      ( netMonDispCapHits > 0 ) ? colorYellow : colorGreen;
+	Com_sprintf( line, sizeof(line), "D:%d E:%d C:%d",
+		netMonDropRate, netMonDispExtrapCnt, netMonDispCapHits );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
-	/* row 7 – in rate */
-	if ( netMonInRate >= 1024 )
-		Com_sprintf( line, sizeof(line), "In:   %.1fKB/s", netMonInRate / 1024.0f );
+	/* row 7 – bandwidth in/out (merged) */
+	if ( netMonInRate >= 1024 || netMonOutRate >= 1024 )
+		Com_sprintf( line, sizeof(line), "I:%.0fK O:%.0fK",
+			netMonInRate / 1024.0f, netMonOutRate / 1024.0f );
 	else
-		Com_sprintf( line, sizeof(line), "In:   %dB/s", netMonInRate );
+		Com_sprintf( line, sizeof(line), "I:%dB O:%dB",
+			netMonInRate, netMonOutRate );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 8 – out rate */
-	if ( netMonOutRate >= 1024 )
-		Com_sprintf( line, sizeof(line), "Out:  %.1fKB/s", netMonOutRate / 1024.0f );
-	else
-		Com_sprintf( line, sizeof(line), "Out:  %dB/s", netMonOutRate );
-	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
+	/* row 8 – snap interval jitter (deviation from expected) */
+	col = ( netMonDispSnapGapMax > cl.snapshotMsec ) ? colorRed :
+	      ( netMonDispSnapGapAvg > cl.snapshotMsec / 2 ) ? colorYellow : colorGreen;
+	Com_sprintf( line, sizeof(line), "Jit:avg=%d max=%dms",
+		netMonDispSnapGapAvg, netMonDispSnapGapMax );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
 	/* row 9 – snapshot sequence / delta compression detail */
 	Com_sprintf( line, sizeof(line), "Seq:  #%d d:%d",

@@ -195,7 +195,7 @@ static qboolean SV_Antilag_GetPositionAtTime(
 
     // Walk the valid portion of the ring buffer
     for ( i = 0; i < hist->count; i++ ) {
-        idx = ( hist->head - 1 - i + SV_ANTILAG_MAX_HISTORY_SLOTS )
+        idx = ( hist->head - 1 - i + sv_shadowHistorySlots )
               % sv_shadowHistorySlots;
 
         svShadowPos_t *s = &hist->slots[idx];
@@ -317,7 +317,7 @@ static qboolean SV_Antilag_GetMostRecentPosition(
         return qfalse;
 
     // Most recent slot is one behind head
-    idx = ( hist->head - 1 + SV_ANTILAG_MAX_HISTORY_SLOTS ) % sv_shadowHistorySlots;
+    idx = ( hist->head - 1 + sv_shadowHistorySlots ) % sv_shadowHistorySlots;
     slot = &hist->slots[idx];
 
     if ( !slot->valid )

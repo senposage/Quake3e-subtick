@@ -63,7 +63,18 @@ int SV_BotAllocateClient( void ) {
 	cl->gentity->s.number = i;
 	cl->state = CS_ACTIVE;
 	cl->lastPacketTime = svs.time;
-	{ int _sc = sv_snapshotFps ? sv_snapshotFps->integer : sv_fps->integer; if (_sc > sv_fps->integer) _sc = sv_fps->integer; if (_sc < 1) _sc = 1; cl->snapshotMsec = 1000 / _sc; }
+	{
+		int snapHz = sv_fps->integer;
+		if ( sv_snapshotFps ) {
+			if ( sv_snapshotFps->integer == -1 )
+				snapHz = sv_fps->integer;
+			else if ( sv_snapshotFps->integer > 0 )
+				snapHz = sv_snapshotFps->integer;
+		}
+		if ( snapHz > sv_fps->integer ) snapHz = sv_fps->integer;
+		if ( snapHz < 1 ) snapHz = 1;
+		cl->snapshotMsec = 1000 / snapHz;
+	}
 	cl->netchan.remoteAddress.type = NA_BOT;
 	cl->rate = 0;
 

@@ -1207,7 +1207,7 @@ static void SV_Status_f( void ) {
 	Com_Printf( " address" );
 	for ( i = 0; i < max_addrlength - 7; i++ )
 		Com_Printf( " " );
-	Com_Printf( " rate\n" );
+	Com_Printf( " rate  snpMs choked lastSz queue\n" );
 
 	Com_Printf( "-- ----- ---- " );
 	for ( i = 0; i < max_namelength; i++ )
@@ -1215,7 +1215,7 @@ static void SV_Status_f( void ) {
 	Com_Printf( " " );
 	for ( i = 0; i < max_addrlength; i++ )
 		Com_Printf( "-" );
-	Com_Printf( " -----\n" );
+	Com_Printf( " ----- ----- ------ ------ -----\n" );
 #endif
 
 	for ( i = 0, cl = svs.clients ; i < sv_maxclients->integer ; i++, cl++ )
@@ -1251,11 +1251,32 @@ static void SV_Status_f( void ) {
 		for ( j = 0; j < l; j++ )
 			Com_Printf( " " );
 
-		// rate
-		Com_Printf( " %5i\n", cl->rate );
+		// rate + network health
+		Com_Printf( " %5i %5i %6s %6i %5i\n",
+			cl->rate,
+			cl->snapshotMsec,
+			cl->rateDelayed ? "CHOKED" : "ok",
+			cl->netchan.lastSentSize,
+			SV_CountQueue( cl ) );
 	}
 
 	Com_Printf( "\n" );
+}
+
+
+/*
+==================
+SV_CountQueue
+==================
+*/
+static int SV_CountQueue( const client_t *cl ) {
+	int count = 0;
+	const netchan_buffer_t *buf = cl->netchan_start_queue;
+	while ( buf ) {
+		count++;
+		buf = buf->next;
+	}
+	return count;
 }
 
 
