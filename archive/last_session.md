@@ -75,29 +75,78 @@ An alternating `+N / −N` pattern on consecutive lines is the **oscillation sig
 
 ---
 
-## The Oscillation: What cg_drawfps Jitter Actually Means
+## The Oscillation: Root Cause — Confirmed
 
-### cg_drawfps is NOT ping — but both oscillate for the same reason
+### Evidence summary
+
+| Source | Value | Conclusion |
+|---|---|---|
+| `cg_drawfps` ping display | oscillates 32↔40ms per snap | client-side measurement artifact |
+| `cg_drawfps` FPS display | **stable** (no oscillation) | render loop is fine |
+| Scoreboard ping | steady 40–41ms | server-reported average is accurate |
+| ICMP ping to server (Windows) | 38–44ms, stable | **network is fine — oscillation is 100% client-side** |
+| Effects observed | mild lag + visible position jitter from other clients | `cl.serverTime` itself is oscillating |
+
+### Root cause: slow-path ±1ms oscillation in `CL_AdjustTimeDelta`
+
+The slow drift path made integer ±1ms adjustments to `serverTimeDelta` every snap.  At the
+60Hz equilibrium (50% extrapolation rate) the result was `serverTimeDelta` toggling ±1ms
+*every single snap*, causing `cl.serverTime` to oscillate by ±1ms.
+
+**Full causal chain:**
+```
+CL_AdjustTimeDelta slow path: +1ms / -1ms per snap at 60Hz equilibrium
+    → serverTimeDelta oscillates ±1ms every snap
+        → cl.serverTime = cls.realtime + serverTimeDelta  oscillates ±1ms
+            → outgoing commands stamped with oscillating serverTime
+                → server Pmove runs alternating time steps
+                    → position jitter visible from other clients       ← gameplay impact
+            → client-side prediction uses oscillating time base
+                    → mild lag / stutter felt locally                  ← gameplay impact
+            → p_serverTime in outgoing packets oscillates ±1ms
+                → ping loop straddles commandTime boundary
+                    → matched packet alternates between i and i+1
+                        → ping display flips 32↔40ms per snap          ← observable symptom
+```
+
+The 10–20 second envelope (starts slow, ramps up, levels out, returns) is how long
+`serverTimeDelta`'s equilibrium point spends within ±1ms of the `commandTime =
+p_serverTime[i]` boundary, driven by very slow server-clock drift (~0.003Hz off nominal
+60Hz → 1ms drift per ~330 snaps ≈ 5s per ms).  When the equilibrium drifts clear of the
+boundary the ping display stabilises on its own — but the ±1ms cl.serverTime oscillation
+and its gameplay effects continue regardless.
+
+### The fix: ½ms fractional accumulator in `CL_AdjustTimeDelta` (cl_cgame.c)
+
+Replace the integer ±1ms per-snap step with a ½ms accumulator (4 units = 1ms).  At
+exactly 50% extrapolation rate the accumulator oscillates 0↔2, never reaching the ±4
+commit threshold — `serverTimeDelta` stays perfectly constant.
+
+```
+Equilibrium (50% extrap, alternating no/extrap):
+  slowFrac: 0 → +2 → 0 → +2 → 0 …   (never reaches ±4)
+  serverTimeDelta: CONSTANT            ← no more ±1ms noise
+```
+
+Off-equilibrium convergence speed is halved (e.g. a 5ms excursion now takes ~167ms to
+correct via the slow path instead of ~83ms), but large excursions still hit the FAST or
+RESET paths which are unchanged.
+
+`slowFrac` is reset to 0 whenever FAST or RESET fires so stale slow-drift history never
+corrupts recovery from a large correction.
+
+### cg_drawfps shows FPS and ping — distinct displays
 
 | Display | What it measures | Units |
 |---|---|---|
-| `cg_drawfps` | Render framerate — `1000 / cls.frametime` (wall-clock time between rendered frames) | frames/second |
-| `cl_drawping` | Network RTT — `cls.realtime − cl.outPackets[N].p_realtime` | milliseconds |
+| `cg_drawfps` FPS | `1000 / cls.frametime` (wall-clock between rendered frames) | frames/second |
+| `cg_drawfps` ping | `snapshot->ping` = raw per-snap `cls.realtime − p_realtime[matched_packet]` | milliseconds |
 
-During the oscillation episode **both gauges jitter wildly**, but for different immediate reasons:
+The FPS display was stable because the render loop is driven by `cls.frametime` (wall
+clock), not by `cl.serverTime`.  The ping display oscillated because the ping measurement
+is directly derived from `cl.serverTime` (via `p_serverTime` in outgoing packets).
 
-- **`cg_drawfps` jitters** because `cl.serverTime` (passed as `cg.time` via `CG_DRAW_ACTIVE_FRAME`)
-  bounces each frame → cgame does alternating amounts of rendering work → wall-clock frame time
-  varies → FPS display oscillates.
-- **`cl_drawping` jitters** because the same `cl.serverTime` oscillation corrupts `p_serverTime`
-  in outgoing packets → the ping loop matches packet N on one snap, packet N−1 on the next →
-  ping alternates between two values (e.g. 32ms / 50ms).
-
-`cg_drawfps` oscillation is the more direct symptom: it means `cl.serverTime` itself is
-bouncing. The ping oscillation is a knock-on effect of that same bounce. **Seeing both
-oscillate simultaneously confirms the self-sustaining feedback loop is active.**
-
-### Causal chain
+### Causal chain (pre-fix)
 
 ```
 cl.serverTime oscillates
@@ -112,8 +161,8 @@ cl.serverTime oscillates
 
 The FAST threshold at 60Hz is `2 × snapshotMsec = 32ms`.
 If ping oscillates by ≥ 32ms → FAST fires every other snap → `fast=~30/s` in STATS.
-If ping oscillates by < 32ms → handled only by +1/−2ms slow drift → takes many seconds to
-converge → sustained chop without triggering FAST events.
+If ping oscillates by < 32ms → handled only by slow drift → sustained chop without
+triggering FAST events.
 
 ### What the log will show during oscillation
 

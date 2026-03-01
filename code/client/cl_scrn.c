@@ -74,6 +74,11 @@ static qboolean	netMonPingValid;
 // FAST/RESET adjustment counts (reset each second; counted regardless of log level)
 static int	netMonFastCount;
 static int	netMonResetCount;
+// Slow-path ms-commit count (reset each second).
+// With the fractional-accumulator fix, this is 0 at 60Hz equilibrium — a non-zero
+// value here means serverTimeDelta is genuinely drifting (expected after late packets)
+// or, if combined with PING JITTER events, that the oscillation issue has recurred.
+static int	netMonSlowCount;
 
 // Session log file (opened lazily when cl_netlog > 0)
 static fileHandle_t	netLogFile;
@@ -747,6 +752,10 @@ void SCR_NetMonitorAddResetAdjust( void ) {
 	netMonResetCount++;
 }
 
+void SCR_NetMonitorAddSlowAdjust( void ) {
+	netMonSlowCount++;
+}
+
 /* ----- session log helpers ----- */
 
 static void SCR_OpenNetLog( void ) {
@@ -915,7 +924,7 @@ static void SCR_NetgraphDump_f( void ) {
 
 /* Widget columns and rows (character cells). */
 #define NM_COLS 21
-#define NM_ROWS  9
+#define NM_ROWS 10
 
 /*
  * NM_DrawRow — draw a NUL-terminated string starting at (*tx, ty) using
@@ -976,6 +985,7 @@ static void SCR_DrawNetMonitor( void ) {
 		int pingMax    = netMonPingValid  ? netMonPingMax : cl.snap.ping;
 		int fastCnt    = netMonFastCount;
 		int resetCnt   = netMonResetCount;
+		int slowCnt    = netMonSlowCount;
 
 		netMonInRate      = netMonInBytes;
 		netMonOutRate     = netMonOutBytes;
@@ -1000,6 +1010,7 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonPingValid   = qfalse;
 		netMonFastCount   = 0;
 		netMonResetCount  = 0;
+		netMonSlowCount   = 0;
 
 		/* optional periodic stats line in the log */
 		if ( cl_netlog->integer >= 2 && netLogFile ) {
@@ -1010,7 +1021,8 @@ static void SCR_DrawNetMonitor( void ) {
 			Com_sprintf( logline, sizeof(logline),
 				"[%02d:%02d:%02d] STATS  snap=%dHz  ping=%d(%d..%d)ms  fI=%.3f(INTERP)"
 				"  dT=%d..%dms  drop=%d/s  in=%dB/s  out=%dB/s"
-				"  ft=%d/%d/%dms  snapgap=%d/%dms  caps=%d  extrap=%d  fast=%d  reset=%d\n",
+				"  ft=%d/%d/%dms  snapgap=%d/%dms  caps=%d  extrap=%d"
+				"  fast=%d  reset=%d  slow=%d\n",
 				t.tm_hour, t.tm_min, t.tm_sec,
 				snapHz, pingAvg, pingMin, pingMax,
 				cl.frameInterpolation,
@@ -1019,7 +1031,7 @@ static void SCR_DrawNetMonitor( void ) {
 				ftMin, ftAvg, ftMax,
 				snapGapAvg, snapGapMax,
 				capHits, extrapCnt,
-				fastCnt, resetCnt );
+				fastCnt, resetCnt, slowCnt );
 			SCR_WriteLog( logline );
 		}
 	}
@@ -1105,6 +1117,18 @@ static void SCR_DrawNetMonitor( void ) {
 		cl.snap.messageNum - cl.snap.deltaNum );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
+	/* row 10 – time-delta adjustment counts (current second so far).
+	 * slow = slow-path ms-commits; with the ½ms accumulator fix this is 0 at
+	 * 60Hz equilibrium.  A non-zero slow paired with PING JITTER in the log
+	 * means the oscillation issue has recurred.
+	 * fast = FAST-path fires (large snap-to-snap delta > 2×snapshotMsec). */
+	{
+		col = ( netMonFastCount > 0 ) ? colorRed :
+		      ( netMonSlowCount > 0 ) ? colorYellow : colorGreen;
+		Com_sprintf( line, sizeof(line), "Adj: slo=%d fst=%d", netMonSlowCount, netMonFastCount );
+		NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
+	}
+
 	re.SetColor( NULL );
 }
 
@@ -1154,13 +1178,15 @@ void SCR_Init( void ) {
         "0 = off\n"
         "1 = log FAST/RESET delta events + SNAP LATE events + PING JITTER events\n"
         "    PING JITTER fires when per-snap ping change >= max(snapshotMsec/2, 10ms);\n"
-        "    rapid alternating events (e.g. +18ms/-18ms every snap) mean cl.serverTime\n"
-        "    oscillation is driving ping measurement to match different outgoing packets.\n"
+        "    rapid alternating events (e.g. 32ms->40ms / 40ms->32ms every snap) paired\n"
+        "    with slow>0 in STATS means the serverTimeDelta oscillation has recurred.\n"
         "2 = log level 1 events + periodic per-second stats\n"
         "  STATS fields: snap Hz, ping=avg(min..max), fI, dT=min..max, drop, in/out rates,\n"
         "                ft=min/avg/max client frame-time, snapgap=avg/max snap-interval jitter,\n"
         "                caps=serverTime cap fires, extrap=extrapolated-frame count,\n"
-        "                fast=FAST-adjust count, reset=RESET-adjust count\n"
+        "                fast=FAST-adjust count, reset=RESET-adjust count,\n"
+        "                slow=slow-path ms-commits (0 at 60Hz equilibrium = fix working;\n"
+        "                     non-zero = genuine drift or oscillation regression)\n"
         "Log file written to netdebug_<date>_<time>.log in the game folder.\n"
         "Default: 0" );
 
