@@ -559,7 +559,7 @@ World BSP surfaces are uploaded once at map load. Model surfaces are uploaded pe
 
 ### Pre-built Pipeline Variants
 
-Vulkan requires a distinct `VkPipeline` for each shader stage type + state combination. The engine pre-builds all `MAX_VK_PIPELINES` variants at startup. Types include: `TYPE_SIGNLE_TEXTURE`, `TYPE_MULTI_TEXTURE_MUL2`, `TYPE_MULTI_TEXTURE_ADD2`, etc. — one per texture blend mode.
+Vulkan requires a distinct `VkPipeline` for each shader stage type + state combination. The engine pre-builds all `MAX_VK_PIPELINES` variants at startup. Types include: `TYPE_SIGNLE_TEXTURE` (sic — typo in the original source), `TYPE_MULTI_TEXTURE_MUL2`, `TYPE_MULTI_TEXTURE_ADD2`, etc. — one per texture blend mode.
 
 ---
 
