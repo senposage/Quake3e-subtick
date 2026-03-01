@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Start every session by reading `archive/last_session.md` first.**
+> It is rewritten at the end of every session and summarises exactly where things stand,
+> what was last worked on, and what the open question is.  Reading it saves the user from
+> having to re-explain context.
+
 ---
 
 ## Ground Rules for AI Agents
@@ -272,6 +277,7 @@ See `docs/g-antiwarp-engine-feasibility.md` for the full analysis.
 
 ## Reference Docs
 
+- `last_session.md` — **read first**: what was last worked on, what's open, key files.
 - `CLAUDE_CONTEXT.md` — full architecture/rationale.
 - `docs/CODEMAP.md` — code navigation map.
 - `CVARS.md` — cvar catalog and interaction notes.
