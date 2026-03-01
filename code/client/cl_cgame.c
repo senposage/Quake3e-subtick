@@ -1048,11 +1048,15 @@ static void CL_AdjustTimeDelta( void ) {
 	// Scale thresholds proportionally to the measured snapshot interval so the
 	// system reacts at the same number-of-snapshots equivalent across all rates.
 	// At 20Hz (snapshotMsec=50): resetTime=500, fastAdjust=100 — same as vanilla.
-	// At 60Hz (snapshotMsec=16): resetTime=500 (floor), fastAdjust=50 (floor).
+	// At 60Hz (snapshotMsec=16): resetTime=500 (floor), fastAdjust=32.
 	resetTime  = cl.snapshotMsec * 10;
 	fastAdjust = cl.snapshotMsec * 2;
-	if ( resetTime  < 500 ) resetTime  = 500;   // floor: don't hard-reset on small drifts
-	if ( fastAdjust <  50 ) fastAdjust =  50;   // floor: don't fast-adjust too aggressively
+	if ( resetTime < 500 ) resetTime = 500;   // floor: don't hard-reset on small drifts
+	// No floor on fastAdjust: 2×snapshotMsec is proportionally correct at all rates
+	// (matches vanilla Q3's 100ms = 2×50ms at 20Hz). The old 50ms floor meant that
+	// at 60Hz+ any disturbance under 50ms spent 32+ slow-drift steps recovering
+	// instead of using the faster half-delta correction — visible as a multi-second
+	// sawtooth oscillation in the netgraph for any moderate load spike.
 
 	cl.newSnapshots = qfalse;
 
