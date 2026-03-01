@@ -477,7 +477,15 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
 	// measure snapshot interval for adaptive time management
 	if ( cl.snap.valid && newSnap.serverTime > cl.snap.serverTime ) {
 		int measured = newSnap.serverTime - cl.snap.serverTime;
-		if ( measured >= 1 && measured <= 200 ) {
+		// Reject outlier measurements that are clearly anomalous (OS scheduler
+		// hiccup, loopback timing quirk, single dropped packet) so they don't
+		// temporarily inflate snapshotMsec and shift all the derived thresholds
+		// (fastAdjust, extrapolateThresh) for the next 4-5 snapshots.
+		// Dynamic bound of 4×snapshotMsec: accepts up to a 4-interval gap at any
+		// rate (covers server double-tick + one extra), falls back to 200ms if
+		// snapshotMsec is not yet initialised (first snapshot before EMA warms up).
+		int maxMeasured = cl.snapshotMsec > 0 ? cl.snapshotMsec * 4 : 200;
+		if ( measured >= 1 && measured <= maxMeasured ) {
 			if ( cl.snapshotMsec == 0 ) {
 				cl.snapshotMsec = measured; // first measurement
 			} else {
