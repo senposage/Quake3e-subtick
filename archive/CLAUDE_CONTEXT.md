@@ -254,13 +254,13 @@ At `sv_fps 60` with `cl_maxpackets 30` (UT default): server processes 60 input t
 
 `BG_PlayerStateToEntityState` is called only inside `ClientEndFrame`, which runs at the end of each `GAME_RUN_FRAME` — i.e., at `sv_gameHz` rate (20Hz, every 50ms). This means `ent->s.pos.trBase` (the entity position in outbound snapshots) only updates 20 times per second.
 
-At `sv_fps 60 / sv_snapshotFps 60`, three consecutive snapshots go out between each game frame. Without correction:
+**This affects both real human players AND bots** — it is not a bot-specific problem. At `sv_fps 60 / sv_snapshotFps 60`, three consecutive snapshots go out between each game frame. Without correction:
 - snap at t=0ms: position P₀ (fresh game frame)
-- snap at t=16ms: position P₀ (stale — unchanged)
-- snap at t=33ms: position P₀ (stale — unchanged)
+- snap at t=16ms: position P₀ (stale — unchanged, for everyone)
+- snap at t=33ms: position P₀ (stale — unchanged, for everyone)
 - snap at t=50ms: position P₁ (new game frame — jump)
 
-The cgame interpolates these and sees two dead frames followed by a sudden jump. This is the visual stutter.
+The cgame interpolates these and sees two dead frames followed by a sudden jump. This is the visual stutter — visible for **all** clients watching any player.
 
 ### Fix: Engine-Side Position Fixup (sv_snapshot.c)
 
