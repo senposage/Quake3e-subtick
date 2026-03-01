@@ -20,11 +20,13 @@ Engine tick and input sampling rate (Hz). Controls how often the server processe
 ---
 
 ### sv_gameHz
-**Default:** 20 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
+**Default:** 0 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
 
-Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 20 matches UT4.3's QVM antiwarp assumption (`serverTime += 50` in `g_active.c`). Some constraints may have been relaxed in UT4.3.4 — testing at higher values is ongoing; do not assume 20 is still a hard requirement until confirmed.
+Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 0 (disabled, falls back to sv_fps). Set to 20 for UT4.3 QVM antiwarp compatibility (`serverTime += 50` in `g_active.c` assumes 50ms game frames).
 
 **Why:** Decouples game logic rate from engine tick rate so sv_fps can be raised without breaking QVM timers (bleed, bandage, inactivity) or antiwarp. At `sv_gameHz 20`, g_antiwarp is correct at any `sv_fps` — `G_RunClient` fires at 20Hz regardless of `sv_fps`, so the 50ms blank-cmd step always matches the game frame exactly. No stale or unnecessary latency is added.
+
+**Effect on player positions:** `BG_PlayerStateToEntityState` — which updates `ent->s.pos.trBase` (the entity position stamped into snapshots) — is called inside `ClientEndFrame`, which runs inside `GAME_RUN_FRAME`. When `sv_gameHz 20`, this only fires at 20Hz. **Both real human players AND bots** have stale snapshot positions in vanilla mode when `sv_fps > sv_gameHz`. `sv_extrapolate 1` (default) corrects this for both: real players via `ps->origin` (exact, updated every usercmd by Pmove), bots via velocity extrapolation (`ps->velocity * dt`). No correction is needed when `sv_gameHz 0` because `GAME_RUN_FRAME` fires at `sv_fps` rate.
 
 **How (sv_gameHz > 0):** Inner `while` loop in `SV_Frame()` accumulates `sv.gameTimeResidual` and fires `GAME_RUN_FRAME(sv.gameTime)` when it reaches `1000/sv_gameHz`. Between firings, `sv.gameTime` lags `sv.time` — this gap (`sv.time - sv.gameTime`) is what the extrapolation patch reads in `SV_BuildCommonSnapshot` to correct stale player entity positions.
 
@@ -52,21 +54,23 @@ Maximum physics step size (ms). 8ms = 125fps equivalent Pmove. Set to 0 to disab
 
 **Why:** Without this, a player at 333fps gets 3ms Pmove steps while a player at 60fps gets 16ms steps — different physics behavior (jump height, strafe speed). Clamping to 8ms equalizes everyone.
 
-**How:** `sv_client.c:SV_ClientThink()` fires multiple `GAME_CLIENT_THINK` calls per usercmd, each clamped to `sv_pmoveMsec` ms. Full real delta consumed across all steps so timers (bleed, bandage) stay correct. Bots excluded (they use 50ms steps from `level.time`). Safety: if `commandTime` doesn't advance on first call (intermission/pause), falls through to single call via `goto single_call`.
+**How:** `sv_client.c:SV_ClientThink()` fires multiple `GAME_CLIENT_THINK` calls per usercmd, each clamped to `sv_pmoveMsec` ms. Full real delta consumed across all steps so timers (bleed, bandage) stay correct. Bots excluded (they submit one usercmd per game frame with serverTime = level.time; clamping warps movement). Safety: if `commandTime` doesn't advance on first call (intermission/pause), falls through to single call via `goto single_call`.
 
 ---
 
 ### sv_extrapolate
 **Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
 
-Engine-side position correction for high sv_fps snapshots.
+Engine-side position correction for high sv_fps snapshots. **Affects both real human players AND bots** — the stutter problem is not bot-specific.
 
-- **0** = disabled. Vanilla behavior: `BG_PlayerStateToEntityState` only runs at sv_gameHz (20Hz), so 3 consecutive 60Hz snapshots have identical player positions → visible stutter.
-- **1** = enabled. Real players: reads actual `ps->origin` from the game module (updated every usercmd by Pmove). Bots: velocity-based extrapolation (`trBase += trDelta * dt`), which is accurate because bot AI only changes direction at game frame boundaries.
+- **0** = disabled. Vanilla behavior: `BG_PlayerStateToEntityState` only runs at sv_gameHz (20Hz), so 3 consecutive 60Hz snapshots have identical positions for **all** players (real and bots) → visible stutter for everyone.
+- **1** = enabled. Real players: reads `ps->origin` (exact, updated every usercmd by Pmove — always fresh regardless of sv_gameHz). Bots: velocity-based extrapolation (`trBase += ps->velocity * dt`), accurate because bot AI only changes direction at game frame boundaries.
 
-**Why:** At sv_fps 60 with sv_gameHz 20, the entity state (`ent->s`) only updates every 3rd engine tick. Without correction, clients see players teleporting every 50ms instead of moving smoothly every 16ms.
+**No effect when sv_gameHz 0** (default): game frames fire at sv_fps rate, entity state is always fresh, sv_extrapolate is a harmless no-op for both player types.
 
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` runs on every snapshot tick regardless of `sv_gameHz` setting. `extrapolateMs = sv.time - sv.gameTime` is used by the bot velocity path (`trBase += trDelta * dt`); when `extrapolateMs == 0` (sv_gameHz disabled or at a game-frame boundary tick), `dt=0` so bot positions are unchanged. Real-player path reads `ps->origin` directly on every tick — when `extrapolateMs == 0` this is the same value `BG_PlayerStateToEntityState` already wrote (harmless redundancy). The `sv_bufferMs` ring buffer query (Phase 1) runs every tick regardless of `extrapolateMs`, ensuring consistent delayed positions. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
+**Why:** At sv_fps 60 with sv_gameHz 20, the entity state (`ent->s`) only updates every 3rd engine tick. Without correction, **all** clients see players teleporting every 50ms instead of moving smoothly every 16ms — this is not limited to bots.
+
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` runs on every snapshot tick regardless of `sv_gameHz` setting. `extrapolateMs = sv.time - sv.gameTime` is used by the bot velocity path (`trBase += ps->velocity * dt`); when `extrapolateMs == 0` (sv_gameHz disabled or at a game-frame boundary tick), `dt=0` so bot positions are unchanged. Real-player path reads `ps->origin` directly on every tick — when `extrapolateMs == 0` this is the same value `BG_PlayerStateToEntityState` already wrote (harmless redundancy). The `sv_bufferMs` ring buffer query (Phase 1) runs every tick regardless of `extrapolateMs`, ensuring consistent delayed positions. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
 
 ---
 

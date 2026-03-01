@@ -5,7 +5,7 @@
 Urban Terror 4.3 (UT4.3) server engine enhancements built on top of **Quake3e** (an enhanced Q3 engine). The goal is a competitive-grade dedicated server with:
 
 - `sv_fps 60` (or higher) input sampling rate
-- `sv_gameHz 20` game logic rate (locked — see constraints)
+- `sv_gameHz 0` (disabled, default — falls back to sv_fps)
 - Engine-side antilag with sub-tick position history
 - Correct physics and game timer behaviour at elevated tick rates
 - Visual smoothness improvements for clients
@@ -83,7 +83,7 @@ Flags used in code (note: not all are ARCHIVE — antilag cvars are SERVERINFO o
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
-| `sv_gameHz` | `20` | QVM GAME_RUN_FRAME rate (locked at 20 — see constraints) |
+| `sv_gameHz` | `0` | QVM GAME_RUN_FRAME rate (0 = disabled, falls back to sv_fps; set to 20 for UT4.3 antiwarp) |
 | `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step size (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame instead of sleeping |
@@ -254,13 +254,13 @@ At `sv_fps 60` with `cl_maxpackets 30` (UT default): server processes 60 input t
 
 `BG_PlayerStateToEntityState` is called only inside `ClientEndFrame`, which runs at the end of each `GAME_RUN_FRAME` — i.e., at `sv_gameHz` rate (20Hz, every 50ms). This means `ent->s.pos.trBase` (the entity position in outbound snapshots) only updates 20 times per second.
 
-At `sv_fps 60 / sv_snapshotFps 60`, three consecutive snapshots go out between each game frame. Without correction:
+**This affects both real human players AND bots** — it is not a bot-specific problem. At `sv_fps 60 / sv_snapshotFps 60`, three consecutive snapshots go out between each game frame. Without correction:
 - snap at t=0ms: position P₀ (fresh game frame)
-- snap at t=16ms: position P₀ (stale — unchanged)
-- snap at t=33ms: position P₀ (stale — unchanged)
+- snap at t=16ms: position P₀ (stale — unchanged, for everyone)
+- snap at t=33ms: position P₀ (stale — unchanged, for everyone)
 - snap at t=50ms: position P₁ (new game frame — jump)
 
-The cgame interpolates these and sees two dead frames followed by a sudden jump. This is the visual stutter.
+The cgame interpolates these and sees two dead frames followed by a sudden jump. This is the visual stutter — visible for **all** clients watching any player.
 
 ### Fix: Engine-Side Position Fixup (sv_snapshot.c)
 
@@ -279,12 +279,12 @@ VectorCopy( ps->origin, es->pos.trBase );
 VectorCopy( ps->velocity, es->pos.trDelta );
 ```
 
-**Bots** — `ps->origin` only updates at game-frame boundaries (bot AI ticks at sv_gameHz). Between frames we use velocity extrapolation:
+**Bots** — `ps->origin` only updates at game-frame boundaries (bot AI ticks at sv_gameHz). Between frames we use velocity extrapolation using `ps->velocity` (set by Pmove, not touched by `BG_PlayerStateToEntityState`):
 ```c
 const float dt = extrapolateMs * 0.001f;
-es->pos.trBase[0] += es->pos.trDelta[0] * dt;
-es->pos.trBase[1] += es->pos.trDelta[1] * dt;
-es->pos.trBase[2] += es->pos.trDelta[2] * dt;
+es->pos.trBase[0] += velocity[0] * dt;  // velocity = ps->velocity from SV_GameClientNum
+es->pos.trBase[1] += velocity[1] * dt;
+es->pos.trBase[2] += velocity[2] * dt;
 ```
 
 **Investigated and rejected: TR_LINEAR_STOP injection**
@@ -361,7 +361,7 @@ If rcon `map` still fails after the above fix, investigate:
 
 ### Visual smoothness — position extrapolation (IMPLEMENTED, NEEDS TESTING)
 Engine-side position extrapolation in `SV_BuildCommonSnapshot` (sv_snapshot.c) should eliminate the 3-snapshot stutter pattern. Needs in-game testing with multiple human players at `sv_fps 60 / sv_gameHz 20`. If residual stutter remains, check:
-- Whether velocity in `trDelta` is zeroed for crouching or specific movement states in UT4.3 QVM
+- Whether `ps->velocity` ever gives significantly different results from `trDelta` (fixed: now always use `ps->velocity` which bypasses any QVM entity-state packing deviation)
 - Whether `sv.time - sv.gameTime` ever exceeds `1000/sv_gameHz` ms (should be bounded by the inner loop logic)
 
 ### sv_ccmds.c — GAME_RUN_FRAME time clock (FIXED)
@@ -388,7 +388,7 @@ Investigated using `trap_Cvar_Set` intercept to fix the unclamped `frameInterpol
 | `sv_main.c` | sv_fps/sv_gameHz frame loop decoupling; timeResidual hard clamp; SV_BotFrame moved to sv_gameHz inner loop; antilag sub-tick recording |
 | `sv_init.c` | Register sv_gameHz, sv_snapshotFps, sv_busyWait, sv_pmoveMsec; antilag cvar registration; CVG_SERVER group tracking |
 | `sv_client.c` | sv_pmoveMsec multi-step loop with commandTime stall detection; bot exclusion from clamping |
-| `sv_snapshot.c` | `snaps` client cvar bypassed — sv_snapshotFps is authoritative; real players use ps->origin for position fixup between game frames; bots use velocity extrapolation (trDelta * dt) |
+| `sv_snapshot.c` | `snaps` client cvar bypassed — sv_snapshotFps is authoritative; real players use ps->origin for position fixup between game frames; bots use velocity extrapolation (ps->velocity * dt — NOT trDelta, which may be zero/incorrect in UT QVM) |
 | `sv_ccmds.c` | `SV_MapRestart_f`: sync `sv.gameTime = sv.time` + `sv.gameTimeResidual = 0` on restart; warmup frames pass `sv.gameTime` to `GAME_RUN_FRAME` (was incorrectly using `sv.time`) |
 | `sv_antilag.c` | Full engine-side antilag implementation |
 | `sv_antilag.h` | Antilag interface |
