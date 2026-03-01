@@ -847,6 +847,7 @@ void CL_WritePacket( void ) {
 	}
 
 	CL_Netchan_Transmit( &clc.netchan, &buf );
+	SCR_NetMonitorAddOutgoing( buf.cursize );
 }
 
 

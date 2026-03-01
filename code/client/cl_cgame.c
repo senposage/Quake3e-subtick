@@ -1277,6 +1277,21 @@ void CL_SetCGameTime( void ) {
 		}
 		cl.oldServerTime = cl.serverTime;
 
+		// Compute estimated QVM frameInterpolation: mirrors the calculation the
+		// cgame QVM performs internally between its cg.snap (prev) and cg.nextSnap
+		// (cl.snap).  Result is in [0,1] while interpolating and > 1 while the
+		// engine is extrapolating past the latest received snapshot.
+		// Used by the net monitor widget.
+		{
+			const clSnapshot_t *prevSnap = &cl.snapshots[ (cl.snap.messageNum - 1) & PACKET_MASK ];
+			int interval = cl.snap.serverTime - prevSnap->serverTime;
+			if ( prevSnap->valid && interval > 0 ) {
+				cl.frameInterpolation = (float)( cl.serverTime - prevSnap->serverTime ) / (float)interval;
+			} else {
+				cl.frameInterpolation = 0.0f;
+			}
+		}
+
 		// note if we are almost past the latest frame (without timeNudge),
 		// so we will try and adjust back a bit when the next snapshot arrives.
 		// Scale the detection window with the measured snapshot interval:

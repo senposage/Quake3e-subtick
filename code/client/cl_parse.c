@@ -1116,6 +1116,9 @@ CL_ParseServerMessage
 void CL_ParseServerMessage( msg_t *msg ) {
 	int cmd;
 
+	/* track raw incoming bytes and any dropped packets for the net monitor */
+	SCR_NetMonitorAddIncoming( msg->cursize, clc.netchan.dropped );
+
 	if ( cl_shownet->integer == 1 ) {
 		Com_Printf( "%i ",msg->cursize );
 	} else if ( cl_shownet->integer >= 2 ) {

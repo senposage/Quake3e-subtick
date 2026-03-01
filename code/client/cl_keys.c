@@ -423,6 +423,9 @@ static void Console_Key( int key ) {
 		// copy line to history buffer
 		Con_SaveField( &g_consoleField );
 
+		/* log the command to the net debug session log (if cl_netlog > 0) */
+		SCR_LogConsoleInput( g_consoleField.buffer );
+
 		Field_Clear( &g_consoleField );
 		g_consoleField.widthInChars = g_console_field_width;
 

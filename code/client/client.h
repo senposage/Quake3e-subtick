@@ -123,6 +123,7 @@ typedef struct {
 	qboolean	newSnapshots;		// set on parse of any valid packet
 
 	int			snapshotMsec;		// measured interval between snapshots (exponential moving average)
+	float		frameInterpolation;	// estimated QVM fI: (serverTime - prevSnap) / (snap - prevSnap), [0,1] = interpolating, >1 = extrapolating
 
 	gameState_t	gameState;			// configstrings
 	char		mapname[MAX_QPATH];	// extracted from CS_SERVERINFO
@@ -431,6 +432,8 @@ extern	cvar_t	*cl_shownet;
 extern	cvar_t	*cl_autoNudge;
 extern	cvar_t	*cl_timeNudge;
 extern	cvar_t	*cl_showTimeDelta;
+extern	cvar_t	*cl_netgraph;
+extern	cvar_t	*cl_netlog;
 
 extern	cvar_t	*com_timedemo;
 extern	cvar_t	*cl_aviFrameRate;
@@ -619,6 +622,12 @@ void	SCR_DrawStringExt( int x, int y, float size, const char *string, const floa
 void	SCR_DrawSmallStringExt( int x, int y, const char *string, const float *setColor, qboolean forceColor, qboolean noColorEscape );
 void	SCR_DrawSmallChar( int x, int y, int ch );
 void	SCR_DrawSmallString( int x, int y, const char *s, int len );
+
+// Net monitor
+void	SCR_NetMonitorAddIncoming( int bytes, int drops );
+void	SCR_NetMonitorAddOutgoing( int bytes );
+void	SCR_LogConsoleInput( const char *cmd );
+void	SCR_CloseNetLog( void );
 
 //
 // cl_cin.c

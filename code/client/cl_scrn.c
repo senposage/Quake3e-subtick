@@ -31,6 +31,25 @@ cvar_t		*cl_graphheight;
 cvar_t		*cl_graphscale;
 cvar_t		*cl_graphshift;
 
+// Net monitor widget cvars
+cvar_t		*cl_netgraph;
+cvar_t		*cl_netgraph_x;
+cvar_t		*cl_netgraph_y;
+cvar_t		*cl_netgraph_scale;
+cvar_t		*cl_netlog;
+
+// Net monitor rate tracking (updated per second)
+static int	netMonInBytes;
+static int	netMonOutBytes;
+static int	netMonInRate;
+static int	netMonOutRate;
+static int	netMonDropsWindow;
+static int	netMonDropRate;
+static int	netMonLastUpdate;
+
+// Session log file (opened lazily when cl_netlog > 0)
+static fileHandle_t	netLogFile;
+
 /*
 ================
 SCR_DrawNamedPic
@@ -603,6 +622,325 @@ void SCR_DrawDebugGraph (void)
 }
 
 //=============================================================================
+/*
+===============================================================================
+
+NET MONITOR WIDGET
+
+Displays a live overlay of client network / timing stats.  All data comes
+from the already-available cl / clc structures so there is no extra polling
+overhead beyond computing 1-second byte-rate windows.
+
+CVars
+  cl_netgraph      0 = off, 1 = show widget
+  cl_netgraph_x/y  position in virtual 640x480 coords (default top-right)
+  cl_netgraph_scale  text/box scale multiplier (default 1.0)
+  cl_netlog        0 = off, 1 = log console commands, 2 = also log periodic stats
+
+Command
+  netgraph_dump    write a full stats snapshot + all CS_SERVERINFO cvars to
+                   the session log file
+
+===============================================================================
+*/
+
+/* ----- public hooks called from cl_parse.c / cl_input.c ----- */
+
+void SCR_NetMonitorAddIncoming( int bytes, int drops ) {
+	netMonInBytes     += bytes;
+	netMonDropsWindow += drops;
+}
+
+void SCR_NetMonitorAddOutgoing( int bytes ) {
+	netMonOutBytes += bytes;
+}
+
+/* ----- session log helpers ----- */
+
+static void SCR_OpenNetLog( void ) {
+	qtime_t t;
+	char    path[MAX_OSPATH];
+	char    header[256];
+
+	if ( netLogFile )
+		return; /* already open */
+
+	Com_RealTime( &t );
+	Com_sprintf( path, sizeof(path), "netdebug_%04d%02d%02d_%02d%02d%02d.log",
+		1900 + t.tm_year, 1 + t.tm_mon, t.tm_mday,
+		t.tm_hour, t.tm_min, t.tm_sec );
+
+	netLogFile = FS_FOpenFileWrite( path );
+	if ( netLogFile ) {
+		Com_sprintf( header, sizeof(header),
+			"=== Quake3e Net Debug Log  %04d-%02d-%02d %02d:%02d:%02d ===\n"
+			"  cl_netlog=%d  (1=cmds, 2=cmds+periodic stats)\n"
+			"  Use 'netgraph_dump' in-game for a full on-demand snapshot.\n\n",
+			1900 + t.tm_year, 1 + t.tm_mon, t.tm_mday,
+			t.tm_hour, t.tm_min, t.tm_sec,
+			cl_netlog->integer );
+		FS_Write( header, strlen(header), netLogFile );
+		Com_Printf( "Net debug log opened: %s\n", path );
+	}
+}
+
+static void SCR_WriteLog( const char *line ) {
+	if ( netLogFile )
+		FS_Write( line, strlen(line), netLogFile );
+}
+
+/* public – called by cl_keys.c when the user submits a console line */
+void SCR_LogConsoleInput( const char *cmd ) {
+	qtime_t t;
+	char    line[MAX_STRING_CHARS + 64];
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line), "[%02d:%02d:%02d] CMD: %s\n",
+		t.tm_hour, t.tm_min, t.tm_sec, cmd );
+	SCR_WriteLog( line );
+}
+
+/* public – close log on engine shutdown / explicit request */
+void SCR_CloseNetLog( void ) {
+	if ( netLogFile ) {
+		SCR_WriteLog( "=== Session End ===\n" );
+		FS_FCloseFile( netLogFile );
+		netLogFile = 0;
+	}
+}
+
+/* ----- netgraph_dump command ----- */
+
+static void SCR_NetgraphDump_f( void ) {
+	const char *serverInfo;
+	char        key[BIG_INFO_KEY];
+	char        value[BIG_INFO_VALUE];
+	char        line[512];
+	qtime_t     t;
+	int         snapHz;
+
+	if ( cls.state != CA_ACTIVE ) {
+		Com_Printf( "netgraph_dump: not connected to a server.\n" );
+		return;
+	}
+
+	SCR_OpenNetLog();
+	if ( !netLogFile ) {
+		Com_Printf( "netgraph_dump: could not open log file.\n" );
+		return;
+	}
+
+	Com_RealTime( &t );
+	snapHz = ( cl.snapshotMsec > 0 ) ? ( 1000 / cl.snapshotMsec ) : 0;
+
+	Com_sprintf( line, sizeof(line),
+		"\n=== netgraph_dump  %04d-%02d-%02d %02d:%02d:%02d ===\n",
+		1900 + t.tm_year, 1 + t.tm_mon, t.tm_mday,
+		t.tm_hour, t.tm_min, t.tm_sec );
+	SCR_WriteLog( line );
+
+	/* --- client timing & network stats --- */
+	Com_sprintf( line, sizeof(line), "Snapshot Rate : %d Hz  (%d ms interval EMA)\n",  snapHz, cl.snapshotMsec );               SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Ping          : %d ms\n",                         cl.snap.ping );                          SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Interp Mode   : fI=%.3f  %s\n",
+		cl.frameInterpolation,
+		( cl.frameInterpolation > 1.0f ) ? "EXTRAPOLATING" : "INTERPOLATING" );
+	SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Server Time   : %d  (delta %d ms)\n",             cl.snap.serverTime, cl.serverTimeDelta );SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Snap Seq      : #%d  (delta from #%d, gap %d)\n", cl.snap.messageNum, cl.snap.deltaNum, cl.snap.messageNum - cl.snap.deltaNum ); SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Drop Rate     : %d pkt/s\n",                      netMonDropRate );                        SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "In Rate       : %d B/s  (%.2f KB/s)\n",           netMonInRate,  netMonInRate  / 1024.0f );SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Out Rate      : %d B/s  (%.2f KB/s)\n",           netMonOutRate, netMonOutRate / 1024.0f );SCR_WriteLog( line );
+
+	/* --- CS_SERVERINFO cvars (sv_fps, sv_gameHz, etc.) --- */
+	SCR_WriteLog( "\n--- CS_SERVERINFO cvars ---\n" );
+	serverInfo = cl.gameState.stringData + cl.gameState.stringOffsets[ CS_SERVERINFO ];
+	while ( serverInfo && *serverInfo ) {
+		serverInfo = Info_NextPair( serverInfo, key, value );
+		if ( key[0] == '\0' )
+			break;
+		Com_sprintf( line, sizeof(line), "  %-28s = %s\n", key, value );
+		SCR_WriteLog( line );
+	}
+
+	SCR_WriteLog( "=== end dump ===\n\n" );
+	Com_Printf( "netgraph_dump written to log file.\n" );
+}
+
+/* ----- widget drawing ----- */
+
+/* Ping colour thresholds (ms).  Reasonable competitive defaults: */
+#define NM_PING_HIGH   150   /* red   — noticeably laggy              */
+#define NM_PING_MEDIUM  80   /* yellow — mildly elevated               */
+/* < NM_PING_MEDIUM    green — acceptable                             */
+
+/* Widget columns and rows (character cells). */
+#define NM_COLS 21
+#define NM_ROWS  9
+
+/*
+ * NM_DrawRow — draw a NUL-terminated string starting at (*tx, ty) using
+ * character-cell size charW, then advance ty by charH and reset tx.
+ * Having this as a file-scope static function keeps the variable mutation
+ * explicit and avoids macro hygiene pitfalls.
+ */
+static void NM_DrawRow( float *tx, float *ty, float bx_pad,
+                        float charW, float charH,
+                        const float *col, const char *str ) {
+	const char *p;
+	re.SetColor( col );
+	for ( p = str; *p; p++ ) {
+		SCR_DrawChar( (int)*tx, (int)*ty, charW, *p );
+		*tx += charW;
+	}
+	*tx  = bx_pad;
+	*ty += charH;
+}
+
+/*
+==============
+SCR_DrawNetMonitor
+
+Draws a small always-on-top overlay (virtual 640x480 coords, scaled) showing
+real-time client network/timing diagnostics.  Toggle with cl_netgraph 1.
+==============
+*/
+static void SCR_DrawNetMonitor( void ) {
+	static const float bgColor[4]     = { 0.0f, 0.0f, 0.0f, 0.65f };
+	static const float colorWhite[4]  = { 1.0f, 1.0f, 1.0f, 1.0f  };
+	static const float colorGreen[4]  = { 0.2f, 1.0f, 0.2f, 1.0f  };
+	static const float colorYellow[4] = { 1.0f, 1.0f, 0.2f, 1.0f  };
+	static const float colorRed[4]    = { 1.0f, 0.3f, 0.3f, 1.0f  };
+
+	char         line[48];
+	const float *col;
+	float        scale, charW, charH, pad;
+	float        bw, bh, bx, by, tx, ty;
+	int          snapHz;
+
+	if ( cls.state != CA_ACTIVE )
+		return;
+
+	/* ---- update 1-second rate window ---- */
+	if ( netMonLastUpdate == 0 || cls.realtime - netMonLastUpdate >= 1000 ) {
+		netMonInRate      = netMonInBytes;
+		netMonOutRate     = netMonOutBytes;
+		netMonDropRate    = netMonDropsWindow;
+		netMonInBytes     = 0;
+		netMonOutBytes    = 0;
+		netMonDropsWindow = 0;
+		netMonLastUpdate  = cls.realtime;
+
+		/* optional periodic stats line in the log */
+		if ( cl_netlog->integer >= 2 && netLogFile ) {
+			qtime_t t;
+			char    logline[192];
+			Com_RealTime( &t );
+			snapHz = ( cl.snapshotMsec > 0 ) ? ( 1000 / cl.snapshotMsec ) : 0;
+			Com_sprintf( logline, sizeof(logline),
+				"[%02d:%02d:%02d] STATS  snap=%dHz  ping=%dms  fI=%.3f(%s)"
+				"  dT=%dms  drop=%d/s  in=%dB/s  out=%dB/s\n",
+				t.tm_hour, t.tm_min, t.tm_sec,
+				snapHz, cl.snap.ping,
+				cl.frameInterpolation,
+				( cl.frameInterpolation > 1.0f ) ? "EXTRAP" : "INTERP",
+				cl.serverTimeDelta, netMonDropRate,
+				netMonInRate, netMonOutRate );
+			SCR_WriteLog( logline );
+		}
+	}
+
+	/* ---- widget geometry (virtual 640x480 coords) ---- */
+	scale = cl_netgraph_scale->value;
+	if ( scale <= 0.0f ) scale = 1.0f;
+
+	charW = 8.0f * scale;   /* character cell width  (virtual units) */
+	charH = 8.0f * scale;   /* character cell height (virtual units) */
+	pad   = charW * 0.5f;   /* inner padding */
+
+	bw = NM_COLS * charW + pad * 2.0f;
+	bh = NM_ROWS * charH + pad * 2.0f;
+
+	bx = cl_netgraph_x->value;
+	by = cl_netgraph_y->value;
+
+	/* clamp to virtual screen bounds (2-pixel margin) */
+	if ( bx + bw > SCREEN_WIDTH  - 2 ) bx = SCREEN_WIDTH  - 2 - bw;
+	if ( bx < 2.0f                    ) bx = 2.0f;
+	if ( by + bh > SCREEN_HEIGHT - 2 ) by = SCREEN_HEIGHT - 2 - bh;
+	if ( by < 2.0f                    ) by = 2.0f;
+
+	/* semi-transparent background */
+	SCR_FillRect( bx, by, bw, bh, bgColor );
+
+	tx = bx + pad;
+	ty = by + pad;
+
+	snapHz = ( cl.snapshotMsec > 0 ) ? ( 1000 / cl.snapshotMsec ) : 0;
+
+	/* row 1 – title */
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite,
+		"== NET MONITOR ==" );
+
+	/* row 2 – snapshot rate */
+	Com_sprintf( line, sizeof(line), "Snap: %3dHz %3dms", snapHz, cl.snapshotMsec );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
+
+	/* row 3 – ping (colour-coded by threshold) */
+	col = ( cl.snap.ping >= NM_PING_HIGH   ) ? colorRed    :
+	      ( cl.snap.ping >= NM_PING_MEDIUM ) ? colorYellow : colorGreen;
+	Com_sprintf( line, sizeof(line), "Ping: %dms", cl.snap.ping );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
+
+	/* row 4 – estimated QVM frameInterpolation: [0,1] = interpolating, >1 = extrapolating */
+	col = ( cl.frameInterpolation > 1.0f ) ? colorYellow : colorGreen;
+	Com_sprintf( line, sizeof(line), "fI:   %.3f %s",
+		cl.frameInterpolation,
+		( cl.frameInterpolation > 1.0f ) ? "EXTRAP" : "INTERP" );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
+
+	/* row 5 – server time delta */
+	Com_sprintf( line, sizeof(line), "dT:   %+dms", cl.serverTimeDelta );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
+
+	/* row 6 – dropped packets/s */
+	col = ( netMonDropRate > 0 ) ? colorRed : colorGreen;
+	Com_sprintf( line, sizeof(line), "Drop: %d/s", netMonDropRate );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
+
+	/* row 7 – in rate */
+	if ( netMonInRate >= 1024 )
+		Com_sprintf( line, sizeof(line), "In:   %.1fKB/s", netMonInRate / 1024.0f );
+	else
+		Com_sprintf( line, sizeof(line), "In:   %dB/s", netMonInRate );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
+
+	/* row 8 – out rate */
+	if ( netMonOutRate >= 1024 )
+		Com_sprintf( line, sizeof(line), "Out:  %.1fKB/s", netMonOutRate / 1024.0f );
+	else
+		Com_sprintf( line, sizeof(line), "Out:  %dB/s", netMonOutRate );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
+
+	/* row 9 – snapshot sequence / delta compression detail */
+	Com_sprintf( line, sizeof(line), "Seq:  #%d d:%d",
+		cl.snap.messageNum,
+		cl.snap.messageNum - cl.snap.deltaNum );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
+
+	re.SetColor( NULL );
+}
+
+#undef NM_PING_HIGH
+#undef NM_PING_MEDIUM
+#undef NM_COLS
+#undef NM_ROWS
+
+//=============================================================================
 
 /*
 ==================
@@ -625,6 +963,33 @@ void SCR_Init( void ) {
     cl_graphshift = Cvar_Get ("graphshift", "0", CVAR_CHEAT);
     Cvar_SetDescription(cl_graphshift, "Set the shift of the graph\nDefault: 0");
 
+    cl_netgraph = Cvar_Get( "cl_netgraph", "0", 0 );
+    Cvar_SetDescription( cl_netgraph, "Show the net monitor overlay.\n0 = off, 1 = on\nDefault: 0" );
+
+    cl_netgraph_x = Cvar_Get( "cl_netgraph_x", "460", 0 );
+    Cvar_SetDescription( cl_netgraph_x, "Net monitor X position in virtual 640x480 coords.\nDefault: 460 (near top-right)" );
+
+    cl_netgraph_y = Cvar_Get( "cl_netgraph_y", "4", 0 );
+    Cvar_SetDescription( cl_netgraph_y, "Net monitor Y position in virtual 640x480 coords.\nDefault: 4 (near top)" );
+
+    cl_netgraph_scale = Cvar_Get( "cl_netgraph_scale", "1.0", 0 );
+    Cvar_SetDescription( cl_netgraph_scale, "Net monitor text/box scale multiplier.\nDefault: 1.0" );
+
+    cl_netlog = Cvar_Get( "cl_netlog", "0", 0 );
+    Cvar_SetDescription( cl_netlog,
+        "Net debug session logging.\n"
+        "0 = off\n"
+        "1 = log timestamped console commands\n"
+        "2 = log commands + periodic per-second stats\n"
+        "Log file written to netdebug_<date>_<time>.log in the game folder.\n"
+        "Default: 0" );
+
+    Cmd_AddCommand( "netgraph_dump", SCR_NetgraphDump_f );
+    Cmd_SetDescription( "netgraph_dump",
+        "Write a full timestamped net-stats snapshot (including all CS_SERVERINFO/sv_ cvars)\n"
+        "to the net debug log file.  Requires an active server connection.\n"
+        "Enable cl_netlog 1 first to open the log, or the dump command will open it automatically." );
+
     scr_initialized = qtrue;
 }
 
@@ -635,6 +1000,8 @@ SCR_Done
 ==================
 */
 void SCR_Done( void ) {
+	SCR_CloseNetLog();
+	Cmd_RemoveCommand( "netgraph_dump" );
 	scr_initialized = qfalse;
 }
 
@@ -704,6 +1071,8 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 			// always supply STEREO_CENTER as vieworg offset is now done by the engine.
 			CL_CGameRendering( stereoFrame );
 			SCR_DrawDemoRecording();
+			if ( cl_netgraph->integer )
+				SCR_DrawNetMonitor();
 #ifdef USE_VOIP
 			SCR_DrawVoipMeter();
 #endif
