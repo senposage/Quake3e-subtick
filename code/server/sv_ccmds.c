@@ -321,6 +321,7 @@ static void SV_MapRestart_f( void ) {
 	sv.time = sv.time ? sv.time : 8;
 	sv.gameTime = sv.time;
 	sv.gameTimeResidual = 0;
+	sv.timeResidual = 0;
 	SV_SmoothInit(); // flush stale ring buffer entries from the previous round
 
 	SV_RestartGameProgs();

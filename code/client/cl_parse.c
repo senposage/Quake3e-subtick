@@ -697,6 +697,11 @@ static void CL_ParseServerInfo( void )
 	// (gives accurate snapshotMsec from the first frame before EMA converges)
 	{
 		int snapFps = atoi( Info_ValueForKey( serverInfo, "sv_snapshotFps" ) );
+		// sv_snapshotFps == -1 means "use sv_fps"; fall back to sv_fps in that case.
+		// sv_fps is advertised as SERVERINFO so we can read the effective rate here.
+		if ( snapFps <= 0 ) {
+			snapFps = atoi( Info_ValueForKey( serverInfo, "sv_fps" ) );
+		}
 		if ( snapFps > 0 ) {
 			cl.snapshotMsec = 1000 / snapFps;
 			if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;

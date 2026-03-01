@@ -887,7 +887,7 @@ void SV_Init( void )
     sv_privatePassword = Cvar_Get ("sv_privatePassword", "", CVAR_TEMP );
     Cvar_SetDescription(sv_privatePassword, "Set password for private clients to login\nDefault: empty");
 
-    sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED );
+    sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
 
     sv_gameHz = Cvar_Get ("sv_gameHz", "20", CVAR_ARCHIVE | CVAR_SERVERINFO );
     Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nDefault 20 matches UT4.3 QVM antiwarp assumptions. Some constraints may be\nrelaxed in UT4.3.4 -- test before raising above 20. Never set higher than sv_fps.\n>0: GAME_RUN_FRAME fires at sv_gameHz Hz; sv.gameTime lags sv.time between frames,\n    enabling sv_extrapolate to correct stale player positions in between.\n 0: disabled (falls back to sv_fps); GAME_RUN_FRAME fires every engine tick,\n    sv.gameTime == sv.time always. sv_extrapolate still runs but has no stale\n    positions to correct; sv_bufferMs ring buffer queries still apply.\nDefault: 20");
