@@ -13,9 +13,18 @@
 User shared a netlog confirming zero EXTRAP events across the entire session.
 The `snap.serverTime - 1` cap is working; fI peaks at 0.938 (= 15/16) and never crosses 1.0.
 
+**½ms accumulator: PARTIALLY FIXED — 2+2 batch problem identified and fixed.**  
+The accumulator reduced episode severity but created constant low-level oscillation
+(every 4 snaps ≈ 64ms period).  Fix 2 (fold `slowFrac` into the extrap condition in ¼ms
+units) eliminates the binary 2+2 batch pattern, producing true 1+1 alternation and a
+constant serverTimeDelta.  Awaiting confirmation.
+
+**Netgraph slow counter display: FIXED.**  
+Changed from absolute count (always cycling 0→30, always yellow) to signed net drift
+(abs(up-commits − down-commits) per second).  At equilibrium, net = 0 → green.
+
 **Remaining symptom: intermittent top-line chop in the lagometer.**  
-The log did not contain enough data to diagnose it.  The new fields added this session
-(see below) will tell us whether it is a client frame-time spike or snap delivery jitter.
+Expected to be resolved by Fix 2 (constant serverTimeDelta → no ping jitter).
 
 ---
 
@@ -117,7 +126,7 @@ p_serverTime[i]` boundary, driven by very slow server-clock drift (~0.003Hz off 
 boundary the ping display stabilises on its own — but the ±1ms cl.serverTime oscillation
 and its gameplay effects continue regardless.
 
-### The fix: ½ms fractional accumulator in `CL_AdjustTimeDelta` (cl_cgame.c)
+### Fix 1: ½ms fractional accumulator in `CL_AdjustTimeDelta` (cl_cgame.c)
 
 Replace the integer ±1ms per-snap step with a ½ms accumulator (4 units = 1ms).  At
 exactly 50% extrapolation rate the accumulator oscillates 0↔2, never reaching the ±4
@@ -135,6 +144,49 @@ RESET paths which are unchanged.
 
 `slowFrac` is reset to 0 whenever FAST or RESET fires so stale slow-drift history never
 corrupts recovery from a large correction.
+
+### Why Fix 1 alone was insufficient — the 2+2 batch problem
+
+The ½ms accumulator assumed the extrap condition would produce **1+1 alternating** snaps
+(extrap, non-extrap, extrap …) so `slowFrac` oscillates 0→-2→0→-2 and never hits ±4.
+
+In practice the extrap condition is **binary per integer-ms serverTimeDelta level**: at
+`serverTimeDelta = N` ALL snaps fire extrap; at `N-1` NONE do.  Snaps therefore arrive in
+**2+2 batches** (2 extrap → slowFrac -4 → commit; 2 non-extrap → +4 → commit), producing
+a constant ±1ms serverTimeDelta oscillation at ~30 commits/second.
+
+Observed in logs: `dT=143378..143379ms` (1ms range), `PING JITTER ±16ms` on every other
+snap, `slow≈30/s`, `fast=0`.  The ½ms accumulator **traded** rare-but-long oscillation
+episodes for a **constant** low-level oscillation — less severe per episode, but
+continuous and still causing feelable lag.
+
+### Fix 2: fold `slowFrac` into the extrap condition (¼ms precision)
+
+Move `slowFrac` to file scope so `CL_SetCGameTime()` can include it in the extrapolation
+check, evaluated in ¼ms units:
+
+```c
+if ( ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime ) * 4 + slowFrac
+         >= -( extrapolateThresh * 4 ) )
+```
+
+**Why this eliminates the 2+2 problem:**  At the exact equilibrium threshold
+`diff = -extrapolateThresh` the condition becomes `slowFrac >= 0`:
+
+```
+Equilibrium (slowFrac visible to condition):
+  Snap 1: slowFrac=0  → 0 ≥ 0  → YES (extrap)  → slowFrac=-2
+  Snap 2: slowFrac=-2 → -2 ≥ 0 → NO  (no extrap) → slowFrac=0
+  Snap 3: slowFrac=0  → YES → slowFrac=-2
+  Snap 4: slowFrac=-2 → NO  → slowFrac=0  …
+  → perfect 1+1 alternation, slowFrac never reaches ±4, no commits
+  → serverTimeDelta CONSTANT, ping stable, no feelable lag
+```
+
+Off-threshold convergence still works correctly:
+- `diff = -thresh + 1ms` → condition true for both slowFrac=0 and -2 → 2 consecutive
+  extrap → commit (serverTimeDelta--)  → back to threshold → stabilises ✓
+- `diff = -thresh - 1ms` → condition false for both → 2 non-extrap → commit (++) ✓
 
 ### cg_drawfps shows FPS and ping — distinct displays
 

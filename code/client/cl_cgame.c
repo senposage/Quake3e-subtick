@@ -1039,14 +1039,21 @@ or bursted delayed packets.
 =================
 */
 
+// Sub-millisecond fractional accumulator for the slow drift path.
+// 1 unit = ¼ ms; each slow-path step adds ±2 units (= ±½ ms);
+// commit threshold is ±4 units (= ±1 ms).
+//
+// File-scope so CL_SetCGameTime() can fold it into the extrapolation
+// check (evaluated in ¼ms units).  At the equilibrium threshold the
+// condition then alternates extrap/non-extrap each snap
+// (slowFrac: 0 → −2 → 0 → −2 …) so the accumulator never reaches ±4
+// and serverTimeDelta stays constant — eliminating the ±1ms oscillation
+// that causes the 32↔48ms ping jitter and feelable lag.
+// RESET and FAST branches clear it since stale slow-drift history would
+// corrupt recovery from a large correction.
+static int slowFrac = 0;
+
 static void CL_AdjustTimeDelta( void ) {
-	// Sub-millisecond fractional accumulator for the slow drift path.
-	// 1 unit = ¼ ms; each slow-path step adds ±2 units (= ±½ ms);
-	// commit threshold is ±4 units (= ±1 ms).
-	// Declared here so the RESET and FAST branches can clear it when they
-	// make a large correction — stale slow-drift history would be wrong after
-	// a big jump.
-	static int slowFrac = 0;
 	int		newDelta;
 	int		deltaDelta;
 	int		resetTime;
@@ -1350,11 +1357,18 @@ void CL_SetCGameTime( void ) {
 		// too tight at lower rates (e.g. 20Hz needs ~16ms), causing excessive
 		// drift-back oscillation that shows as a sawtooth in the netgraph for
 		// several seconds regardless of sv_fps.
+		//
+		// Evaluated in ¼ms units (diff×4 + slowFrac) so the half-ms
+		// accumulator's state is visible to the condition.  At the equilibrium
+		// threshold this causes the condition to flip each snap (1:1
+		// extrap/non-extrap), keeping slowFrac oscillating 0→-2→0→-2 and
+		// never reaching ±4 — so serverTimeDelta stays constant and the
+		// ±1ms oscillation that caused the 32↔48ms ping jitter is eliminated.
 		{
 			int extrapolateThresh = cl.snapshotMsec / 3;
 			if ( extrapolateThresh <  3 ) extrapolateThresh =  3;
 			if ( extrapolateThresh > 16 ) extrapolateThresh = 16;
-			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -extrapolateThresh ) {
+			if ( ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime ) * 4 + slowFrac >= -( extrapolateThresh * 4 ) ) {
 				cl.extrapolatedSnapshot = qtrue;
 				SCR_NetMonitorAddExtrap();
 			}
