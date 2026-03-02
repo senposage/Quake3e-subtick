@@ -90,6 +90,13 @@ static int	netMonDispCapHits;
 static int	netMonDispExtrapCnt;
 static int	netMonDispSnapGapAvg;
 static int	netMonDispSnapGapMax;
+static int	netMonDispFtAvg;
+static int	netMonDispFtMax;
+static float	netMonDispFiAvg;
+
+// Per-frame fI accumulator (for 1-second average)
+static float	netMonFiSum;
+static int	netMonFiCount;
 
 // Session log file (opened lazily when cl_netlog > 0)
 static fileHandle_t	netLogFile;
@@ -710,6 +717,9 @@ void SCR_NetMonitorAddFrametime( int ft ) {
 		if ( ft < netMonFtMin ) netMonFtMin = ft;
 		if ( ft > netMonFtMax ) netMonFtMax = ft;
 	}
+	// Accumulate frameInterpolation for 1-second average
+	netMonFiSum   += cl.frameInterpolation;
+	netMonFiCount += 1;
 }
 
 void SCR_NetMonitorAddSnapInterval( int measured, int expected ) {
@@ -1030,6 +1040,11 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonDispExtrapCnt  = extrapCnt;
 		netMonDispSnapGapAvg = snapGapAvg;
 		netMonDispSnapGapMax = snapGapMax;
+		netMonDispFtAvg      = ftAvg;
+		netMonDispFtMax      = ftMax;
+		netMonDispFiAvg      = ( netMonFiCount > 0 ) ? ( netMonFiSum / netMonFiCount ) : 0.0f;
+		netMonFiSum          = 0.0f;
+		netMonFiCount        = 0;
 
 		/* optional periodic stats line in the log */
 		if ( cl_netlog->integer >= 2 && netLogFile ) {
@@ -1098,15 +1113,15 @@ static void SCR_DrawNetMonitor( void ) {
 		cl.snap.ping, netMonDispPingMin, netMonDispPingMax );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
-	/* row 4 – smoothed fI: EMA (alpha=0.2) reduces per-frame flicker at high
-	 * snap rates where the raw value cycles 0→1 faster than the eye can read */
-	{
-		static float smoothFI = 0.0f;
-		smoothFI = smoothFI * 0.8f + cl.frameInterpolation * 0.2f;
-		col = colorGreen;
-		Com_sprintf( line, sizeof(line), "fI:   %.2f INTERP", smoothFI );
-		NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
-	}
+	/* row 4 – 1-second averaged fI + client frame time (avg/max).
+	 * Raw fI cycles 0→~0.94 every snapshot interval — unreadable at 60Hz.
+	 * Healthy fI avg ≈ 0.45-0.55; near 0 = freeze frames; near 1 = extrapolating.
+	 * Client frame time outliers reveal render/OS stalls. */
+	col = ( netMonDispFtMax > cl.snapshotMsec ) ? colorYellow : colorGreen;
+	Com_sprintf( line, sizeof(line), "fI:.%02d ft:%d(%d)ms",
+		(int)( netMonDispFiAvg * 100.0f ),
+		netMonDispFtAvg, netMonDispFtMax );
+	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
 	/* row 5 – server time delta */
 	Com_sprintf( line, sizeof(line), "dT:   %+dms", cl.serverTimeDelta );
