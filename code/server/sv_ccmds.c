@@ -1141,6 +1141,22 @@ int SV_Strlen( const char *str ) {
 
 
 /*
+==================
+SV_CountQueue
+==================
+*/
+static int SV_CountQueue( const client_t *cl ) {
+	int count = 0;
+	const netchan_buffer_t *buf = cl->netchan_start_queue;
+	while ( buf ) {
+		count++;
+		buf = buf->next;
+	}
+	return count;
+}
+
+
+/*
 ================
 SV_Status_f
 ================
@@ -1261,22 +1277,6 @@ static void SV_Status_f( void ) {
 	}
 
 	Com_Printf( "\n" );
-}
-
-
-/*
-==================
-SV_CountQueue
-==================
-*/
-static int SV_CountQueue( const client_t *cl ) {
-	int count = 0;
-	const netchan_buffer_t *buf = cl->netchan_start_queue;
-	while ( buf ) {
-		count++;
-		buf = buf->next;
-	}
-	return count;
 }
 
 
