@@ -100,6 +100,7 @@ static svShadowSaved_t      sv_shadowSaved[MAX_CLIENTS];
 static int                  sv_shadowAccumulator = 0;
 static int                  sv_shadowTickMs = 0;        // computed each frame
 static int                  sv_shadowHistorySlots = 0;  // computed on init/change
+static int                  sv_antilag_lastFpsValue = 0; // track sv_fps value independently (sv_fps->modified cleared by SV_TrackCvarChanges before we see it)
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -477,6 +478,7 @@ void SV_Antilag_Init( void ) {
     Com_Memset( sv_rateTrack,      0, sizeof( sv_rateTrack ) );
 
     sv_shadowAccumulator = 0;
+    sv_antilag_lastFpsValue = sv_fps ? sv_fps->integer : 40;
 
     SV_Antilag_ComputeConfig();
 
@@ -503,28 +505,37 @@ void SV_Antilag_RecordPositions( void ) {
 
     // Recompute config if relevant cvars changed.
     // sv_fps affects shadow Hz and slot count — must be included.
-    if ( sv_physicsScale->modified || sv_antilagMaxMs->modified || sv_fps->modified ) {
-        int oldSlots = sv_shadowHistorySlots;
-        SV_Antilag_ComputeConfig();
-        sv_physicsScale->modified = qfalse;
-        sv_antilagMaxMs->modified = qfalse;
-        // Note: sv_fps->modified is cleared by SV_TrackCvarChanges, not here
+    // NOTE: sv_fps->modified is cleared by SV_TrackCvarChanges before we run,
+    // so we track the actual integer value to detect changes independently.
+    {
+        int currentFps = sv_fps ? sv_fps->integer : 40;
+        qboolean fpsChanged = ( currentFps != sv_antilag_lastFpsValue );
 
-        // If slot count changed, flush all ring buffers — old entries were
-        // written with a different modulo and produce wrong indices when read.
-        if ( sv_shadowHistorySlots != oldSlots ) {
-            Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
+        if ( sv_physicsScale->modified || sv_antilagMaxMs->modified || fpsChanged ) {
+            int oldSlots = sv_shadowHistorySlots;
+            SV_Antilag_ComputeConfig();
+            sv_physicsScale->modified = qfalse;
+            sv_antilagMaxMs->modified = qfalse;
+            sv_antilag_lastFpsValue = currentFps;
+
+            // If slot count changed, flush all ring buffers — old entries were
+            // written with a different modulo and produce wrong indices when read.
+            if ( sv_shadowHistorySlots != oldSlots ) {
+                Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
+            }
+
+            Com_Printf( "SV_Antilag: reconfigured — shadow Hz=%d, historySlots=%d\n",
+                1000 / sv_shadowTickMs, sv_shadowHistorySlots );
         }
-
-        Com_Printf( "SV_Antilag: reconfigured — shadow Hz=%d, historySlots=%d\n",
-            1000 / sv_shadowTickMs, sv_shadowHistorySlots );
     }
 
-    // Record all active clients into shadow history
+    // Record all active clients (including bots) into shadow history.
+    // Bots have zero lag as shooters (InterceptTrace skips bot shooters),
+    // but they must be recorded so human players shooting AT bots can
+    // rewind bot positions for proper lag compensation.
     for ( i = 0; i < sv_maxclients->integer; i++ ) {
         client_t *cl = &svs.clients[i];
         if ( cl->state != CS_ACTIVE ) continue;
-        if ( cl->netchan.remoteAddress.type == NA_BOT ) continue;
         SV_Antilag_RecordClient( i, svs.time );
     }
 }
