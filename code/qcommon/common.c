@@ -3707,7 +3707,7 @@ void Com_Init( char *commandLine ) {
 	cl_paused = Cvar_Get ("cl_paused", "0", CVAR_ROM);
     Cvar_SetDescription(cl_paused, "Holds the status of the paused flag on the client side\nDefault: 0");
 
-    cl_packetdelay = Cvar_Get ("cl_packetdelay", "0", CVAR_CHEAT);
+    cl_packetdelay = Cvar_Get ("cl_packetdelay", "0", CVAR_TEMP);
     Cvar_SetDescription(cl_packetdelay, "Stream network packets to the server instead of trying to send immediately\nDefault: 0");
 
     com_cl_running = Cvar_Get ("cl_running", "0", CVAR_ROM);
