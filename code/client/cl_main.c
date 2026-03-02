@@ -4234,8 +4234,8 @@ void CL_Init( void ) {
 	Cvar_Get("ticket", "", CVAR_USERINFO | CVAR_TEMP);
 #endif
     Cvar_Get ("name", "UnnamedPlayer", CVAR_USERINFO | CVAR_ARCHIVE );
-    Cvar_Get ("rate", "32000", CVAR_USERINFO | CVAR_ARCHIVE );
-    Cvar_Get ("snaps", "20", CVAR_USERINFO | CVAR_PROTECTED );
+    Cvar_Get ("rate", "90000", CVAR_USERINFO | CVAR_ARCHIVE );
+    Cvar_Get ("snaps", "60", CVAR_USERINFO | CVAR_PROTECTED );
     Cvar_Get ("color1",  "4", CVAR_USERINFO | CVAR_ARCHIVE );
     Cvar_Get ("color2", "5", CVAR_USERINFO | CVAR_ARCHIVE );
     Cvar_Get ("handicap", "100", CVAR_USERINFO | CVAR_ARCHIVE );

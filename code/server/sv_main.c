@@ -1353,6 +1353,9 @@ void SV_TrackCvarChanges( void )
 	// produce wrong interpolated positions at the new settings.
 	if ( sv_fps->modified || sv_gameHz->modified || sv_bufferMs->modified || sv_velSmooth->modified ) {
 		SV_SmoothInit();
+		sv_gameHz->modified = qfalse;
+		sv_bufferMs->modified = qfalse;
+		sv_velSmooth->modified = qfalse;
 		Com_DPrintf( "position ring buffer flushed due to timing cvar change\n" );
 	}
 

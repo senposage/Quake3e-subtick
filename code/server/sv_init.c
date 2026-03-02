@@ -851,11 +851,11 @@ void SV_Init( void )
     SV_LoadRecordCache();
 #endif
 
-	sv_minRate = Cvar_Get ("sv_minRate", "0", CVAR_ARCHIVE_ND | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_minRate, "Force clients to play with a minimum latency\nDefault: 0");
+	sv_minRate = Cvar_Get ("sv_minRate", "500000", CVAR_ARCHIVE_ND | CVAR_SERVERINFO | CVAR_PROTECTED );
+    Cvar_SetDescription(sv_minRate, "Minimum client rate in bytes/sec. Overrides client/QVM rate clamping.\n500000 guarantees full snapshot delivery at sv_fps up to 125.\nDefault: 500000");
 
-    sv_maxRate = Cvar_Get ("sv_maxRate", "0", CVAR_ARCHIVE_ND | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_maxRate, "Force all clients to play with a max rate, limit an advantage for having a low latency\nDefault: 0");
+    sv_maxRate = Cvar_Get ("sv_maxRate", "0", CVAR_ARCHIVE_ND | CVAR_SERVERINFO | CVAR_PROTECTED );
+    Cvar_SetDescription(sv_maxRate, "Maximum client rate in bytes/sec. 0 = unlimited.\nDefault: 0");
 
     sv_minPing = Cvar_Get("sv_minPing", "0", CVAR_ARCHIVE | CVAR_SERVERINFO);
 	sv_maxPing = Cvar_Get("sv_maxPing", "0", CVAR_ARCHIVE | CVAR_SERVERINFO);

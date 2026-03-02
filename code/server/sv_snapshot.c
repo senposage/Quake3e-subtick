@@ -84,7 +84,7 @@ static void SV_SmoothRecord( int clientNum ) {
 		return;
 
 	hist = &sv_smoothHistory[clientNum];
-	idx = hist->head % SV_SMOOTH_MAX_SLOTS;
+	idx = ( hist->head % SV_SMOOTH_MAX_SLOTS + SV_SMOOTH_MAX_SLOTS ) % SV_SMOOTH_MAX_SLOTS;
 	slot = &hist->slots[idx];
 
 	if ( svs.clients[clientNum].netchan.remoteAddress.type == NA_BOT ) {

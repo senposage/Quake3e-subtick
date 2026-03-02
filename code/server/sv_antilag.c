@@ -501,11 +501,21 @@ Recomputes config if cvars changed.
 void SV_Antilag_RecordPositions( void ) {
     int i;
 
-    // Recompute config if relevant cvars changed
-    if ( sv_physicsScale->modified || sv_antilagMaxMs->modified ) {
+    // Recompute config if relevant cvars changed.
+    // sv_fps affects shadow Hz and slot count — must be included.
+    if ( sv_physicsScale->modified || sv_antilagMaxMs->modified || sv_fps->modified ) {
+        int oldSlots = sv_shadowHistorySlots;
         SV_Antilag_ComputeConfig();
         sv_physicsScale->modified = qfalse;
         sv_antilagMaxMs->modified = qfalse;
+        // Note: sv_fps->modified is cleared by SV_TrackCvarChanges, not here
+
+        // If slot count changed, flush all ring buffers — old entries were
+        // written with a different modulo and produce wrong indices when read.
+        if ( sv_shadowHistorySlots != oldSlots ) {
+            Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
+        }
+
         Com_Printf( "SV_Antilag: reconfigured — shadow Hz=%d, historySlots=%d\n",
             1000 / sv_shadowTickMs, sv_shadowHistorySlots );
     }

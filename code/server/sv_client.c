@@ -1788,10 +1788,10 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 		return;
 	}
 
-	// rate command
-
-	// if the client is on the same subnet as the server and we aren't running an
-	// internet public server, assume they don't need a rate choke
+	// rate command — read client's declared rate, then enforce server bounds.
+	// The UT QVM force-clamps the client cvar to 32000 which chokes 60Hz+
+	// snapshot delivery.  sv_minRate overrides it to a level that guarantees
+	// full snapshot delivery at the configured sv_fps.
 	if ( cl->netchan.remoteAddress.type == NA_LOOPBACK || ( cl->netchan.isLANAddress && com_dedicated->integer != 2 && sv_lanForceRate->integer ) ) {
 		cl->rate = 0; // lans should not rate limit
 	} else {
@@ -1799,13 +1799,15 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 		if ( val[0] )
 			cl->rate = atoi( val );
 		else
-			cl->rate = 10000; // was 3000
+			cl->rate = 90000;
 
 		if ( sv_maxRate->integer ) {
 			if ( cl->rate > sv_maxRate->integer )
 				cl->rate = sv_maxRate->integer;
 		}
 
+		// sv_minRate overrides QVM rate clamping — ensures snapshot delivery
+		// is never choked regardless of what the client or QVM sets.
 		if ( sv_minRate->integer ) {
 			if ( cl->rate < sv_minRate->integer )
 				cl->rate = sv_minRate->integer;
