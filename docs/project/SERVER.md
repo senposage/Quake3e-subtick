@@ -60,7 +60,7 @@ sv_fps   = engine ticks/sec (default 60)  — input sampling, antilag, snapshots
 sv_gameHz = QVM GAME_RUN_FRAME rate (default 20) — what level.time sees
 ```
 
-**Why sv_gameHz is locked to 20:** UT4.3 QVM hardcodes `serverTime += 50` in its antiwarp code. This assumes exactly 50ms per game frame. Raising sv_gameHz would cause antiwarp to fire 3× too fast at sv_gameHz 60.
+**sv_gameHz compatibility:** All UT versions hardcode `serverTime += 50` in QVM antiwarp code, assuming 50ms game frames. **REQUIRED for UT 4.0-4.2:** set to 20 (game code broadly intolerant of non-20Hz rates). **Any version with QVM g_antiwarp enabled:** set to 20 (antiwarp misfires at other rates). **UT 4.3+ with g_antiwarp off:** sv_gameHz 0 is safe. **Alternative:** use `sv_antiwarp 1` — engine-side antiwarp uses frame-rate-aware step sizes and works at any sv_gameHz.
 
 ### SV_Frame(int msec) [CUSTOM]
 
@@ -90,6 +90,16 @@ SV_Frame(msec):
       while (sv.gameTimeResidual >= gameMsec):
           sv.gameTimeResidual -= gameMsec
           sv.gameTime += gameMsec
+
+          [ENGINE ANTIWARP — sv_antiwarp 1 or 2]
+          for each active non-bot client:
+              if sv.gameTime - awLastThinkTime > tolerance:
+                  lastUsercmd.serverTime += gameMsec
+                  mode 2: decay movement inputs based on gap phase
+                    extrapolate (tol+extra) → decay (antiwarpDecay) → friction
+                  VM_Call(gvm, GAME_CLIENT_THINK, i)
+                  awLastThinkTime = sv.gameTime
+
           SV_BotFrame(sv.gameTime)
           VM_Call(gvm, 1, GAME_RUN_FRAME, sv.gameTime)  ← QVM sees this
 
@@ -110,6 +120,8 @@ SV_Frame(msec):
 Called when any server cvar is modified:
 
 ```
+if sv_antiwarp modified:
+    if sv_antiwarp enabled: Cvar_Set("g_antiwarp", "0")  ← prevent double injection
 if sv_fps modified or sv_gameHz modified:
     clamp sv.timeResidual to 2×new_frameMsec  ← prevent burst ticking
 if sv_fps modified or sv_gameHz modified or sv_bufferMs modified or sv_velSmooth modified:
@@ -891,10 +903,14 @@ typedef struct client_s {
 | `sv_snapshotFps` | -1 | Snapshot send rate (-1=sv_fps, 0=client snaps) |
 | `sv_pmoveMsec` | 8 | Max Pmove step size (8=125fps equivalent) |
 | `sv_extrapolate` | 1 | Engine-side position extrapolation |
-| `sv_smoothClients` | 0 | TR_LINEAR trajectory mode (experimental) |
+| `sv_smoothClients` | 1 | TR_LINEAR trajectory mode |
 | `sv_bufferMs` | 0 | Ring buffer delay (0=off, -1=auto, 1-100=manual ms) |
 | `sv_velSmooth` | 32 | Velocity smoothing window (ms) |
 | `sv_busyWait` | 0 | Spin-wait last N ms per frame |
+| `sv_antiwarp` | 0 | Engine antiwarp (0=off, 1=constant, 2=decay) |
+| `sv_antiwarpTol` | 0 | Antiwarp tolerance ms (0=auto=gameMsec) |
+| `sv_antiwarpExtra` | 0 | Mode 2 extrapolation window ms (0=auto=awTol) |
+| `sv_antiwarpDecay` | 150 | Mode 2 decay duration ms |
 
 ### Antilag Cvars [CUSTOM] (sv_antilag.c)
 

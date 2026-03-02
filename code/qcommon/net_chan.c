@@ -513,11 +513,24 @@ void NET_FlushPacketQueue( void )
 {
 	packetQueue_t *last;
 	int now;
+	// When both delay cvars are 0, force-flush all queued packets immediately.
+	// Without this, packets queued at the old delay keep releasing on their original
+	// schedule. On the client side this inflates cl.snapshotMsec via the EMA and
+	// breaks time sync recovery (requires reconnect to fix).
+	qboolean forceFlush;
+#ifndef DEDICATED
+	forceFlush = ( cl_packetdelay && cl_packetdelay->integer <= 0
+		&& sv_packetdelay && sv_packetdelay->integer <= 0 );
+#else
+	forceFlush = ( sv_packetdelay && sv_packetdelay->integer <= 0 );
+#endif
 
 	while ( packetQueue ) {
-		now = Sys_Milliseconds();
-		if ( packetQueue->release - now >= 0 )
-			break;
+		if ( !forceFlush ) {
+			now = Sys_Milliseconds();
+			if ( packetQueue->release - now >= 0 )
+				break;
+		}
 		Sys_SendPacket( packetQueue->length, packetQueue->data, &packetQueue->to );
 		last = packetQueue;
 		packetQueue = packetQueue->next;

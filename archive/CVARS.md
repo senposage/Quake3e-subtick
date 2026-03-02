@@ -1,49 +1,50 @@
 # Custom Cvar Reference — Quake3e-subtick
 
-All custom cvars added to this engine fork, organized by what they fix and how they work.
+All custom cvars added to this engine fork.
 
 ---
 
-## Server-Side Cvars
+## Recommended Setup — UT 4.3.4
+
+```
+sv_fps 60
+sv_gameHz 0              // default — game frames fire at sv_fps rate
+sv_snapshotFps -1        // match sv_fps
+sv_pmoveMsec 8           // 125fps-equivalent physics steps
+sv_antiwarp 2            // engine-side antiwarp with decay
+sv_antiwarpDecay 150     // tune higher (e.g. 225) for lossy networks
+sv_extrapolate 1         // default — harmless no-op at sv_gameHz 0
+sv_smoothClients 1       // TR_LINEAR trajectory for cgame
+sv_bufferMs 0            // no position delay (not needed at sv_gameHz 0)
+sv_velSmooth 32          // velocity smoothing for TR_LINEAR
+sv_antilagEnable 1       // engine-side antilag
+```
+
+**Why sv_gameHz 0:** At sv_gameHz 0, `GAME_RUN_FRAME` fires every engine tick. Entity state is always fresh — `sv_extrapolate` and `sv_bufferMs` become no-ops. `sv_smoothClients` still adds value via the TR_LINEAR trajectory type. Engine `sv_antiwarp` replaces QVM `g_antiwarp` and removes the sv_gameHz 20 constraint.
+
+For legacy setups (UT 4.0-4.2, QVM g_antiwarp), see [SV_GAMEHZ.md](../docs/project/SV_GAMEHZ.md).
+
+---
+
+## Core Server Cvars
 
 ### sv_fps
 **Default:** 60 | **Flags:** CVAR_TEMP, CVAR_PROTECTED | **File:** sv_init.c
 
-Engine tick and input sampling rate (Hz). Controls how often the server processes usercmds, records antilag snapshots, and sends network snapshots. Higher = finer input resolution.
-
-**Why:** Vanilla Q3 ties everything to a single tick rate. We decouple input sampling (sv_fps) from game logic (sv_gameHz) so the QVM runs at its expected 20Hz while the engine processes inputs at 60Hz+.
+Engine tick and input sampling rate (Hz). Controls how often the server processes usercmds, records antilag snapshots, and sends network snapshots.
 
 **How:** `sv_main.c:SV_Frame()` outer `while` loop runs at sv_fps rate. `sv.time` and `svs.time` advance by `1000/sv_fps` per tick.
 
-**Interpolation windows:** sv_fps 20=50ms, 60=16.7ms, 80=12.5ms, 100=10ms, 125=8ms. Higher rates = tighter windows = less tolerance for network jitter. The snapshot interval also sets the **minimum sv_bufferMs** for clean ring-buffer interpolation — see sv_bufferMs for the per-rate table.
-
----
-
-### sv_gameHz
-**Default:** 0 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
-
-Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. Default 0 (disabled, falls back to sv_fps). Set to 20 for UT4.3 QVM antiwarp compatibility (`serverTime += 50` in `g_active.c` assumes 50ms game frames).
-
-**Why:** Decouples game logic rate from engine tick rate so sv_fps can be raised without breaking QVM timers (bleed, bandage, inactivity) or antiwarp. At `sv_gameHz 20`, g_antiwarp is correct at any `sv_fps` — `G_RunClient` fires at 20Hz regardless of `sv_fps`, so the 50ms blank-cmd step always matches the game frame exactly. No stale or unnecessary latency is added.
-
-**Effect on player positions:** `BG_PlayerStateToEntityState` — which updates `ent->s.pos.trBase` (the entity position stamped into snapshots) — is called inside `ClientEndFrame`, which runs inside `GAME_RUN_FRAME`. When `sv_gameHz 20`, this only fires at 20Hz. **Both real human players AND bots** have stale snapshot positions in vanilla mode when `sv_fps > sv_gameHz`. `sv_extrapolate 1` (default) corrects this for both: real players via `ps->origin` (exact, updated every usercmd by Pmove), bots via velocity extrapolation (`ps->velocity * dt`). No correction is needed when `sv_gameHz 0` because `GAME_RUN_FRAME` fires at `sv_fps` rate.
-
-**How (sv_gameHz > 0):** Inner `while` loop in `SV_Frame()` accumulates `sv.gameTimeResidual` and fires `GAME_RUN_FRAME(sv.gameTime)` when it reaches `1000/sv_gameHz`. Between firings, `sv.gameTime` lags `sv.time` — this gap (`sv.time - sv.gameTime`) is what the extrapolation patch reads in `SV_BuildCommonSnapshot` to correct stale player entity positions.
-
-**How (sv_gameHz <= 0, disabled):** Effective rate falls back to `sv_fps`. `GAME_RUN_FRAME` fires on every engine tick; `sv.gameTime == sv.time` always, no gap. `sv_extrapolate` still runs: bot velocity extrapolation produces `dt=0` (position unchanged); real-player `ps->origin` read is identical to what `BG_PlayerStateToEntityState` already wrote. `sv_bufferMs` ring buffer queries still run and apply delayed positions when configured. `sv_smoothClients` TR_LINEAR also runs unconditionally on every tick.
-
-**⚠ Antiwarp warning (`sv_gameHz 0`):** With `sv_gameHz <= 0`, game frames advance at `1000/sv_fps` ms per tick. The QVM's hardcoded `serverTime += 50` blank command is then mismatched at any `sv_fps != 20` — at `sv_fps 60` it fires a 50ms injection every 16ms, teleporting lagging players at 3× the intended rate. **Do not use `sv_gameHz 0` with UT QVM unless `sv_fps` is also 20.** See `docs/g-antiwarp-engine-feasibility.md` for details.
+**Interpolation windows:** sv_fps 20=50ms, 60=16.7ms, 80=12.5ms, 100=10ms, 125=8ms. Higher rates = tighter windows = less tolerance for network jitter.
 
 ---
 
 ### sv_snapshotFps
 **Default:** -1 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
 
-Max snapshot send rate to clients. `-1` (default) means match `sv_fps` and live-tracks changes to it. `0` falls back to per-client `snaps` userinfo (vanilla Q3 behavior). `>0` sets an explicit rate capped to `sv_fps`. Server ignores client `snaps` userinfo when non-zero — this is fully authoritative.
+Max snapshot send rate to clients. `-1` = match `sv_fps` (live-tracks changes). `0` = per-client `snaps` userinfo (vanilla Q3). `>0` = explicit rate capped to `sv_fps`. Fully authoritative — ignores client `snaps` cvar.
 
-**Why:** Ensures all clients receive snapshots at a consistent rate controlled by the server, not by individual client settings.
-
-**How:** `sv_client.c:SV_UserinfoChanged()` computes `cl->snapshotMsec = 1000 / min(sv_snapshotFps, sv_fps)`. When `sv_snapshotFps == -1`, uses `sv_fps` directly. Client `snaps` cvar is bypassed entirely.
+**How:** `sv_client.c:SV_UserinfoChanged()` computes `cl->snapshotMsec = 1000 / min(sv_snapshotFps, sv_fps)`.
 
 ---
 
@@ -52,179 +53,210 @@ Max snapshot send rate to clients. `-1` (default) means match `sv_fps` and live-
 
 Maximum physics step size (ms). 8ms = 125fps equivalent Pmove. Set to 0 to disable.
 
-**Why:** Without this, a player at 333fps gets 3ms Pmove steps while a player at 60fps gets 16ms steps — different physics behavior (jump height, strafe speed). Clamping to 8ms equalizes everyone.
+**Why:** Equalizes physics behavior regardless of client framerate (jump height, strafe speed).
 
-**How:** `sv_client.c:SV_ClientThink()` fires multiple `GAME_CLIENT_THINK` calls per usercmd, each clamped to `sv_pmoveMsec` ms. Full real delta consumed across all steps so timers (bleed, bandage) stay correct. Bots excluded (they submit one usercmd per game frame with serverTime = level.time; clamping warps movement). Safety: if `commandTime` doesn't advance on first call (intermission/pause), falls through to single call via `goto single_call`.
-
----
-
-### sv_extrapolate
-**Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
-
-Engine-side position correction for high sv_fps snapshots. **Affects both real human players AND bots** — the stutter problem is not bot-specific.
-
-- **0** = disabled. Vanilla behavior: `BG_PlayerStateToEntityState` only runs at sv_gameHz (20Hz), so 3 consecutive 60Hz snapshots have identical positions for **all** players (real and bots) → visible stutter for everyone.
-- **1** = enabled. Real players: reads `ps->origin` (exact, updated every usercmd by Pmove — always fresh regardless of sv_gameHz). Bots: velocity-based extrapolation (`trBase += ps->velocity * dt`), accurate because bot AI only changes direction at game frame boundaries.
-
-**No effect when sv_gameHz 0** (default): game frames fire at sv_fps rate, entity state is always fresh, sv_extrapolate is a harmless no-op for both player types.
-
-**Why:** At sv_fps 60 with sv_gameHz 20, the entity state (`ent->s`) only updates every 3rd engine tick. Without correction, **all** clients see players teleporting every 50ms instead of moving smoothly every 16ms — this is not limited to bots.
-
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` runs on every snapshot tick regardless of `sv_gameHz` setting. `extrapolateMs = sv.time - sv.gameTime` is used by the bot velocity path (`trBase += ps->velocity * dt`); when `extrapolateMs == 0` (sv_gameHz disabled or at a game-frame boundary tick), `dt=0` so bot positions are unchanged. Real-player path reads `ps->origin` directly on every tick — when `extrapolateMs == 0` this is the same value `BG_PlayerStateToEntityState` already wrote (harmless redundancy). The `sv_bufferMs` ring buffer query (Phase 1) runs every tick regardless of `extrapolateMs`, ensuring consistent delayed positions. Velocity dead-zone check `DotProduct(velocity, velocity) > 100.0` prevents idle player vibration from Pmove ground snapping micro-oscillations.
-
----
-
-### sv_smoothClients
-**Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
-
-**EXPERIMENTAL.** Changes player entity trajectory type from `TR_INTERPOLATE` to `TR_LINEAR` in snapshots.
-
-- **0** = `TR_INTERPOLATE` (default). cgame lerps between two snapshot positions. Simple, reliable, but can show sawtooth artifacts on rapid direction changes because the lerp target is always one snapshot behind.
-- **1** = `TR_LINEAR`. cgame calls `BG_EvaluateTrajectory()` which computes `position = trBase + trDelta * (cg.time - trTime) * 0.001` continuously. No snap-to-snap lerping — the trajectory evaluates smoothly at any render timestamp.
-
-**Why:** With `TR_INTERPOLATE`, cgame linearly interpolates between the previous and current snapshot positions. When a player reverses direction, the interpolation target is wrong until the next snapshot arrives — visible as a brief drift in the wrong direction. `TR_LINEAR` lets cgame compute position from velocity at any time, potentially smoother for direction changes.
-
-**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` sets `es->pos.trType = TR_LINEAR` and `es->pos.trTime = sv.time` on **every** engine tick (including game-frame ticks). Both `sv_smoothClients` and `sv_extrapolate` now run every tick — neither is guarded by `extrapolateMs > 0`. This is important: emitting TR_INTERPOLATE on game-frame boundary ticks would cause 50ms-period stutter at sv_gameHz 20/sv_fps 60 by interrupting the TR_LINEAR trajectory. When `sv_smoothClients 1` is enabled, it uses the position resolved by `sv_bufferMs` (Phase 1) as the base, then applies velocity smoothing from `sv_velSmooth` (if enabled) for `trDelta`. The two settings compose: `sv_bufferMs` controls the position source, `sv_smoothClients` controls the trajectory type.
-
-**Safety:** Idle players (velocity near zero) are NOT switched to TR_LINEAR — they stay TR_INTERPOLATE to prevent extrapolation drift/vibration. The DotProduct > 100.0 dead-zone check applies to both smoothed velocity (ring buffer path) and raw velocity (fallback path). Pmove operates on playerState only and does NOT interact with entityState trajectory type changes.
+**How:** `sv_client.c:SV_ClientThink()` fires multiple `GAME_CLIENT_THINK` calls per usercmd, each clamped to `sv_pmoveMsec` ms. Bots excluded. Safety: `goto single_call` if `commandTime` doesn't advance (intermission/pause).
 
 ---
 
 ### sv_busyWait
 **Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
 
-Spin for the last N milliseconds of each frame instead of sleeping. Eliminates OS scheduler jitter at the cost of ~1 CPU core at 100%.
-
-**Why:** OS sleep functions (`Sleep()`, `usleep()`) have ~1-2ms granularity. At sv_fps 125 (8ms frames), a 2ms oversleep is 25% of the frame budget. The `timeResidual` clamping fix makes this mostly unnecessary — only enable if you observe measurable frame timing jitter on specific hardware.
+Spin for the last N milliseconds of each frame instead of sleeping. Eliminates OS scheduler jitter at the cost of ~1 CPU core at 100%. The `timeResidual` clamping fix makes this mostly unnecessary.
 
 ---
+
+## Antiwarp
+
+### sv_antiwarp
+**Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
+
+Engine-side antiwarp replacement for QVM `g_antiwarp`. Injects blank commands for lagging clients before each `GAME_RUN_FRAME`.
+
+- **0** = disabled. Use QVM `g_antiwarp` if needed (requires `sv_gameHz 20`).
+- **1** = constant. Keep last inputs indefinitely (QVM-style). Player continues running with stale inputs until real commands resume.
+- **2** = decay. Three-phase approach:
+  - **Extrapolate** (first `tolerance + sv_antiwarpExtra` ms): keep last inputs. Brief jitter absorbed transparently.
+  - **Decay** (next `sv_antiwarpDecay` ms): linearly blend movement inputs toward zero.
+  - **Friction** (after decay): inputs zeroed, Pmove friction coasts to natural stop.
+
+When enabled (1 or 2), forces `g_antiwarp 0` to prevent double injection.
+
+**Why engine-side:** QVM antiwarp hardcodes `serverTime += 50`, forcing `sv_gameHz 20`. Engine antiwarp uses `gameMsec` (actual frame duration) — works at any `sv_fps` / `sv_gameHz`, including `sv_gameHz 0`.
+
+**How:** Before each `GAME_RUN_FRAME`, checks each active non-bot client. If `sv.gameTime - awLastThinkTime > tolerance`, injects blank command via `GAME_CLIENT_THINK`. 100% server-side, works with vanilla clients.
+
+---
+
+### sv_antiwarpTol
+**Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
+
+Tolerance in ms before blank injection fires. `0` = auto (game frame duration: `1000/sv_gameHz` or `1000/sv_fps`). `>0` = explicit threshold. **Requires `sv_antiwarp >= 1`.**
+
+---
+
+### sv_antiwarpExtra
+**Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
+
+Extrapolation window for `sv_antiwarp 2` (ms). How long full movement inputs are kept after the tolerance gap before decay starts.
+
+- **0** = auto (uses `sv_antiwarpTol` value — decay starts at `2 × tolerance`).
+- **>0** = explicit window in ms. Larger = more jitter absorbed, but player runs longer on stale inputs during real lag.
+
+**Requires `sv_antiwarp 2`.**
+
+---
+
+### sv_antiwarpDecay
+**Default:** 150 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
+
+Decay duration for `sv_antiwarp 2` (ms). After the extrapolation window, movement inputs are linearly decayed to zero. Then Pmove friction decelerates to a natural stop. `0` = skip decay, zero inputs immediately.
+
+**Example at defaults** (`sv_fps 60`, `sv_antiwarpTol 0` auto=16ms, `sv_antiwarpExtra 0` auto=16ms, `sv_antiwarpDecay 150`):
+- 0-16ms gap: no injection (within tolerance)
+- 16-32ms: full movement extrapolation (jitter absorbed)
+- 32-182ms: inputs decay to zero (smooth deceleration)
+- 182ms+: friction only (natural stop)
+
+**Tuned for lossy networks** (`sv_antiwarpExtra 50`, `sv_antiwarpDecay 225`):
+- 0-16ms: no injection
+- 16-66ms: full extrapolation (absorbs moderate packet loss)
+- 66-291ms: decay to zero
+- 291ms+: friction only
+
+**Requires `sv_antiwarp 2`.**
+
+---
+
+## Antilag
 
 ### sv_antilagEnable
-**Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** sv_antilag.c (SV_Antilag_Init)
+**Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** sv_antilag.c
 
-Enable/disable engine-side antilag hit detection.
-
-**Why:** The QVM's built-in antilag only records positions at sv_gameHz (20Hz = 50ms granularity). At sv_fps 60, hit detection needs finer-grained position history. Engine-side antilag records at `sv_physicsScale` sub-ticks per engine tick (~5.5ms granularity at default settings).
-
-**How:** `sv_antilag.c:SV_Antilag_RecordPositions()` called `sv_physicsScale` times per sv_fps tick. On hit detection, rewinds entity positions to `attackTime`, performs trace, restores positions.
-
----
+Engine-side antilag hit detection. Records positions at `sv_physicsScale` sub-ticks per engine tick (~5.5ms granularity at defaults). On hit detection, rewinds entity positions to `attackTime`, traces, restores.
 
 ### sv_physicsScale
-**Default:** 3 | **Flags:** CVAR_ARCHIVE | **File:** sv_antilag.c (SV_Antilag_Init)
+**Default:** 3 | **Flags:** CVAR_ARCHIVE | **File:** sv_antilag.c
 
-Number of antilag sub-tick position snapshots per engine tick. At sv_fps 60 with scale 3: records every ~5.5ms. Higher = finer antilag granularity, more memory.
+Antilag sub-tick snapshots per engine tick. At sv_fps 60 with scale 3: records every ~5.5ms.
+
+### sv_antilagMaxMs
+**Default:** 200 | **Flags:** CVAR_ARCHIVE | **File:** sv_antilag.c
+
+Maximum rewind window (ms). Players with ping above this get no antilag compensation.
 
 ---
 
-### sv_antilagMaxMs
-**Default:** 200 | **Flags:** CVAR_ARCHIVE | **File:** sv_antilag.c (SV_Antilag_Init)
+## Smoothing & Position Correction
 
-Maximum rewind window for antilag (ms). Players with ping above this get no antilag compensation.
+> **At sv_gameHz 0 (recommended):** `sv_extrapolate` and `sv_bufferMs` are no-ops — entity state is always fresh because `GAME_RUN_FRAME` fires every tick. `sv_smoothClients` still provides value via the TR_LINEAR trajectory type. `sv_velSmooth` smooths velocity for TR_LINEAR.
+
+### sv_extrapolate
+**Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
+
+Engine-side position correction for snapshots between game frames.
+
+- **0** = disabled. At sv_gameHz > 0, all players stutter (entity state only updates at game-frame rate).
+- **1** = enabled. Real players: reads `ps->origin` (exact). Bots: velocity extrapolation.
+
+**At sv_gameHz 0:** harmless no-op — `BG_PlayerStateToEntityState` already runs every tick. Leave at 1 (default).
+
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` Phase 1. Velocity dead-zone check `DotProduct > 100.0` prevents idle player vibration.
+
+---
+
+### sv_smoothClients
+**Default:** 1 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
+
+Player entity trajectory type in snapshots.
+
+- **0** = `TR_INTERPOLATE`. cgame lerps between snapshot positions.
+- **1** = `TR_LINEAR`. cgame evaluates `trBase + trDelta * dt` continuously. Smoother for direction changes.
+
+**At sv_gameHz 0:** the primary value is the trajectory type change, not position correction. Recommended: `1`.
+
+**How:** `sv_snapshot.c:SV_BuildCommonSnapshot()` Phase 2. Idle players stay TR_INTERPOLATE (dead-zone check). Runs every tick to prevent stutter from trajectory type interruptions.
 
 ---
 
 ### sv_bufferMs
 **Default:** 0 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
 
-**Requires `sv_extrapolate 1` or `sv_smoothClients 1`** — has no effect when both are 0 (vanilla mode).
+Per-client position ring buffer with configurable delay. Requires `sv_extrapolate 1` or `sv_smoothClients 1`.
 
-Per-client position ring buffer with configurable delay.
+- **0** = disabled. No delay, lowest latency.
+- **-1** = auto (`1000/sv_fps` — one snapshot interval).
+- **1-100** = manual delay in ms.
 
-- **0** = disabled. No ring buffer position delay, no extra latency. `trBase` is always the current `ps->origin` (straight pass-through). This applies regardless of `sv_smoothClients` setting — when `sv_bufferMs 0`, there is zero added position latency even in TR_LINEAR mode. `sv_velSmooth` may still average the velocity vector but does not delay the position.
-- **-1** = auto. Computes `1000/sv_fps` — one snapshot interval, the minimum for clean ring-buffer interpolation:
-  - sv_fps 20: auto = 50ms
-  - sv_fps 40: auto = 25ms
-  - sv_fps 60: auto = 16ms
-  - sv_fps 80: auto = 12ms
-  - sv_fps 100: auto = 10ms
-  - sv_fps 125: auto = 8ms
-- **1-100** = manual delay in milliseconds.
+**At sv_gameHz 0:** not useful. Positions are already fresh every tick — the buffer just adds latency for no benefit. Leave at 0.
 
-**Minimum values to avoid under/overshoot:** For the ring buffer to straddle a direction change (interpolate *through* the reversal rather than snap to the nearest entry), `bufMs` must be at least one full snapshot interval — `1000/sv_fps`. This is exactly what auto (-1) provides.
+**At sv_gameHz > 0:** provides smoothing between 20Hz game-frame position updates. Auto (-1) is the minimum for clean interpolation.
 
-| sv_fps | Snapshot interval | Min / Auto (-1) bufMs |
-|--------|------------------|-----------------------|
-| 20     | 50 ms            | 50 ms                 |
-| 40     | 25 ms            | 25 ms                 |
-| 60     | 16 ms            | 16 ms                 |
-| 80     | 12 ms            | 12 ms                 |
-| 100    | 10 ms            | 10 ms                 |
-
-**Why:** At high sv_fps, rapid direction changes produce sawtooth artifacts because each snapshot captures a slightly different velocity vector. The ring buffer provides two smoothing strategies:
-
-**How:** `sv_snapshot.c` maintains a 32-slot ring buffer per client (`svSmoothHistory_t`). Positions are recorded every sv_fps tick in `SV_Frame` when `sv_extrapolate 1` or `sv_smoothClients 1` is active. When `sv_bufferMs > 0`, `SV_BuildCommonSnapshot` queries the ring buffer for delayed positions via `SV_SmoothGetPosition()`. Provides the base position for both TR_INTERPOLATE (sv_smoothClients 0) and TR_LINEAR (sv_smoothClients 1) modes — these settings compose rather than being mutually exclusive.
-
-**Ring buffer capacity:** 32 slots = 256ms at sv_fps 125, 533ms at sv_fps 60. Sufficient for any reasonable buffer depth.
+**How:** 32-slot ring buffer per client in `sv_snapshot.c`. Capacity: 256ms at sv_fps 125, 533ms at sv_fps 60.
 
 ---
 
 ### sv_velSmooth
 **Default:** 32 | **Flags:** CVAR_ARCHIVE | **File:** sv_init.c
 
-**Requires `sv_smoothClients 1`** — has no effect when `sv_smoothClients 0`.
+Velocity smoothing window (ms). Requires `sv_smoothClients 1`.
 
-Velocity smoothing window in milliseconds. Averages player velocity over the last N ms from the ring buffer.
+- **0** = disabled (raw velocity).
+- **1-100** = averaging window. At sv_fps 60: ~2 ticks of velocity data.
 
-- **0** = disabled. Use raw velocity from current tick.
-- **1-100** = smoothing window in ms. At sv_fps 60 with sv_velSmooth 32: averages ~2 ticks of velocity data.
+Averages velocity over the last N ms to reduce direction-change sawtooth. No position latency added — only the velocity vector is smoothed.
 
-**Why:** At high sv_fps, rapid direction changes produce sawtooth artifacts because each snapshot captures a slightly different velocity vector. Averaging over a short window smooths out the transitions.
+---
 
-**How:** Only effective with `sv_smoothClients 1` (TR_LINEAR mode), where cgame uses `trDelta` (velocity) for continuous position evaluation via `BG_EvaluateTrajectory`. The smoothed velocity makes extrapolation between snapshots more stable. Uses the same ring buffer as `sv_bufferMs`. No position latency added — only the velocity vector is smoothed.
+## Legacy: sv_gameHz
 
-**Relationship:** Uses the same ring buffer as `sv_bufferMs`. The ring buffer records whenever `sv_extrapolate 1` or `sv_smoothClients 1` is active AND either `sv_bufferMs != 0` or `sv_velSmooth > 0`.
+**Default:** 0 | **Flags:** CVAR_ARCHIVE, CVAR_SERVERINFO | **File:** sv_init.c
+
+Rate at which `level.time` advances and `GAME_RUN_FRAME` fires. `0` = disabled (falls back to sv_fps).
+
+| Target | sv_gameHz | Notes |
+|--------|-----------|-------|
+| **UT 4.3.4 + sv_antiwarp** | **0** (recommended) | No constraints — engine antiwarp is frame-rate aware |
+| UT 4.3.4 + QVM g_antiwarp | 20 | Required — QVM hardcodes 50ms injection |
+| UT 4.0-4.2 | 20 | Required — game code intolerant of non-20Hz |
+
+For the full sv_gameHz reference (how it works, position correction pipeline, combination matrix), see [SV_GAMEHZ.md](../docs/project/SV_GAMEHZ.md).
 
 ---
 
 ## Client-Side Cvars
 
 ### Removed: cl_snapScaling
-`cl_snapScaling` was removed after testing showed it created a serverTime oscillation loop and visible movement stutter at high snapshot rates, especially at 1:1 `sv_fps:sv_snapshotFps`.
-
-Current behavior is back to vanilla client time sync (`+1/-2` drift logic, no extra clamp layer).
-
-For full investigation notes and test matrix, see:
-- `docs/debug-session-2026-02-26-cl_snapScaling-stutter.md`
+Removed after testing — created serverTime oscillation and stutter at high snapshot rates. See `docs/debug-session-2026-02-26-cl_snapScaling-stutter.md`.
 
 ---
 
 ## Bug Fixes (no cvar — always active)
 
-These are correctness fixes that should never be disabled:
-
 | Fix | File | What |
 |-----|------|------|
-| Snapshot dispatch in sv_fps loop | sv_main.c | `SV_IssueNewSnapshot` + `SV_SendClientMessages` inside the `while(timeResidual >= frameMsec)` loop, not after it. Prevents double-tick OS jitter from causing 32ms snapshot gaps. |
-| gameTimeResidual preserved | sv_main.c | `sv.gameTimeResidual` NOT reset when sv_fps changes. sv_gameHz doesn't change, so game frame progress is still valid. Resetting caused bot stutter after sv_fps changes. |
-| sv_snapshotFps->modified cleared | sv_main.c | Was never cleared in `SV_TrackCvarChanges` → stale flag caused unnecessary recalculation every frame. |
-| Listen server SV_BotFrame | sv_main.c | Both dedicated and listen servers now call `SV_BotFrame(sv.gameTime)` inside the sv_gameHz loop. Previously listen servers called with wrong clock. |
+| Snapshot dispatch in sv_fps loop | sv_main.c | `SV_IssueNewSnapshot` + `SV_SendClientMessages` inside the tick loop. Prevents 32ms gaps from OS jitter. |
+| gameTimeResidual preserved | sv_main.c | NOT reset on sv_fps change — prevents bot stutter. |
+| sv_snapshotFps->modified cleared | sv_main.c | Was never cleared → stale flag caused recalculation every frame. |
+| Listen server SV_BotFrame | sv_main.c | Both dedicated and listen servers call `SV_BotFrame(sv.gameTime)` inside sv_gameHz loop. |
 | Bot snapshot rate | sv_bot.c | Uses `min(sv_snapshotFps, sv_fps)` instead of raw `sv_fps`. |
-| SV_MapRestart_f clock sync | sv_ccmds.c | Syncs `sv.gameTime = sv.time` before `SV_RestartGameProgs()`. Was passing `sv.time` to `GAME_RUN_FRAME` instead of `sv.gameTime`. |
-| net_dropsim CVAR_CHEAT | net_ip.c | Changed from `CVAR_TEMP` to `CVAR_CHEAT` to match `cl_packetdelay`. |
+| SV_MapRestart_f clock sync | sv_ccmds.c | Syncs `sv.gameTime = sv.time` before `SV_RestartGameProgs()`. |
+| net_dropsim / cl_packetdelay CVAR_TEMP | net_ip.c, common.c | Changed from `CVAR_CHEAT` to `CVAR_TEMP` for testing. |
 
 ---
 
-## Configuration Guide
+## Smoothing Configuration Guide
 
-`sv_bufferMs`, `sv_smoothClients`, and `sv_velSmooth` compose as stages in a pipeline. **`sv_bufferMs` and `sv_velSmooth` require `sv_extrapolate 1` or `sv_smoothClients 1` to activate** — both are no-ops in vanilla mode (sv_extrapolate 0, sv_smoothClients 0). Phase 1 resolves the position source (`sv_bufferMs`); Phase 2 resolves the trajectory type (`sv_smoothClients`) and velocity (`sv_velSmooth`).
+> This section applies primarily to **sv_gameHz > 0** setups where position correction matters. At **sv_gameHz 0** (recommended), use `sv_smoothClients 1`, `sv_bufferMs 0`, `sv_velSmooth 32`.
+
+`sv_bufferMs`, `sv_smoothClients`, and `sv_velSmooth` compose as stages in a pipeline. Phase 1 resolves the position source (`sv_bufferMs`); Phase 2 resolves the trajectory type (`sv_smoothClients`) and velocity (`sv_velSmooth`).
 
 ### Combination Table
 
-| sv_smoothClients | sv_bufferMs | sv_velSmooth | Position Source | Trajectory | Velocity | Description |
-|---|---|---|---|---|---|---|
-| 0 | 0 | any | Current | TR_INTERPOLATE | Raw | **Default.** Standard extrapolation between game frames. Lowest latency. |
-| 0 | -1 | any | Delayed (auto) | TR_INTERPOLATE | Raw | Position delayed by one snapshot interval. Requires `sv_extrapolate 1`. |
-| 0 | 1-100 | any | Delayed (manual) | TR_INTERPOLATE | Raw | Manual position delay in ms. Requires `sv_extrapolate 1`. |
-| 1 | 0 | 0 | Current | TR_LINEAR | Raw | Continuous trajectory evaluation. No smoothing. |
-| 1 | 0 | 1-100 | Current | TR_LINEAR | Smoothed | Continuous trajectory with averaged velocity. Reduces direction-change artifacts. |
-| 1 | -1 | 1-100 | Delayed (auto) | TR_LINEAR | Smoothed | **Best of both worlds.** Minimum-latency delayed base position + smoothed velocity for extrapolation. |
-| 1 | 1-100 | 1-100 | Delayed (manual) | TR_LINEAR | Smoothed | Same as above with manual delay control. |
-
-> **Note:** rows with `sv_smoothClients 0` and `sv_bufferMs != 0` require `sv_extrapolate 1` (the default). When `sv_extrapolate 0` and `sv_smoothClients 0`, the entire position-fixup block is skipped and `sv_bufferMs` has no effect.
-
-### Recommended Configurations
-
-- **Competitive (lowest latency):** `sv_smoothClients 0`, `sv_bufferMs 0`, `sv_velSmooth 0` — raw positions, minimal processing
-- **Balanced:** `sv_extrapolate 1` (default), `sv_smoothClients 0`, `sv_bufferMs -1`, `sv_velSmooth 0` — one-interval position delay, clean ring-buffer lerp targets
-- **Smoothest (experimental):** `sv_smoothClients 1`, `sv_bufferMs -1`, `sv_velSmooth 32` — delayed position + smoothed velocity + TR_LINEAR
+| sv_smoothClients | sv_bufferMs | sv_velSmooth | Position Source | Trajectory | Description |
+|---|---|---|---|---|---|
+| 0 | 0 | any | Current | TR_INTERPOLATE | **Default.** Lowest latency. |
+| 0 | -1 | any | Delayed (auto) | TR_INTERPOLATE | One-interval position delay. Requires `sv_extrapolate 1`. |
+| 1 | 0 | 0 | Current | TR_LINEAR | Continuous trajectory, raw velocity. |
+| 1 | 0 | 1-100 | Current | TR_LINEAR | **Recommended at sv_gameHz 0.** Continuous trajectory + smoothed velocity. |
+| 1 | -1 | 1-100 | Delayed (auto) | TR_LINEAR | Delayed base + smoothed velocity. Best for sv_gameHz 20. |

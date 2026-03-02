@@ -268,20 +268,32 @@ Adjusts `cl.serverTimeDelta` to track server clock:
 
 ```
 resetTime  = max(cl.snapshotMsec * 10, 500)   // ← was hardcoded 500ms
-fastAdjust = cl.snapshotMsec * 2               // ← was hardcoded 100ms
+fastAdjust = max(cl.snapshotMsec * 2, 50)     // ← was hardcoded 100ms; floor 50ms
 
 deltaDelta = abs(newDelta - cl.serverTimeDelta)
 
-if deltaDelta > resetTime:   hard reset to newDelta
-elif deltaDelta > fastAdjust: cl.serverTimeDelta = (old + new) / 2
-else (slow drift):
+if deltaDelta > resetTime:   hard reset to newDelta; slowFrac = 0
+elif deltaDelta > fastAdjust: cl.serverTimeDelta = (old + new) / 2; slowFrac = 0
+else (slow drift — fractional accumulator):
     if extrapolatedSnapshot:
-        cl.serverTimeDelta -= (snapshotMsec < 30) ? 1 : 2  ← ← CUSTOM: was always -2
+        slowFrac -= (snapshotMsec < 30) ? 2 : 4   // -½ms or -1ms
     else:
-        cl.serverTimeDelta++
+        slowFrac += 2                               // +½ms always
+    if |slowFrac| >= 4:                             // commit threshold = ±1ms
+        step = 1
+        if cl_adaptiveTiming >= 2 AND deltaDelta > snapshotMsec:
+            step = deltaDelta / 4                   // proportional: 25% of error
+            step = clamp(step, 1, deltaDelta / 2)   // cap at 50%
+        cl.serverTimeDelta += step (or -= step)
+        slowFrac -= 4 (or += 4)
 ```
 
-**The `-1 vs -2` fix at 60Hz:** Vanilla always subtracts 2ms when extrapolating. At 20Hz (50ms windows) this creates a +1/-2 equilibrium that drifts toward slightly-late, correcting quickly. At 60Hz (16ms windows) the same equilibrium fires 3× as often, creating a visible sawtooth oscillation in the netgraph. Using -1ms at 60Hz creates a +1/-1 balance that settles to zero drift.
+**Fractional accumulator:** Prevents ±1ms oscillation at equilibrium. At 60Hz, equilibrium extrap rate is 50% (-2 and +2 cancel). At 20Hz, 33% (-4 and +2 cancel at 1:2 ratio). slowFrac oscillates in [-2, +2] at equilibrium — never reaching the ±4 commit threshold, so serverTimeDelta stays rock stable.
+
+**cl_adaptiveTiming modes:**
+- **0**: vanilla Q3e thresholds (hardcoded). slowFrac accumulator still active.
+- **1** (default): snapshotMsec-scaled thresholds. 1ms commits (jitter-resistant).
+- **2**: proportional. Commits scale to 25% of deltaDelta when error > snapshotMsec. Faster mid-range recovery (0.3s vs 1.3s for a 40ms disturbance), but amplifies random walk under sustained jitter. Best on stable wired connections.
 
 ### CG_CVAR_SET Intercept [CUSTOM]
 

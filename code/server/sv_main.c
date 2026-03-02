@@ -38,6 +38,7 @@ cvar_t	*sv_bufferMs;				// per-client position ring buffer delay (ms)
 cvar_t	*sv_velSmooth;				// velocity smoothing window (ms) for TR_LINEAR mode
 cvar_t	*sv_antiwarp;				// engine-side antiwarp (replaces QVM g_antiwarp)
 cvar_t	*sv_antiwarpTol;			// antiwarp tolerance in ms (0=auto)
+cvar_t	*sv_antiwarpExtra;			// extrapolation window for mode 2 (ms, 0=auto=awTol)
 cvar_t	*sv_antiwarpDecay;			// decay duration for mode 2 (ms)
 cvar_t	*sv_timeout;			// seconds without any message
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
@@ -1362,6 +1363,9 @@ void SV_TrackCvarChanges( void )
 	if ( sv_antiwarpTol->modified ) {
 		sv_antiwarpTol->modified = qfalse;
 	}
+	if ( sv_antiwarpExtra->modified ) {
+		sv_antiwarpExtra->modified = qfalse;
+	}
 	if ( sv_antiwarpDecay->modified ) {
 		sv_antiwarpDecay->modified = qfalse;
 	}
@@ -1649,13 +1653,15 @@ void SV_Frame( int msec ) {
 				// making it work at any sv_fps / sv_gameHz combination.
 				//
 				// Mode 1: constant — keep last inputs indefinitely (QVM-style).
-				// Mode 2: decay — extrapolate trajectory for tolerance window,
+				// Mode 2: decay — extrapolate trajectory for sv_antiwarpExtra ms,
 				//   then linearly decay inputs to zero over sv_antiwarpDecay ms,
 				//   then coast to stop via Pmove friction.
 				if ( sv_antiwarp && sv_antiwarp->integer ) {
 					int awMode = sv_antiwarp->integer;
 					int awTol = ( sv_antiwarpTol && sv_antiwarpTol->integer > 0 )
 						? sv_antiwarpTol->integer : _gameMsec;
+					int awExtraMs = ( sv_antiwarpExtra && sv_antiwarpExtra->integer > 0 )
+						? sv_antiwarpExtra->integer : awTol;
 					int awDecayMs = ( sv_antiwarpDecay && sv_antiwarpDecay->integer > 0 )
 						? sv_antiwarpDecay->integer : 0;
 					int awIdx;
@@ -1677,15 +1683,15 @@ void SV_Frame( int msec ) {
 							awCl->lastUsercmd.serverTime += _gameMsec;
 
 							// Mode 2: decay movement inputs based on gap duration.
-							// Phase 1 (gap <= 2*tolerance): full movement — extrapolate trajectory.
-							//   Handles brief jitter transparently.
-							// Phase 2 (2*tol < gap <= 2*tol + decayMs): linear decay to zero.
+							// Phase 1 (gap <= tol + extra): full movement — extrapolate trajectory.
+							//   Handles brief jitter transparently. sv_antiwarpExtra controls
+							//   the extrapolation window (0=auto=awTol).
+							// Phase 2 (tol+extra < gap <= tol+extra+decayMs): linear decay to zero.
 							//   Player smoothly decelerates.
-							// Phase 3 (gap > 2*tol + decayMs): inputs zeroed, Pmove friction
+							// Phase 3 (gap > tol+extra+decayMs): inputs zeroed, Pmove friction
 							//   coasts the player to a natural stop.
 							if ( awMode >= 2 ) {
-								int extraMs = awTol;  // extrapolation phase = one tolerance window
-								int decayStart = awTol + extraMs; // decay begins after 2x tolerance
+								int decayStart = awTol + awExtraMs; // decay begins after tol + extra
 								int elapsed = awGap - decayStart;
 
 								if ( elapsed > 0 ) {

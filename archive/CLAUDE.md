@@ -93,19 +93,29 @@ code/qcommon/
 
 ## Engine Work — COMPLETED
 
+### Recommended Setup (UT 4.3.4)
+
+`sv_fps 60`, `sv_gameHz 0`, `sv_antiwarp 2`, `sv_smoothClients 1`, `sv_velSmooth 32`, `sv_bufferMs 0`.
+At sv_gameHz 0 (default), extrapolate/bufferMs are no-ops. sv_smoothClients provides TR_LINEAR trajectory.
+For legacy setups (sv_gameHz 20, QVM g_antiwarp), see `docs/project/SV_GAMEHZ.md`.
+
 ### Custom CVars
 
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `sv_fps` | `60` | Engine tick / input sampling rate |
-| `sv_gameHz` | `0` | QVM GAME_RUN_FRAME rate (0 = disabled/sv_fps; set to 20 for UT4.3 antiwarp compatibility) |
+| `sv_gameHz` | `0` | QVM GAME_RUN_FRAME rate (0=sv_fps, recommended for 4.3.4; 20=legacy, see SV_GAMEHZ.md) |
 | `sv_snapshotFps` | `-1` | Snapshot send rate to clients (-1 = match sv_fps) |
 | `sv_pmoveMsec` | `8` | Max Pmove physics step (ms) |
 | `sv_busyWait` | `0` | Spin last N ms before frame |
-| `sv_extrapolate` | `1` | Engine-side position correction between game frames |
-| `sv_smoothClients` | `0` | Use TR_LINEAR trajectory for smoother client rendering (experimental) |
-| `sv_bufferMs` | `0` | Position ring-buffer delay in ms (-1=auto, 0=off) |
+| `sv_extrapolate` | `1` | Position correction between game frames (no-op at sv_gameHz 0) |
+| `sv_smoothClients` | `1` | TR_LINEAR trajectory for smoother rendering |
+| `sv_bufferMs` | `0` | Position ring-buffer delay (no-op at sv_gameHz 0) |
 | `sv_velSmooth` | `32` | Velocity smoothing window in ms; requires `sv_smoothClients 1` |
+| `sv_antiwarp` | `0` | Engine-side antiwarp (0=off, 1=constant, 2=decay) |
+| `sv_antiwarpTol` | `0` | Antiwarp tolerance ms (0=auto=gameMsec) |
+| `sv_antiwarpExtra` | `0` | Mode 2 extrapolation window ms (0=auto=awTol) |
+| `sv_antiwarpDecay` | `150` | Mode 2 decay duration ms |
 | `sv_antilagEnable` | `1` | Engine antilag on/off |
 | `sv_physicsScale` | `3` | Antilag sub-ticks per game frame |
 | `sv_antilagMaxMs` | `200` | Max rewind window (ms) |
@@ -172,9 +182,19 @@ Com_Frame → SV_Frame(msec)
 - `SV_MapRestart_f` aligns `sv.gameTime` with `sv.time` and resets residual state before restart progression.
 - Warmup/restart frame progression uses the synchronized game clock.
 
+### Engine-Side Antiwarp (sv_main.c)
+
+- Replaces QVM `g_antiwarp` with frame-rate-aware blank command injection.
+- QVM antiwarp hardcodes `serverTime += 50` (50ms step), forcing `sv_gameHz 20`. Engine antiwarp uses `gameMsec` (actual game frame duration), so it works at any `sv_fps` / `sv_gameHz`.
+- Before each `GAME_RUN_FRAME`, checks each active non-bot client. If `sv.gameTime - awLastThinkTime > tolerance`, injects blank command via `GAME_CLIENT_THINK` with `lastUsercmd.serverTime += gameMsec`.
+- **Mode 1** (constant): keep last inputs indefinitely — QVM-style behavior.
+- **Mode 2** (decay): three-phase — extrapolate trajectory for `2×tolerance` ms (absorbs brief jitter), linearly decay inputs to zero over `sv_antiwarpDecay` ms, then Pmove friction coasts to natural stop.
+- Forces `g_antiwarp 0` via `SV_TrackCvarChanges` when `sv_antiwarp` is enabled.
+- 100% server-side — no client changes needed, compatible with vanilla clients.
+
 ### `sv_gameHz` and QVM Compatibility
 
-UT4.2 antiwarp uses a hardcoded `serverTime += 50` ghost command injection in `g_active.c` that assumes 50ms (20Hz) game frames. Raising `sv_gameHz` above 20 was known to fire the injection at the wrong rate. However, some of these QVM-side constraints may have been relaxed in UT4.3.4 — do not treat 20 as an absolute requirement until further in-game testing confirms the behaviour at higher values.
+UT4.2 antiwarp uses a hardcoded `serverTime += 50` ghost command injection in `g_active.c` that assumes 50ms (20Hz) game frames. Raising `sv_gameHz` above 20 was known to fire the injection at the wrong rate. Use `sv_antiwarp 1` instead to eliminate this constraint — the engine-side antiwarp uses frame-rate-aware step sizes. Some of these QVM-side constraints may have been relaxed in UT4.3.4 — do not treat 20 as an absolute requirement until further in-game testing confirms the behaviour at higher values.
 
 ### Snapshot Dispatch
 
@@ -224,9 +244,10 @@ Reference: `docs/ghidra-cgame-patches.md`.
 
 | File | Summary |
 |------|---------|
-| `code/server/sv_main.c` | Dual-rate loop, antilag recording placement, snapshot dispatch in sv_fps loop, per-tick emptyFrame reset |
-| `code/server/sv_init.c` | Register sv_gameHz, sv_snapshotFps, sv_busyWait, sv_pmoveMsec, antilag cvars |
-| `code/server/sv_client.c` | Multi-step Pmove with stall detection, bot exclusion, snaps policy |
+| `code/server/sv_main.c` | Dual-rate loop, antilag recording placement, snapshot dispatch in sv_fps loop, per-tick emptyFrame reset, engine-side antiwarp injection |
+| `code/server/sv_init.c` | Register sv_gameHz, sv_snapshotFps, sv_busyWait, sv_pmoveMsec, antilag cvars, sv_antiwarp, sv_antiwarpTol |
+| `code/server/sv_client.c` | Multi-step Pmove with stall detection, bot exclusion, snaps policy, awLastThinkTime tracking |
+| `code/server/server.h` | awLastThinkTime field in client_t, sv_antiwarp/sv_antiwarpTol extern cvar pointers |
 | `code/server/sv_snapshot.c` | Engine-side player position extrapolation using `sv.time - sv.gameTime`, smoothing helpers |
 | `code/server/sv_ccmds.c` | `SV_MapRestart_f` clock synchronization and residual reset |
 | `code/server/sv_antilag.c` | Engine-side antilag implementation |
@@ -266,10 +287,11 @@ At `sv_gameHz 0` (disabled), g_antiwarp is **broken** at any `sv_fps != 20`.
 When `sv_gameHz <= 0`, the game-frame rate falls back to `sv_fps` and `level.time`
 advances by `1000/sv_fps` ms per tick. At `sv_fps 60` this means a 50ms blank cmd
 fires every 16ms — teleporting lagging players at 3× the intended rate. Do not use
-`sv_gameHz 0` with UT QVM unless `sv_fps` is also 20.
+`sv_gameHz 0` with g_antiwarp enabled unless `sv_fps` is also 20.
 
-The 50ms hardcode also becomes a problem if `sv_gameHz` itself is raised above 20.
-Whether that is safe in UT4.3.4 is unconfirmed — pending in-game testing.
+The 50ms hardcode is present in ALL UT versions (4.0 through 4.3.4). However:
+- **UT 4.0-4.2:** game code is broadly intolerant of non-20Hz — sv_gameHz 20 required.
+- **UT 4.3+:** rest of game tolerates higher sv_fps — sv_gameHz 0 safe when g_antiwarp off.
 
 See `docs/g-antiwarp-engine-feasibility.md` for the full analysis.
 

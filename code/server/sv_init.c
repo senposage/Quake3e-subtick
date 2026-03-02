@@ -890,7 +890,13 @@ void SV_Init( void )
     sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
 
     sv_gameHz = Cvar_Get ("sv_gameHz", "0", CVAR_ARCHIVE | CVAR_SERVERINFO );
-    Cvar_SetDescription(sv_gameHz, "Rate at which level.time advances and GAME_RUN_FRAME fires (independent of sv_fps).\nNever set higher than sv_fps.\n>0: GAME_RUN_FRAME fires at sv_gameHz Hz; sv.gameTime lags sv.time between frames.\n    Bot positions only update at this rate — velocity extrapolation fills the gaps\n    but creates sawtooth artifacts at direction changes (inherent limitation).\n    REQUIRED for UT 4.0-4.2: set to 20 (game code intolerant of non-20Hz rates).\n    Set to 20 with g_antiwarp on ANY version (hardcoded 50ms blank command injection).\n    UT 4.3+ tolerates sv_fps > 20 outside of antiwarp — sv_gameHz 0 is safe\n    when g_antiwarp is off.\n 0: disabled (falls back to sv_fps); GAME_RUN_FRAME fires every engine tick,\n    sv.gameTime == sv.time always, no extrapolation needed.\nDefault: 0");
+    Cvar_SetDescription(sv_gameHz, "QVM GAME_RUN_FRAME rate (Hz). 0 = recommended for UT 4.3.4 with sv_antiwarp.\n"
+        " 0: disabled (default). Falls back to sv_fps. GAME_RUN_FRAME fires every\n"
+        "    engine tick. sv.gameTime == sv.time always. No position extrapolation needed.\n"
+        "    Use sv_antiwarp 1 or 2 for antiwarp at sv_gameHz 0.\n"
+        ">0: GAME_RUN_FRAME fires at sv_gameHz Hz. Never set higher than sv_fps.\n"
+        "    Legacy: set to 20 for UT 4.0-4.2 or any version with QVM g_antiwarp.\n"
+        "Default: 0");
 
     sv_snapshotFps = Cvar_Get ("sv_snapshotFps", "-1", CVAR_ARCHIVE | CVAR_SERVERINFO );
     Cvar_SetDescription(sv_snapshotFps, "Max snapshot send rate to clients.\n-1 = match sv_fps (default, live-tracks sv_fps changes).\n 0 = fall back to per-client 'snaps' userinfo (vanilla Q3 behavior).\n>0 = explicit rate, capped to sv_fps.\nDefault: -1");
@@ -903,27 +909,26 @@ void SV_Init( void )
     Cvar_SetDescription(sv_fps, "Engine tick and input sampling rate (Hz). Higher values give finer input resolution.\nDefault: 60");
 
     sv_extrapolate = Cvar_Get ("sv_extrapolate", "1", CVAR_ARCHIVE );
-    Cvar_SetDescription(sv_extrapolate, "Engine-side position correction for high sv_fps snapshots.\n"
-        "0 = disabled (vanilla: players stutter when sv_fps > sv_gameHz)\n"
-        "1 = enabled (real players use actual Pmove position, bots use velocity extrapolation)\n"
-        "Interpolation windows: sv_fps 20=50ms, 60=16.7ms, 90=11.1ms, 125=8ms\n"
+    Cvar_SetDescription(sv_extrapolate, "Engine-side position correction for snapshots between game frames.\n"
+        "At sv_gameHz 0 (default): harmless no-op — positions update every tick.\n"
+        "At sv_gameHz > 0: essential — fixes stale 20Hz positions for all players.\n"
+        "0 = disabled  1 = enabled\n"
         "Default: 1");
 
-    sv_smoothClients = Cvar_Get ("sv_smoothClients", "0", CVAR_ARCHIVE );
+    sv_smoothClients = Cvar_Get ("sv_smoothClients", "1", CVAR_ARCHIVE );
     Cvar_SetDescription(sv_smoothClients, "Set player trajectory type to TR_LINEAR for smoother client rendering.\n"
         "0 = TR_INTERPOLATE (cgame lerps between snapshot positions)\n"
         "1 = TR_LINEAR (cgame evaluates trBase + trDelta*dt continuously)\n"
-        "Works independently of sv_extrapolate. Experimental.\n"
+        "Works independently of sv_extrapolate.\n"
         "sv_bufferMs 0 = no position latency (trBase = current ps->origin).\n"
         "Default: 0");
 
     sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
     Cvar_SetDescription(sv_bufferMs, "Per-client position delay in milliseconds.\n"
-        "Requires sv_extrapolate 1 or sv_smoothClients 1 — has no effect in vanilla mode (both 0).\n"
-        "0 = disabled (use latest position, no extra latency)\n"
-        "-1 = auto (1000/sv_fps = one snapshot interval, minimum for clean interpolation)\n"
-        "     sv_fps 20: 50ms, sv_fps 40: 25ms, sv_fps 60: 16ms, sv_fps 80: 12ms, sv_fps 100: 10ms\n"
-        "1-100 = manual delay — trades latency for position stability\n"
+        "At sv_gameHz 0 (default): not useful — positions are already fresh. Leave at 0.\n"
+        "At sv_gameHz > 0: smooths stale 20Hz positions. -1 (auto) recommended.\n"
+        "Requires sv_extrapolate 1 or sv_smoothClients 1.\n"
+        "0 = disabled  -1 = auto (1000/sv_fps)  1-100 = manual delay\n"
         "Default: 0");
 
     sv_velSmooth = Cvar_Get ("sv_velSmooth", "32", CVAR_ARCHIVE );
@@ -954,9 +959,19 @@ void SV_Init( void )
         "Requires sv_antiwarp >= 1.\n"
         "Default: 0 (auto)");
 
+    sv_antiwarpExtra = Cvar_Get ("sv_antiwarpExtra", "0", CVAR_ARCHIVE );
+    Cvar_SetDescription(sv_antiwarpExtra, "Extrapolation window for sv_antiwarp 2 (ms).\n"
+        "How long full movement inputs are kept after the tolerance gap before decay starts.\n"
+        "Absorbs brief jitter transparently — the player keeps running normally.\n"
+        "0 = auto (uses sv_antiwarpTol value, i.e. decay starts at 2x tolerance).\n"
+        ">0 = explicit window in ms. Larger = more jitter absorbed, but player runs\n"
+        "     longer on stale inputs during real lag.\n"
+        "Requires sv_antiwarp 2.\n"
+        "Default: 0 (auto)");
+
     sv_antiwarpDecay = Cvar_Get ("sv_antiwarpDecay", "150", CVAR_ARCHIVE );
     Cvar_SetDescription(sv_antiwarpDecay, "Movement decay duration for sv_antiwarp 2 (ms).\n"
-        "After the tolerance window (sv_antiwarpTol), movement inputs are linearly\n"
+        "After the extrapolation window (sv_antiwarpExtra), movement inputs are linearly\n"
         "decayed to zero over this duration. Once at zero, Pmove friction decelerates\n"
         "the player to a natural stop.\n"
         "Higher = longer coast before stopping. Lower = quicker stop.\n"
@@ -1052,6 +1067,7 @@ void SV_Init( void )
 	Cvar_SetGroup( sv_velSmooth, CVG_SERVER );
 	Cvar_SetGroup( sv_antiwarp, CVG_SERVER );
 	Cvar_SetGroup( sv_antiwarpTol, CVG_SERVER );
+	Cvar_SetGroup( sv_antiwarpExtra, CVG_SERVER );
 	Cvar_SetGroup( sv_antiwarpDecay, CVG_SERVER );
 
 	// force initial check
