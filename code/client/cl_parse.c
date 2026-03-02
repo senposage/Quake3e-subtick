@@ -522,6 +522,9 @@ static void CL_ParseSnapshot( msg_t *msg, qboolean multiview ) {
 
 	SCR_NetMonitorAddPing( cl.snap.ping );
 
+	if ( cl.snap.snapFlags & SNAPFLAG_RATE_DELAYED )
+		SCR_NetMonitorAddChoke();
+
 	// Log a PING JITTER event only when an alternating +N/-N pattern is confirmed
 	// across consecutive snaps (i.e. two or more sign-reversing jumps within 3 snaps).
 	//

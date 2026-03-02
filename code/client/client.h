@@ -631,6 +631,7 @@ void	SCR_NetMonitorAddFrametime( int ft );
 void	SCR_NetMonitorAddSnapInterval( int measured, int expected );
 void	SCR_NetMonitorAddCapHit( void );
 void	SCR_NetMonitorAddExtrap( void );
+void	SCR_NetMonitorAddChoke( void );
 void	SCR_NetMonitorAddTimeDelta( int dT );
 void	SCR_NetMonitorAddPing( int ping );
 void	SCR_NetMonitorAddFastAdjust( void );
