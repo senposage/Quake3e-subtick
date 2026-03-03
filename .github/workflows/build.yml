@@ -21,6 +21,9 @@ on:
 
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   windows-msys:
     name: ${{ matrix.btype }} Windows-${{ matrix.cc }} ${{ matrix.arch }}
@@ -166,7 +169,7 @@ jobs:
 
     - name: Install tools
       run: |
-        if [ ${{ matrix.arch }} == "x86" ]; then
+        if [ "${{ matrix.arch }}" == "x86" ]; then
           sudo dpkg --add-architecture i386
           sudo apt-get -qq update
           sudo apt-get -y install gcc-multilib libcurl4-openssl-dev:i386 mesa-common-dev:i386 libxxf86dga-dev:i386 libxrandr-dev:i386 libxxf86vm-dev:i386 libasound-dev:i386
