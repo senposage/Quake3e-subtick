@@ -11,10 +11,37 @@ workflow is provided that automates applying these patches to
 `UrbanPotato/Quake3e-urt` and opening a pull request.
 
 **One-time setup:**
-1. Create a GitHub personal access token (PAT) with `repo` scope and write
-   access to `UrbanPotato/Quake3e-urt`.
-2. Add it as a repository secret named `GH_PAT` in `senposage/Quake3e-subtick`
-   (_Settings → Secrets and variables → Actions → New repository secret_).
+
+**Step 1 — Create a Personal Access Token (PAT)**
+
+You can use either a **Classic PAT** (simpler) or a **Fine-grained PAT** (more
+restrictive, recommended).
+
+*Classic PAT:*
+1. Go to <https://github.com/settings/tokens> → **Generate new token (classic)**.
+2. Give it a descriptive name (e.g. `quake3e-urt-pr-bot`).
+3. Under **Select scopes**, check **`repo`** (this grants read + write access to
+   all repositories you can access, including `UrbanPotato/Quake3e-urt`).
+4. Click **Generate token** and copy the token — you will only see it once.
+
+*Fine-grained PAT (least privilege):*
+1. Go to <https://github.com/settings/tokens?type=beta> → **Generate new token**.
+2. Give it a descriptive name and set an expiration.
+3. Under **Resource owner**, select the owner of `UrbanPotato/Quake3e-urt`
+   (either yourself or the `UrbanPotato` organisation, depending on who owns it).
+4. Under **Repository access**, choose **Only select repositories** and pick
+   `UrbanPotato/Quake3e-urt`.
+5. Under **Permissions → Repository permissions**, grant:
+   - **Contents** → `Read and write` (needed to push a branch)
+   - **Pull requests** → `Read and write` (needed to open the PR)
+6. Click **Generate token** and copy the token.
+
+**Step 2 — Add the token as a repository secret**
+
+1. Open `senposage/Quake3e-subtick` on GitHub.
+2. Go to **Settings → Secrets and variables → Actions → New repository secret**.
+3. Set **Name** to `GH_PAT` and paste the token into **Secret**.
+4. Click **Add secret**.
 
 **Trigger:**
 Go to _Actions → Apply patches to UrbanPotato/Quake3e-urt → Run workflow_ and
