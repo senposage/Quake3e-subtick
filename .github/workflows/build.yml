@@ -72,7 +72,7 @@ jobs:
         make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} COMPILE_ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin ${{ matrix.use_sdl }} USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl
 
     - uses: actions/upload-artifact@v4
-      if: matrix.cc == 'gcc' && matrix.btype == 'Release'
+      if: matrix.cc == 'gcc' && matrix.btype == 'Debug'
       with:
         name: linux-${{ matrix.arch }}
         path: bin
@@ -113,7 +113,7 @@ jobs:
         make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} DESTDIR=bin PLATFORM=mingw32 USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl
 
     - uses: actions/upload-artifact@v4
-      if: ${{ matrix.btype == 'Release' }}
+      if: ${{ matrix.btype == 'Debug' }}
       with:
         name: windows-mingw-${{ matrix.arch }}
         path: bin
@@ -121,7 +121,7 @@ jobs:
         retention-days: 5
 
   create-release:
-    if: (github.ref == 'refs/heads/master' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
+    if: (contains(fromJSON('["master", "Quake3e-upstreammerge"]'), github.ref_name) && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
     needs: [linux, windows-mingw]
     runs-on: ubuntu-latest
     permissions:
@@ -132,18 +132,22 @@ jobs:
 
       - name: Create binary archives
         run: |
-          7z a -r quake3e-subtick-linux-x86.zip            ./linux-x86/*
-          7z a -r quake3e-subtick-linux-x86_64.zip         ./linux-x86_64/*
-          7z a -r quake3e-subtick-windows-mingw-x86.zip    ./windows-mingw-x86/*
-          7z a -r quake3e-subtick-windows-mingw-x86_64.zip ./windows-mingw-x86_64/*
+          mkdir -p client server
+          for dir in linux-x86 linux-x86_64 windows-mingw-x86 windows-mingw-x86_64; do
+            mkdir -p "client/$dir" "server/$dir"
+            find "$dir" -type f -name '*quake3e.ded*' -exec cp {} "server/$dir/" \;
+            find "$dir" -type f ! -name '*quake3e.ded*' -exec cp {} "client/$dir/" \;
+          done
+          7z a -r quake3e-subtick-client-${{ github.ref_name }}.zip ./client/*
+          7z a -r quake3e-subtick-server-${{ github.ref_name }}.zip ./server/*
 
       - name: Create latest build
         uses: czietz/action-automatic-releases@latest
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          automatic_release_tag: "latest"
+          automatic_release_tag: "latest-${{ github.ref_name }}"
           prerelease: false
-          title: Latest Build
+          title: Latest Build (${{ github.ref_name }})
           files: |
             *.zip
 
