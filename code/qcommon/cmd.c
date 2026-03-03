@@ -88,17 +88,96 @@ Adds command text at the end of the buffer, does NOT add a final \n
 ============
 */
 void Cbuf_AddText( const char *text ) {
-	int l;
 
-	l = strlen (text);
+	const int l = (int)strlen( text );
 
 	if (cmd_text.cursize + l >= cmd_text.maxsize)
 	{
 		Com_Printf ("Cbuf_AddText: overflow\n");
 		return;
 	}
+
 	Com_Memcpy(&cmd_text.data[cmd_text.cursize], text, l);
 	cmd_text.cursize += l;
+}
+
+
+static int nestedCmdOffset;
+
+void Cbuf_NestedReset( void ) {
+	nestedCmdOffset = 0;
+}
+
+/*
+============
+Cbuf_NestedAdd
+
+// Adds command text at the specified position of the buffer, adds \n when needed
+============
+*/
+void Cbuf_NestedAdd( const char *text ) {
+
+	int len = (int)strlen( text );
+	int pos = nestedCmdOffset;
+	qboolean separate = qfalse;
+	int i;
+
+	if ( len <= 0 ) {
+		nestedCmdOffset = cmd_text.cursize;
+		return;
+	}
+
+#if 0
+	if ( cmd_text.cursize > 0 ) {
+		const int c = cmd_text.data[cmd_text.cursize - 1];
+		// insert separator for already existing command(s)
+		if ( c != '\n' && c != ';' && text[0] != '\n' && text[0] != ';' ) {
+			if ( cmd_text.cursize < cmd_text.maxsize ) {
+				cmd_text.data[cmd_text.cursize++] = ';';
+			} else {
+				Com_Printf( S_COLOR_YELLOW "%s(%i) overflowed\n", __func__, pos );
+				nestedCmdOffset = cmd_text.cursize;
+				return;
+			}
+		}
+	}
+#endif
+
+	if ( pos > cmd_text.cursize || pos < 0 ) {
+		// insert at the text end
+		pos = cmd_text.cursize;
+	}
+
+	if ( text[len - 1] == '\n' || text[len - 1] == ';' ) {
+		// command already has separator
+	} else {
+		separate = qtrue;
+		len += 1;
+	}
+
+	if ( len + cmd_text.cursize > cmd_text.maxsize ) {
+		Com_Printf( S_COLOR_YELLOW "%s(%i) overflowed\n", __func__, pos );
+		nestedCmdOffset = cmd_text.cursize;
+		return;
+	}
+
+	// move the existing command text
+	for ( i = cmd_text.cursize - 1; i >= pos; i-- ) {
+		cmd_text.data[i + len] = cmd_text.data[i];
+	}
+
+	if ( separate ) {
+		// copy the new text in + add a \n
+		Com_Memcpy( cmd_text.data + pos, text, len - 1 );
+		cmd_text.data[pos + len - 1] = '\n';
+	} else {
+		// copy the new text in
+		Com_Memcpy( cmd_text.data + pos, text, len );
+	}
+
+	cmd_text.cursize += len;
+
+	nestedCmdOffset = cmd_text.cursize;
 }
 
 
@@ -110,7 +189,7 @@ Adds command text immediately after the current command
 Adds a \n to the text
 ============
 */
-static void Cbuf_InsertText( const char *text ) {
+void Cbuf_InsertText( const char *text ) {
 	int		len;
 	int		i;
 
@@ -146,19 +225,20 @@ void Cbuf_ExecuteText( cbufExec_t exec_when, const char *text )
 	switch (exec_when)
 	{
 	case EXEC_NOW:
+		cmd_wait = 0; // discard any pending waiting
 		if ( text && text[0] != '\0' ) {
 			Com_DPrintf(S_COLOR_YELLOW "EXEC_NOW %s\n", text);
-			Cmd_ExecuteString (text);
+			Cmd_ExecuteString( text );
 		} else {
 			Cbuf_Execute();
-			Com_DPrintf(S_COLOR_YELLOW "EXEC_NOW %s\n", cmd_text.data);
+			Com_DPrintf( S_COLOR_YELLOW "EXEC_NOW %s\n", cmd_text.data );
 		}
 		break;
 	case EXEC_INSERT:
-		Cbuf_InsertText (text);
+		Cbuf_InsertText( text );
 		break;
 	case EXEC_APPEND:
-		Cbuf_AddText (text);
+		Cbuf_AddText( text );
 		break;
 	default:
 		Com_Error (ERR_FATAL, "Cbuf_ExecuteText: bad exec_when");
@@ -173,25 +253,24 @@ Cbuf_Execute
 */
 void Cbuf_Execute( void )
 {
-	int i;
-	char *text;
-	char line[MAX_CMD_LINE];
-	int quotes;
+	char line[MAX_CMD_LINE], *text;
+	int i, n, quotes;
+	qboolean in_star_comment;
+	qboolean in_slash_comment;
+
+	if ( cmd_wait > 0 ) {
+		// delay command buffer execution
+		return;
+	}
 
 	// This will keep // style comments all on one line by not breaking on
 	// a semicolon.  It will keep /* ... */ style comments all on one line by not
 	// breaking it for semicolon or newline.
-	qboolean in_star_comment = qfalse;
-	qboolean in_slash_comment = qfalse;
+	in_star_comment = qfalse;
+	in_slash_comment = qfalse;
+
 	while ( cmd_text.cursize > 0 )
 	{
-		if ( cmd_wait > 0 ) {
-			// skip out while text still remains in buffer, leaving it
-			// for next frame
-			cmd_wait--;
-			break;
-		}
-
 		// find a \n or ; line break or comment: // or /* */
 		text = (char *)cmd_text.data;
 
@@ -225,32 +304,62 @@ void Cbuf_Execute( void )
 			}
 		}
 
-		if ( i >= (MAX_CMD_LINE - 1) )
-			i = MAX_CMD_LINE - 1;
+		// copy up to (MAX_CMD_LINE - 1) chars but keep buffer position intact to prevent parsing truncated leftover
+		if ( i > (MAX_CMD_LINE - 1) )
+			n = MAX_CMD_LINE - 1;
+		else
+			n = i;
 
-		Com_Memcpy( line, text, i );
-		line[i] = '\0';
+		Com_Memcpy( line, text, n );
+		line[n] = '\0';
 
 		// delete the text from the command buffer and move remaining commands down
 		// this is necessary because commands (exec) can insert data at the
 		// beginning of the text buffer
 
-		if ( i == cmd_text.cursize )
-			cmd_text.cursize = 0;
-		else
-		{
-			i++;
-			cmd_text.cursize -= i;
-			// skip all repeating newlines/semicolons
-			while ( ( text[i] == '\n' || text[i] == '\r' || text[i] == ';' ) && cmd_text.cursize > 0 ) {
-				cmd_text.cursize--;
-				i++;
+		if ( i == cmd_text.cursize ) {
+			//cmd_text.cursize = 0;
+		} else {
+			++i;
+			// skip all repeating newlines/semicolons/whitespaces
+			while ( i < cmd_text.cursize && (text[i] == '\n' || text[i] == '\r' || text[i] == ';' || ( text[i] != '\0' && text[i] <= ' ' ) ) ) {
+				++i;
 			}
-			memmove( text, text+i, cmd_text.cursize );
+		}
+
+		cmd_text.cursize -= i;
+
+		if ( cmd_text.cursize ) {
+			memmove( text, text + i, cmd_text.cursize );
+		}
+
+		if ( nestedCmdOffset > 0 ) {
+			nestedCmdOffset -= i;
+			if ( nestedCmdOffset < 0 ) {
+				nestedCmdOffset = 0;
+			}
 		}
 
 		// execute the command line
 		Cmd_ExecuteString( line );
+
+		// break on wait command
+		if ( cmd_wait > 0 ) {
+			break;
+		}
+	}
+}
+
+
+/*
+============
+Cbuf_Wait
+============
+*/
+void Cbuf_Wait( void )
+{
+	if ( cmd_wait > 0 ) {
+		--cmd_wait;
 	}
 }
 
@@ -311,49 +420,6 @@ static void Cmd_Exec_f( void ) {
 
 /*
 ===============
-Cmd_PVstr_f
-Execute a variable command on key press and release
-===============
-*/
-void Cmd_PVstr_f( void ) {
-    char *v = NULL;
-    static qboolean pushed[512] = {0};
-    int key;
-
-    // 5 args: +vstr <v1> <v2> <keycode> <timestamp> (CL_ParseBinding())
-    if (Cmd_Argc () != 5) {
-        Com_Printf ("+vstr <variablename1> <variablename2>: execute a variable command on key press and release\n");
-        return;
-    }
-
-    key = atoi(Cmd_Argv(3));
-    if (key >= ARRAY_LEN(pushed))
-        key = 0;
-
-    switch( Cmd_Argv( 0 )[0] ) {
-        case '+':
-            v = (char *) Cvar_VariableString( Cmd_Argv( 1 ) );
-            pushed[key] = qtrue;
-            break;
-        case '-':
-            // we check this because otherwise key release would fire even in the console...
-            if (pushed[key]) {
-                v = (char *) Cvar_VariableString( Cmd_Argv( 2 ) );
-                pushed[key] = qfalse;
-            }
-            break;
-        default:
-            Com_Printf("Cmd_PVstr_f: unexpected leading character '%c'\n", Cmd_Argv( 0 )[0]);
-            break;
-    }
-
-    if (v) {
-        Cbuf_InsertText( va("%s\n", v ) );
-    }
-}
-
-/*
-===============
 Cmd_Vstr_f
 
 Inserts the current value of a variable as command text
@@ -397,7 +463,6 @@ typedef struct cmd_function_s
 {
 	struct cmd_function_s	*next;
 	char					*name;
-    char					*description;
 	xcommand_t				function;
 	completionFunc_t	complete;
 } cmd_function_t;
@@ -436,7 +501,7 @@ void Cmd_Clear( void ) {
 Cmd_Argv
 ============
 */
-char *Cmd_Argv( int arg ) {
+const char *Cmd_Argv( int arg ) {
 	if ( (unsigned)arg >= cmd_argc ) {
 		return "";
 	}
@@ -709,81 +774,10 @@ void Cmd_AddCommand( const char *cmd_name, xcommand_t function ) {
 	// use a small malloc to avoid zone fragmentation
 	cmd = S_Malloc( sizeof( *cmd ) );
 	cmd->name = CopyString( cmd_name );
-    cmd->description = NULL;
 	cmd->function = function;
 	cmd->complete = NULL;
 	cmd->next = cmd_functions;
 	cmd_functions = cmd;
-}
-
-/*
-=====================
-Cmd_SetDescription
-=====================
-*/
-void Cmd_SetDescription( const char *cmd_name, char *cmd_description )
-{
-    cmd_function_t *cmd = Cmd_FindCommand( cmd_name );
-    if(!cmd) return;
-
-    if( cmd_description && cmd_description[0] != '\0' )
-    {
-        if( cmd->description != NULL )
-        {
-            Z_Free( cmd->description );
-        }
-        cmd->description = CopyString( cmd_description );
-    }
-}
-
-
-/*
-============
-Cmd_Help
-Prints the value, default, and latched string of the given variable
-============
-*/
-static void Cmd_Help( const cmd_function_t *cmd ) {
-    Com_Printf ("\"%s\" " S_COLOR_WHITE "",
-                cmd->name );
-
-    Com_Printf (" autocomplete:\"%s" S_COLOR_WHITE "\"",
-                cmd->complete ? "yes" : "no" );
-
-    Com_Printf ("\n");
-
-    if ( cmd->description ) {
-        Com_Printf( "%s\n", cmd->description );
-    }
-}
-
-
-/*
-============
-Cmd_Help_f
-Prints the contents of a cvar
-(preferred over Cvar_Command where cvar names and commands conflict)
-============
-*/
-static void Cmd_Help_f( void )
-{
-    char *name;
-    cmd_function_t *cmd;
-
-    if(Cmd_Argc() != 2)
-    {
-        Com_Printf ("usage: help <command>\n");
-        return;
-    }
-
-    name = Cmd_Argv(1);
-
-    cmd = Cmd_FindCommand( name );
-
-    if(cmd)
-        Cmd_Help(cmd);
-    else
-        Com_Printf ("Command %s does not exist.\n", name);
 }
 
 
@@ -824,9 +818,6 @@ void Cmd_RemoveCommand( const char *cmd_name ) {
 			if (cmd->name) {
 				Z_Free(cmd->name);
 			}
-            if (cmd->description) {
-                Z_Free(cmd->description);
-            }
 			Z_Free (cmd);
 			return;
 		}
@@ -844,7 +835,7 @@ Only remove commands with no associated function
 */
 void Cmd_RemoveCommandSafe( const char *cmd_name )
 {
-	cmd_function_t *cmd = Cmd_FindCommand( cmd_name );
+	const cmd_function_t *cmd = Cmd_FindCommand( cmd_name );
 
 	if( !cmd )
 		return;
@@ -868,7 +859,7 @@ Remove cgame-created commands
 */
 void Cmd_RemoveCgameCommands( void )
 {
-	cmd_function_t *cmd;
+	const cmd_function_t *cmd;
 	qboolean removed;
 
 	do {
@@ -903,7 +894,7 @@ void Cmd_CommandCompletion( void(*callback)(const char *s) ) {
 Cmd_CompleteArgument
 ============
 */
-qboolean Cmd_CompleteArgument( const char *command, char *args, int argNum ) {
+qboolean Cmd_CompleteArgument( const char *command, const char *args, int argNum ) {
 	const cmd_function_t *cmd;
 
 	for( cmd = cmd_functions; cmd; cmd = cmd->next ) {
@@ -1019,9 +1010,9 @@ static void Cmd_List_f( void )
 Cmd_CompleteCfgName
 ==================
 */
-static void Cmd_CompleteCfgName( char *args, int argNum ) {
-	if( argNum == 2 ) {
-		Field_CompleteFilename( "", "cfg", qfalse, FS_MATCH_ANY | FS_MATCH_STICK );
+static void Cmd_CompleteCfgName( const char *args, int argNum ) {
+	if ( argNum == 2 ) {
+		Field_CompleteFilename( "", "cfg", qfalse, FS_MATCH_ANY | FS_MATCH_STICK | FS_MATCH_SUBDIRS );
 	}
 }
 
@@ -1031,7 +1022,7 @@ static void Cmd_CompleteCfgName( char *args, int argNum ) {
 Cmd_CompleteWriteCfgName
 ==================
 */
-void Cmd_CompleteWriteCfgName( char *args, int argNum ) {
+void Cmd_CompleteWriteCfgName( const char *args, int argNum ) {
 	if( argNum == 2 ) {
 		Field_CompleteFilename( "", "cfg", qfalse, FS_MATCH_EXTERN | FS_MATCH_STICK );
 	}
@@ -1045,29 +1036,12 @@ Cmd_Init
 */
 void Cmd_Init( void ) {
 	Cmd_AddCommand ("cmdlist",Cmd_List_f);
-    Cmd_SetDescription("cmdlist", "List all available console commands\nusage: cmdlist");
-
-    Cmd_AddCommand ("exec",Cmd_Exec_f);
-    Cmd_SetDescription("exec", "Execute a config file or script\nusage: exec <configfile>");
-    Cmd_SetCommandCompletionFunc( "exec", Cmd_CompleteCfgName );
-
-    Cmd_AddCommand ("execq",Cmd_Exec_f);
-    Cmd_SetDescription("exec", "Quietly execute a config file or script\nusage: execq <configfile>");
+	Cmd_AddCommand ("exec",Cmd_Exec_f);
+	Cmd_AddCommand ("execq",Cmd_Exec_f);
+	Cmd_SetCommandCompletionFunc( "exec", Cmd_CompleteCfgName );
 	Cmd_SetCommandCompletionFunc( "execq", Cmd_CompleteCfgName );
-
 	Cmd_AddCommand ("vstr",Cmd_Vstr_f);
-    Cmd_SetDescription("vstr", "Identifies the attached command as a variable string\nusage: vstr <variable>");
-
-    Cmd_AddCommand ("+vstr",Cmd_PVstr_f);
-    Cmd_AddCommand ("-vstr",Cmd_PVstr_f);
 	Cmd_SetCommandCompletionFunc( "vstr", Cvar_CompleteCvarName );
 	Cmd_AddCommand ("echo",Cmd_Echo_f);
-    Cmd_SetDescription( "echo", "Echo a string to the message display to your console only\nusage: echo <message>");
-
-    Cmd_AddCommand ("wait", Cmd_Wait_f);
-    Cmd_SetDescription( "wait", "Stop execution and wait one game tick\nusage: wait (<# ticks> optional)" );
-
-    Cmd_SetDescription( "wait", "Stop execution and wait one game tick\nusage: wait (<# ticks> optional)" );
-    Cmd_AddCommand ("help", Cmd_Help_f);
-    Cmd_SetDescription("help", "usage: help <command>");
+	Cmd_AddCommand ("wait", Cmd_Wait_f);
 }
