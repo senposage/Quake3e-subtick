@@ -1,51 +1,202 @@
 # Merge Memory - Upstream Sync Progress
 
+## GROUND RULES (from user)
+1. **Trust the CODE, not the documentation**
+2. **Do NOT trust /patches/ files** - they are OUT OF DATE
+3. **ALL merges go into `Quake3e-upstreammerge` branch, NEVER master**
+4. Break work into separate PRs to avoid hitting max agent time
+5. Write everything to this merge_memory.md file
+
 ## Project Overview
 - **Repo**: senposage/Quake3e-subtick (fork of ec-/Quake3e)
 - **Purpose**: Quake3e engine with subtick networking, antilag, antiwarp modifications
-- **Upstream**: ec-/Quake3e (target sync tag: 46add7d)
+- **Upstream**: ec-/Quake3e at tag `latest` (commit 46add7d088adf831d91bf3153f2be45b477560ea)
 - **Build system**: GNU Make (Makefile), also has CMakeLists.txt and MSVC solutions
+- **Master branch sha**: d22f38b (tag: latest)
+- **Quake3e-upstreammerge branch sha**: b05d00c (merge commit of PR #38)
 
-## What This Fork Adds (8 patch files in /patches/)
-1. `0001-subtick-frame-loop.patch` - Modified server frame loop (sv_main.c)
-2. `0002-subtick-cvars.patch` - Subtick cvars (sv_init.c)
-3. `0003-subtick-pmove.patch` - Player movement changes (sv_client.c)
-4. `0004-subtick-extrapolation.patch` - Extrapolation system (sv_snapshot.c) - largest patch
-5. `0005-subtick-maprestart.patch` - Map restart handling (sv_ccmds.c)
-6. `0006-subtick-antilag.patch` - Antilag system (sv_antilag.h - new file)
-7. `0007-subtick-client-jitter.patch` - Client jitter handling (client/client.h)
-8. `0008-subtick-net-dropsim.patch` - Network drop simulation (qcommon/net_ip.c)
+## Branch Topology
+```
+master (d22f38b) ── the original fork code, all fork features working
+  └── Quake3e-upstreammerge (b05d00c) ── PR #38 merged here, has upstream sync + 93 corrupted files
+```
 
-## Previous Merge Work (PR #38 - MERGED)
+## Previous Merge Work (PR #38 - MERGED into Quake3e-upstreammerge)
 - Title: "Sync with upstream ec-/Quake3e latest tag (46add7d)"
 - Replaced ~390 files with upstream content
-- Re-applied 25 fork patches
+- Re-applied fork patches (auth, multiview, ftwgl, subtick, antiwarp, antilag)
 - 443 files changed, 57276 additions, 63289 deletions
-- **Known unresolved issues from PR #38 description:**
-  - ~93 corrupted files (got "404: Not Found" from raw GitHub downloads)
-  - Build errors (linker error, snd_dmahd.c corruption)
-  - API mismatches possibly remaining
+- **Result: 93 files got corrupted with "404: Not Found" content (14 bytes each)**
 
-## Current State (PR #39 - THIS PR)
-- Branch: copilot/continue-merge-process
-- Base: latest tag commit d22f38b
-- **Build status: SUCCEEDS** (client + dedicated server build OK on Linux x86_64)
-- Only deprecation warnings from curl API (pre-existing, not our issue)
-- No files found containing "404: Not Found" corruption
-- No suspiciously small/empty source files found
-
-## Build Configuration (from Makefile)
+## Build Configuration (from Makefile on master)
 - USE_SDL=0, USE_VULKAN=1, USE_OPENGL=0, USE_VULKAN_API=1
 - USE_AUTH=1, USE_URT_DEMO=1, NO_DMAHD=0, USE_FTWGL=1
 - USE_SERVER_DEMO=1, USE_RENDERER_DLOPEN=0
 - Output names: ftwgl-{gitrev}.x64 (client), quake3e.ded-{gitrev}.x64 (server)
+- **Master branch builds successfully on Linux x86_64**
 
-## What Still Needs Investigation
-- [ ] Compare fork source files against upstream ec-/Quake3e at tag 46add7d to find remaining differences
-- [ ] Verify all 8 fork patches are properly applied in current code
-- [ ] Check if any upstream files are still missing or wrong
-- [ ] Check dedicated server build
-- [ ] Identify what "continue the merge" specifically means - more upstream changes to integrate?
+---
+
+## CONFIRMED: 93 Corrupted Files on Quake3e-upstreammerge
+
+All contain literally `404: Not Found` (14 bytes). This happened because PR #38 
+tried to download these files from upstream ec-/Quake3e via raw.githubusercontent.com,
+but **THESE FILES DO NOT EXIST IN UPSTREAM** - they are fork-specific or from a 
+different path structure.
+
+### ROOT CAUSE
+The files are **fork-specific** or from **fork-only directories** that don't exist 
+in upstream ec-/Quake3e. The upstream repo does NOT have:
+- `code/client/snd_dmahd.*` (fork's DMAHD sound system)
+- `code/qcommon/cm_load_bsp1.c`, `cm_load_bsp2.*` (fork's BSP loading, upstream has `cm_load.c`)
+- `code/renderervk/tr_font.c` (upstream has it in `code/renderer/` not `code/renderervk/`)
+- `code/libsdl/windows/include/SDL2/` (entire directory doesn't exist upstream)
+- `code/win32/msvc2019/` (entire directory doesn't exist upstream)
+- `code/win32/rounded.png`, `code/win32/win_resource.aps` (fork-only binary assets)
+
+### FIX: Restore from master branch
+All 93 files have CORRECT versions on the `master` branch (d22f38b). The fix is to 
+copy these files from master back to `Quake3e-upstreammerge`.
+
+### Complete List of Corrupted Files (93 total)
+
+#### Fork-Specific Engine Source (5 files) - CRITICAL
+```
+code/client/snd_dmahd.c          (1467 lines on master)
+code/client/snd_dmahd.h          (17 lines on master)
+code/qcommon/cm_load_bsp1.c      (988 lines on master)
+code/qcommon/cm_load_bsp2.c      (625 lines on master)
+code/qcommon/cm_load_bsp2.h      (234 lines on master)
+```
+
+#### Fork-Specific Renderer (1 file) - CRITICAL
+```
+code/renderervk/tr_font.c        (562 lines on master)
+```
+
+#### SDL2 Windows Headers (74 files) - Windows build only
+```
+code/libsdl/windows/include/SDL2/SDL.h
+code/libsdl/windows/include/SDL2/SDL_assert.h
+code/libsdl/windows/include/SDL2/SDL_atomic.h
+code/libsdl/windows/include/SDL2/SDL_audio.h
+code/libsdl/windows/include/SDL2/SDL_bits.h
+code/libsdl/windows/include/SDL2/SDL_blendmode.h
+code/libsdl/windows/include/SDL2/SDL_clipboard.h
+code/libsdl/windows/include/SDL2/SDL_config.h
+code/libsdl/windows/include/SDL2/SDL_cpuinfo.h
+code/libsdl/windows/include/SDL2/SDL_egl.h
+code/libsdl/windows/include/SDL2/SDL_endian.h
+code/libsdl/windows/include/SDL2/SDL_error.h
+code/libsdl/windows/include/SDL2/SDL_events.h
+code/libsdl/windows/include/SDL2/SDL_filesystem.h
+code/libsdl/windows/include/SDL2/SDL_gamecontroller.h
+code/libsdl/windows/include/SDL2/SDL_gesture.h
+code/libsdl/windows/include/SDL2/SDL_haptic.h
+code/libsdl/windows/include/SDL2/SDL_hints.h
+code/libsdl/windows/include/SDL2/SDL_joystick.h
+code/libsdl/windows/include/SDL2/SDL_keyboard.h
+code/libsdl/windows/include/SDL2/SDL_keycode.h
+code/libsdl/windows/include/SDL2/SDL_loadso.h
+code/libsdl/windows/include/SDL2/SDL_log.h
+code/libsdl/windows/include/SDL2/SDL_main.h
+code/libsdl/windows/include/SDL2/SDL_messagebox.h
+code/libsdl/windows/include/SDL2/SDL_mouse.h
+code/libsdl/windows/include/SDL2/SDL_mutex.h
+code/libsdl/windows/include/SDL2/SDL_name.h
+code/libsdl/windows/include/SDL2/SDL_opengl.h
+code/libsdl/windows/include/SDL2/SDL_opengl_glext.h
+code/libsdl/windows/include/SDL2/SDL_opengles.h
+code/libsdl/windows/include/SDL2/SDL_opengles2.h
+code/libsdl/windows/include/SDL2/SDL_opengles2_gl2.h
+code/libsdl/windows/include/SDL2/SDL_opengles2_gl2ext.h
+code/libsdl/windows/include/SDL2/SDL_opengles2_gl2platform.h
+code/libsdl/windows/include/SDL2/SDL_opengles2_khrplatform.h
+code/libsdl/windows/include/SDL2/SDL_pixels.h
+code/libsdl/windows/include/SDL2/SDL_platform.h
+code/libsdl/windows/include/SDL2/SDL_power.h
+code/libsdl/windows/include/SDL2/SDL_quit.h
+code/libsdl/windows/include/SDL2/SDL_rect.h
+code/libsdl/windows/include/SDL2/SDL_render.h
+code/libsdl/windows/include/SDL2/SDL_revision.h
+code/libsdl/windows/include/SDL2/SDL_rwops.h
+code/libsdl/windows/include/SDL2/SDL_scancode.h
+code/libsdl/windows/include/SDL2/SDL_sensor.h
+code/libsdl/windows/include/SDL2/SDL_shape.h
+code/libsdl/windows/include/SDL2/SDL_stdinc.h
+code/libsdl/windows/include/SDL2/SDL_surface.h
+code/libsdl/windows/include/SDL2/SDL_system.h
+code/libsdl/windows/include/SDL2/SDL_syswm.h
+code/libsdl/windows/include/SDL2/SDL_test.h
+code/libsdl/windows/include/SDL2/SDL_test_assert.h
+code/libsdl/windows/include/SDL2/SDL_test_common.h
+code/libsdl/windows/include/SDL2/SDL_test_compare.h
+code/libsdl/windows/include/SDL2/SDL_test_crc32.h
+code/libsdl/windows/include/SDL2/SDL_test_font.h
+code/libsdl/windows/include/SDL2/SDL_test_fuzzer.h
+code/libsdl/windows/include/SDL2/SDL_test_harness.h
+code/libsdl/windows/include/SDL2/SDL_test_images.h
+code/libsdl/windows/include/SDL2/SDL_test_log.h
+code/libsdl/windows/include/SDL2/SDL_test_md5.h
+code/libsdl/windows/include/SDL2/SDL_test_memory.h
+code/libsdl/windows/include/SDL2/SDL_test_random.h
+code/libsdl/windows/include/SDL2/SDL_thread.h
+code/libsdl/windows/include/SDL2/SDL_timer.h
+code/libsdl/windows/include/SDL2/SDL_touch.h
+code/libsdl/windows/include/SDL2/SDL_types.h
+code/libsdl/windows/include/SDL2/SDL_version.h
+code/libsdl/windows/include/SDL2/SDL_video.h
+code/libsdl/windows/include/SDL2/SDL_vulkan.h
+code/libsdl/windows/include/SDL2/begin_code.h
+code/libsdl/windows/include/SDL2/close_code.h
+```
+
+#### MSVC 2019 Project Files (12 files) - Windows build only
+```
+code/win32/msvc2019/.editorconfig
+code/win32/msvc2019/.editorconfig.inferred
+code/win32/msvc2019/Header.h
+code/win32/msvc2019/botlib.vcxproj
+code/win32/msvc2019/botlib.vcxproj.filters
+code/win32/msvc2019/libjpeg.vcxproj
+code/win32/msvc2019/quake3e-ded.vcxproj
+code/win32/msvc2019/quake3e.sln
+code/win32/msvc2019/quake3e.vcxproj
+code/win32/msvc2019/quake3e.vcxproj.filters
+code/win32/msvc2019/renderer.vcxproj
+code/win32/msvc2019/renderer2.vcxproj
+code/win32/msvc2019/renderervk.vcxproj
+```
+
+#### Binary/Other (2 files + 1 to delete)
+```
+code/win32/rounded.png            (icon, 9413 bytes on master)
+code/win32/win_resource.aps       (resource file, 190428 bytes on master)
+code/renderervk/shaders/spirv/.shader_data.c.swp  (VIM SWAP FILE - DELETE THIS)
+```
+
+---
+
+## NEXT PR INSTRUCTIONS
+
+### PR should:
+- Branch FROM `Quake3e-upstreammerge` 
+- Target `Quake3e-upstreammerge` as base
+- Title: "Fix 93 corrupted files from upstream sync"
+
+### Steps:
+1. For each corrupted file, restore the content from `master` branch (d22f38b)
+   - `git show d22f38b:<path> > <path>` for each file
+2. Delete the vim swap file: `code/renderervk/shaders/spirv/.shader_data.c.swp`
+3. Build and verify on Linux
+4. Commit and push
+
+### Suggested PR breakdown (to stay within agent time limits):
+- **PR A**: Fix 6 critical engine source files (snd_dmahd, cm_load_bsp, tr_font)
+- **PR B**: Fix 74 SDL2 Windows headers  
+- **PR C**: Fix 12 MSVC 2019 project files + 2 binary files + delete .swp
+
+---
 
 ## Key Directories
 - `code/server/` - Server-side code (most fork changes are here)
