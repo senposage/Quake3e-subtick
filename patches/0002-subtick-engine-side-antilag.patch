@@ -1,57 +1,25 @@
---- a/code/server/sv_antilag.h
-+++ b/code/server/sv_antilag.h
-@@ -0,0 +1,48 @@
-+/*
-+===========================================================================
-+sv_antilag.h - Engine-side shadow antilag system
-+
-+Included by sv_main.c, sv_game.c, sv_init.c.
-+server.h must be included before this header in each .c file.
-+===========================================================================
-+*/
-+
-+#ifndef SV_ANTILAG_H
-+#define SV_ANTILAG_H
-+
-+#define SV_ANTILAG_MAX_HISTORY_SLOTS    256  // 256 slots: covers 200ms at up to 1000Hz shadow rate
-+#define SV_ANTILAG_HISTORY_WINDOW_MS    300
-+#define SV_ANTILAG_MAX_REWIND_MS        200
-+
-+// Cvars — registered by SV_Antilag_Init(), accessible after that call
-+extern cvar_t *sv_antilagEnable;
-+extern cvar_t *sv_physicsScale;
-+extern cvar_t *sv_antilagMaxMs;
-+extern cvar_t *sv_antilagTraceLog;
-+extern cvar_t *sv_snapRateLog;
-+
-+// Called once at server init — registers cvars, resets state
-+void        SV_Antilag_Init( void );
-+
-+// Called from SV_Frame() before GAME_RUN_FRAME, sv_physicsScale times per game tick.
-+// Records all active client positions into engine-side shadow history.
-+// Completely decoupled from level.time and QVM.
-+void        SV_Antilag_RecordPositions( void );
-+void        SV_Antilag_NoteSnapshot( int clientNum );
-+
-+// Called from G_TRACE / G_TRACECAPSULE syscall handler in sv_game.c.
-+// Transparently rewinds clients to shooter's fire time, runs trace, restores all.
-+// Returns qtrue if the intercept ran (caller should NOT call SV_Trace again).
-+// Returns qfalse if conditions not met (caller calls SV_Trace normally).
-+qboolean    SV_Antilag_InterceptTrace(
-+                trace_t     *results,
-+                const vec3_t start,
-+                const vec3_t mins,
-+                const vec3_t maxs,
-+                const vec3_t end,
-+                int         passEntityNum,
-+                int         contentmask,
-+                qboolean    capsule
-+            );
-+
-+#endif // SV_ANTILAG_H
---- a/code/server/sv_antilag.c
+From a0e6a3c7d2e650df5ad653e03e348c0830028c3f Mon Sep 17 00:00:00 2001
+From: Quake3e-subtick <patches@quake3e-subtick.local>
+Date: Tue, 3 Mar 2026 22:09:40 +0000
+Subject: [PATCH 2/5] subtick: engine-side antilag
+
+New antilag system for subtick timing with interpolation-aware
+hit detection and antiwarp support.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+---
+ code/server/sv_antilag.c | 702 +++++++++++++++++++++++++++++++++++++++
+ code/server/sv_antilag.h |  48 +++
+ 2 files changed, 750 insertions(+)
+ create mode 100644 code/server/sv_antilag.c
+ create mode 100644 code/server/sv_antilag.h
+
+diff --git a/code/server/sv_antilag.c b/code/server/sv_antilag.c
+new file mode 100644
+index 0000000..63d705f
+--- /dev/null
 +++ b/code/server/sv_antilag.c
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,702 @@
 +/*
 +===========================================================================
 +sv_antilag.c - Engine-side shadow antilag system for Quake3e / UrbanTerror
@@ -62,7 +30,7 @@
 +                               → QVM sees this. level.time advances here.
 +                                 QVM's own FIFO antilag runs here unchanged.
 +
-+  SHADOW SUB-TICK (sv_fps * sv_physicsScale Hz)
++  SHADOW RECORDING (sv_fps Hz — one entry per engine tick)
 +                                 → Engine only. Records entity positions into
 +                                   svShadowHistory[]. QVM never sees this.
 +
@@ -154,6 +122,7 @@
 +static int                  sv_shadowAccumulator = 0;
 +static int                  sv_shadowTickMs = 0;        // computed each frame
 +static int                  sv_shadowHistorySlots = 0;  // computed on init/change
++static int                  sv_antilag_lastFpsValue = 0; // track sv_fps value independently (sv_fps->modified cleared by SV_TrackCvarChanges before we see it)
 +
 +// ---------------------------------------------------------------------------
 +// Internal helpers
@@ -162,25 +131,28 @@
 +/*
 +SV_Antilag_ComputeConfig
 +
-+Recomputes shadow tick rate and history depth from current cvars.
-+Called on init and whenever sv_fps or sv_physicsScale change.
++Recomputes shadow tick interval and history depth from current cvars.
++Called on init and whenever sv_fps or sv_antilagMaxMs change.
++
++Recording happens once per engine tick (sv_fps Hz), so the slot count
++and tick interval are based on sv_fps alone.  sv_physicsScale no longer
++affects the recording rate — it was removed from the recording loop to
++avoid filling the ring buffer with duplicate-timestamp entries.
 +*/
 +static void SV_Antilag_ComputeConfig( void ) {
 +    int fps   = sv_fps ? sv_fps->integer : 40;
-+    int scale = sv_physicsScale ? sv_physicsScale->integer : 3;
 +    int winMs = sv_antilagMaxMs ? sv_antilagMaxMs->integer : SV_ANTILAG_HISTORY_WINDOW_MS;
 +
-+    // Clamp scale to sane integer range so sub-steps divide game tick evenly
-+    if ( scale < 1 )  scale = 1;
-+    if ( scale > 8 )  scale = 8;
++    if ( fps < 1 ) fps = 1;
 +
-+    // Shadow Hz = sv_fps * scale (e.g. 40 * 3 = 120Hz)
-+    int shadowHz = fps * scale;
-+    sv_shadowTickMs = 1000 / shadowHz;
++    // Shadow tick = engine tick interval (e.g. 25ms at sv_fps 40)
++    sv_shadowTickMs = 1000 / fps;
 +    if ( sv_shadowTickMs < 1 ) sv_shadowTickMs = 1;
 +
-+    // History depth = enough slots to cover the window at shadow Hz
-+    sv_shadowHistorySlots = ( shadowHz * winMs ) / 1000;
++    // History depth = enough slots to cover the window at sv_fps Hz.
++    // +1 ensures the oldest entry fully reaches the window boundary
++    // (N slots span (N-1) intervals).
++    sv_shadowHistorySlots = ( fps * winMs ) / 1000 + 1;
 +    if ( sv_shadowHistorySlots < 4 )
 +        sv_shadowHistorySlots = 4;
 +    if ( sv_shadowHistorySlots > SV_ANTILAG_MAX_HISTORY_SLOTS )
@@ -249,7 +221,7 @@
 +
 +    // Walk the valid portion of the ring buffer
 +    for ( i = 0; i < hist->count; i++ ) {
-+        idx = ( hist->head - 1 - i + SV_ANTILAG_MAX_HISTORY_SLOTS )
++        idx = ( hist->head - 1 - i + sv_shadowHistorySlots )
 +              % sv_shadowHistorySlots;
 +
 +        svShadowPos_t *s = &hist->slots[idx];
@@ -308,14 +280,28 @@
 +/*
 +SV_Antilag_GetClientFireTime
 +
-+Extracts the client's fire time from the QVM entity state.
-+The QVM (UT4.2) stores this as AttackTime in the client struct,
-+which corresponds to ucmd->serverTime captured before the sanity clamp.
++Returns the time to rewind targets to for a given shooter.
 +
-+On the engine side we access it through the playerState ping offset —
-+the QVM writes ps.commandTime which is updated per-ucmd.
-+We use svs.time - client->ping as the conservative estimate if
-+we can't read the exact ucmd serverTime directly.
++Uses sv.time - cl->ping / 2 — the server's current time minus the
++estimated one-way latency.  cl->ping is the full RTT, so ping/2
++approximates how far behind sv.time the client is seeing the world.
++
++Previous approach (PR #35) used cl->lastUsercmd.serverTime, which
++includes the client's local interpolation delay (cl_timeNudge,
++cl_autoNudge, snapshot buffering) on top of the network delay.  This
++produced ~70 ms rewind for a 45 ms ping player (correct ≈ 22 ms),
++making hit registration feel delayed and spongy compared to the QVM's
++own FIFO antilag.
++
++The original code used svs.time - cl->ping (full RTT, wrong time
++domain).  The new formula is the same idea but correctly uses sv.time
++and divides by 2 for one-way latency.
++
++CRITICAL: all time comparisons use sv.time, NOT svs.time.
++Snapshots send sv.time to clients, and shadow history records at
++sv.time.  svs.time is a different clock (persists across map changes)
++and using it here would create a constant offset that forces every
++shot to clamp to max rewind.
 +*/
 +static int SV_Antilag_GetClientFireTime( int shooterNum ) {
 +    client_t *cl;
@@ -323,64 +309,38 @@
 +    int maxRewind;
 +
 +    if ( shooterNum < 0 || shooterNum >= sv_maxclients->integer )
-+        return svs.time;
++        return sv.time;
 +
 +    cl = &svs.clients[shooterNum];
 +
-+    // Best estimate: current server time minus measured ping.
-+    // This mirrors what the QVM's AttackTime - ut_timenudge approximates.
-+    // The QVM's own FIFO system will also rewind, but our shadow rewind
-+    // operates on the higher-resolution shadow history independently.
-+    fireTime = svs.time - cl->ping;
++    // Use half the measured round-trip time as a one-way latency estimate.
++    //
++    // The shadow history records entity positions at sv.time.  The client
++    // sees those positions after approximately one-way latency (the time
++    // for the snapshot to travel from server to client).  cl->ping is the
++    // full RTT, so ping/2 is the best approximation of one-way delay.
++    //
++    // Why NOT cl->lastUsercmd.serverTime:
++    //   lastUsercmd.serverTime includes the client's local interpolation
++    //   buffering (cl_timeNudge, cl_autoNudge, snapshot smoothing) on top
++    //   of the network delay.  This produces excessive rewind — e.g. 70 ms
++    //   for a 45 ms ping player instead of the correct ~22 ms — making
++    //   hits feel delayed and spongy.  The QVM's FIFO antilag uses it
++    //   correctly (its trail is in the level.time domain where those
++    //   offsets cancel out), but the shadow system records at sv.time
++    //   where the extra delay doubles up.
++    fireTime = sv.time - cl->ping / 2;
 +
 +    // Clamp: never rewind more than sv_antilagMaxMs
 +    maxRewind = sv_antilagMaxMs ? sv_antilagMaxMs->integer : SV_ANTILAG_MAX_REWIND_MS;
-+    if ( svs.time - fireTime > maxRewind )
-+        fireTime = svs.time - maxRewind;
++    if ( sv.time - fireTime > maxRewind )
++        fireTime = sv.time - maxRewind;
 +
 +    // Clamp: never go into the future
-+    if ( fireTime > svs.time )
-+        fireTime = svs.time;
++    if ( fireTime > sv.time )
++        fireTime = sv.time;
 +
 +    return fireTime;
-+}
-+
-+
-+/*
-+SV_Antilag_GetMostRecentPosition
-+
-+Gets the most recent shadow history position for a client.
-+Used to override the QVM FIFO rewind before we apply our own.
-+Returns qfalse if no history exists yet.
-+*/
-+static qboolean SV_Antilag_GetMostRecentPosition(
-+    int     clientNum,
-+    vec3_t  outOrigin,
-+    vec3_t  outAbsmin,
-+    vec3_t  outAbsmax
-+) {
-+    svShadowHistory_t   *hist;
-+    svShadowPos_t       *slot;
-+    int                 idx;
-+
-+    if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
-+        return qfalse;
-+
-+    hist = &sv_shadowHistory[clientNum];
-+    if ( hist->count == 0 )
-+        return qfalse;
-+
-+    // Most recent slot is one behind head
-+    idx = ( hist->head - 1 + SV_ANTILAG_MAX_HISTORY_SLOTS ) % sv_shadowHistorySlots;
-+    slot = &hist->slots[idx];
-+
-+    if ( !slot->valid )
-+        return qfalse;
-+
-+    VectorCopy( slot->origin, outOrigin );
-+    VectorCopy( slot->absmin, outAbsmin );
-+    VectorCopy( slot->absmax, outAbsmax );
-+    return qtrue;
 +}
 +
 +
@@ -389,17 +349,17 @@
 +
 +Saves and rewinds all active non-shooter clients to targetTime.
 +
-+Critical: the QVM's G_TimeShiftAllClients has ALREADY run before this
-+is called (it fires before trap_Trace in utTrace). Entities are currently
-+at their 40Hz FIFO-rewound positions. We must:
-+  1. Override FIFO state with our most recent shadow snapshot (true position)
-+  2. Then rewind from that true position to targetTime via shadow history
-+  3. Save the TRUE position (not the FIFO position) for restore
++Critical: the QVM's G_TimeShiftAllClients may have ALREADY run before
++this is called.  For human targets the FIFO has shifted them to past
++positions; for bots the FIFO typically skips them (zero lag).
 +
-+This ensures our high-resolution shadow rewind takes full priority over
-+the QVM FIFO system. The QVM's G_UnTimeShiftAllClients will fire after
-+we return but restore from its own saved state — harmless since we
-+restore first inside InterceptTrace before returning to the QVM.
++We save each entity's CURRENT position (whatever the engine/FIFO has
++set) and restore to that exact state after the trace.  This guarantees
++the entity returns to its pre-intercept state regardless of whether the
++QVM's G_UnTimeShiftAllClients covers it.  For FIFO-shifted humans the
++subsequent G_UnTimeShiftAllClients restores to the pre-FIFO position;
++for bots (which FIFO skips) our restore alone keeps them at the correct
++current position.
 +
 +MUST be paired with SV_Antilag_RestoreAll.
 +*/
@@ -407,7 +367,6 @@
 +    int             i, rewound = 0;
 +    sharedEntity_t  *gent;
 +    client_t        *cl;
-+    vec3_t          trueOrigin, trueAbsmin, trueAbsmax;
 +    vec3_t          rwOrigin, rwAbsmin, rwAbsmax;
 +
 +    for ( i = 0; i < sv_maxclients->integer; i++ ) {
@@ -420,25 +379,18 @@
 +        gent = SV_GentityNum( i );
 +        if ( !gent || !gent->r.linked ) continue;
 +
-+        // Step 1: Get the true current-frame position from shadow history.
-+        // This overrides whatever the QVM FIFO has already done to this entity.
-+        // If we have no shadow history yet, fall back to whatever is current.
-+        if ( SV_Antilag_GetMostRecentPosition( i,
-+                trueOrigin, trueAbsmin, trueAbsmax ) ) {
-+            // Shadow history exists — use it as ground truth
-+            // Save the TRUE position for restore (not the FIFO-shifted position)
-+            sv_shadowSaved[i].saved = qtrue;
-+            VectorCopy( trueOrigin, sv_shadowSaved[i].origin );
-+            VectorCopy( trueAbsmin, sv_shadowSaved[i].absmin );
-+            VectorCopy( trueAbsmax, sv_shadowSaved[i].absmax );
-+        } else {
-+            // No shadow history yet — save whatever is current
-+            // (will be FIFO position but we have nothing better)
-+            sv_shadowSaved[i].saved = qtrue;
-+            VectorCopy( gent->r.currentOrigin, sv_shadowSaved[i].origin );
-+            VectorCopy( gent->r.absmin,        sv_shadowSaved[i].absmin );
-+            VectorCopy( gent->r.absmax,        sv_shadowSaved[i].absmax );
-+        }
++        // Step 1: Save the entity's CURRENT position for restore.
++        // This is whatever the engine/QVM has set — it may be a FIFO-
++        // shifted position (for human targets) or the actual current
++        // position (for bots, which FIFO typically skips).  After the
++        // trace we restore to exactly this state so the entity is back
++        // to its pre-intercept position.  The QVM's G_UnTimeShiftAllClients
++        // then handles the final FIFO restore for human targets; for bots
++        // our restore alone keeps them at the correct current position.
++        sv_shadowSaved[i].saved = qtrue;
++        VectorCopy( gent->r.currentOrigin, sv_shadowSaved[i].origin );
++        VectorCopy( gent->r.absmin,        sv_shadowSaved[i].absmin );
++        VectorCopy( gent->r.absmax,        sv_shadowSaved[i].absmax );
 +
 +        // Step 2: Apply our high-resolution shadow rewind to targetTime.
 +        // This is the actual lag compensation — done at shadow Hz resolution.
@@ -461,17 +413,10 @@
 +            VectorCopy( rwAbsmax, gent->r.absmax );
 +            SV_LinkEntity( gent );
 +            rewound++;
-+        } else {
-+            // No history for targetTime — restore to true position
-+            // so at minimum the QVM FIFO offset is neutralised
-+            if ( sv_antilagDebug && sv_antilagDebug->integer >= 2 ) {
-+                Com_Printf( "  AL rewind cl[%d]: no shadow history for t=%d, using true pos\n", i, targetTime );
-+            }
-+            VectorCopy( sv_shadowSaved[i].origin, gent->r.currentOrigin );
-+            VectorCopy( sv_shadowSaved[i].absmin, gent->r.absmin );
-+            VectorCopy( sv_shadowSaved[i].absmax, gent->r.absmax );
-+            SV_LinkEntity( gent );
 +        }
++        // else: no shadow history for targetTime — leave the entity at
++        // its current position.  The trace will run against whatever the
++        // QVM's own antilag (or lack thereof for bots) has set.
 +    }
 +
 +    return rewound;
@@ -531,6 +476,7 @@
 +    Com_Memset( sv_rateTrack,      0, sizeof( sv_rateTrack ) );
 +
 +    sv_shadowAccumulator = 0;
++    sv_antilag_lastFpsValue = sv_fps ? sv_fps->integer : 40;
 +
 +    SV_Antilag_ComputeConfig();
 +
@@ -548,28 +494,55 @@
 +/*
 +SV_Antilag_RecordPositions
 +
-+Called from SV_Frame() BEFORE GAME_RUN_FRAME, once per shadow sub-tick.
-+Decoupled from game tick — runs at sv_fps * sv_physicsScale Hz.
-+Recomputes config if cvars changed.
++Called from SV_Frame() once per engine tick, BEFORE GAME_RUN_FRAME.
++Records all active clients into the shadow history ring buffer.
++Recomputes config if sv_fps or sv_antilagMaxMs changed.
 +*/
 +void SV_Antilag_RecordPositions( void ) {
 +    int i;
 +
-+    // Recompute config if relevant cvars changed
-+    if ( sv_physicsScale->modified || sv_antilagMaxMs->modified ) {
-+        SV_Antilag_ComputeConfig();
-+        sv_physicsScale->modified = qfalse;
-+        sv_antilagMaxMs->modified = qfalse;
-+        Com_Printf( "SV_Antilag: reconfigured — shadow Hz=%d, historySlots=%d\n",
-+            1000 / sv_shadowTickMs, sv_shadowHistorySlots );
++    // Recompute config if relevant cvars changed.
++    // sv_fps affects shadow Hz and slot count — must be included.
++    // NOTE: sv_fps->modified is cleared by SV_TrackCvarChanges before we run,
++    // so we track the actual integer value to detect changes independently.
++    {
++        int currentFps = sv_fps ? sv_fps->integer : 40;
++        qboolean fpsChanged = ( currentFps != sv_antilag_lastFpsValue );
++
++        if ( sv_physicsScale->modified || sv_antilagMaxMs->modified || fpsChanged ) {
++            SV_Antilag_ComputeConfig();
++            sv_physicsScale->modified = qfalse;
++            sv_antilagMaxMs->modified = qfalse;
++            sv_antilag_lastFpsValue = currentFps;
++
++            // Always flush all ring buffers on any timing change.
++            // Stale entries recorded at the old tick rate have wrong timestamp
++            // spacing and produce incorrect interpolation even if the slot count
++            // happens to remain the same (e.g. sv_fps 60→40→60 round-trip).
++            // Without this flush, the corruption persists until server reboot.
++            Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
++
++            Com_Printf( "SV_Antilag: reconfigured — shadow Hz=%d, historySlots=%d (history flushed)\n",
++                1000 / sv_shadowTickMs, sv_shadowHistorySlots );
++        }
 +    }
 +
-+    // Record all active clients into shadow history
++    // Record active human clients into shadow history.
++    // Bots are excluded: the QVM's FIFO antilag already handles bot
++    // targets (FIFO skips bots — zero lag — so their position is already
++    // correct).  Recording bots would cause a double-rewind conflict:
++    // FIFO shifts the bot to position A, then shadow overwrites with
++    // position B from a different time formula, and the trace runs
++    // against a position neither system intended.
++    //
++    // Timestamps use sv.time (not svs.time) because fire time is
++    // computed from sv.time and shadow history lookups must be in
++    // the same time domain.
 +    for ( i = 0; i < sv_maxclients->integer; i++ ) {
 +        client_t *cl = &svs.clients[i];
 +        if ( cl->state != CS_ACTIVE ) continue;
 +        if ( cl->netchan.remoteAddress.type == NA_BOT ) continue;
-+        SV_Antilag_RecordClient( i, svs.time );
++        SV_Antilag_RecordClient( i, sv.time );
 +    }
 +}
 +
@@ -702,6 +675,14 @@
 +    if ( passEntityNum < 0 || passEntityNum >= sv_maxclients->integer )
 +        return qfalse;
 +
++    // Skip movement traces — only intercept weapon/damage traces.
++    // Pmove uses MASK_PLAYERSOLID (includes CONTENTS_PLAYERCLIP) for collision;
++    // weapon traces use MASK_SHOT (no CONTENTS_PLAYERCLIP).
++    // Rewinding movement traces causes players to collide against historical
++    // positions instead of current ones, allowing them to phase through each other.
++    if ( contentmask & CONTENTS_PLAYERCLIP )
++        return qfalse;
++
 +    {
 +        client_t *shooter = &svs.clients[passEntityNum];
 +        if ( shooter->state != CS_ACTIVE )
@@ -716,9 +697,9 @@
 +
 +    if ( sv_antilagDebug && sv_antilagDebug->integer >= 1 ) {
 +        client_t *shooter = &svs.clients[ passEntityNum ];
-+        int rewindMs = svs.time - fireTime;
-+        Com_Printf( "AL shot cl[%d] ping=%d rewind=%dms (svs.time=%d fireTime=%d)\n",
-+            passEntityNum, shooter->ping, rewindMs, svs.time, fireTime );
++        int rewindMs = sv.time - fireTime;
++        Com_Printf( "AL shot cl[%d] ping=%d rewind=%dms (sv.time=%d fireTime=%d)\n",
++            passEntityNum, shooter->ping, rewindMs, sv.time, fireTime );
 +    }
 +
 +    // Rewind all other clients into shadow positions
@@ -741,3 +722,60 @@
 +
 +    return qtrue; // we handled it, caller should not call SV_Trace again
 +}
+diff --git a/code/server/sv_antilag.h b/code/server/sv_antilag.h
+new file mode 100644
+index 0000000..f79ae05
+--- /dev/null
++++ b/code/server/sv_antilag.h
+@@ -0,0 +1,48 @@
++/*
++===========================================================================
++sv_antilag.h - Engine-side shadow antilag system
++
++Included by sv_main.c, sv_game.c, sv_init.c.
++server.h must be included before this header in each .c file.
++===========================================================================
++*/
++
++#ifndef SV_ANTILAG_H
++#define SV_ANTILAG_H
++
++#define SV_ANTILAG_MAX_HISTORY_SLOTS    256  // 256 slots: covers 200ms at up to 1000Hz shadow rate
++#define SV_ANTILAG_HISTORY_WINDOW_MS    300
++#define SV_ANTILAG_MAX_REWIND_MS        200
++
++// Cvars — registered by SV_Antilag_Init(), accessible after that call
++extern cvar_t *sv_antilagEnable;
++extern cvar_t *sv_physicsScale;
++extern cvar_t *sv_antilagMaxMs;
++extern cvar_t *sv_antilagDebug;
++extern cvar_t *sv_antilagRateDebug;
++
++// Called once at server init — registers cvars, resets state
++void        SV_Antilag_Init( void );
++
++// Called from SV_Frame() once per engine tick, before GAME_RUN_FRAME.
++// Records all active client positions into engine-side shadow history.
++// Completely decoupled from level.time and QVM.
++void        SV_Antilag_RecordPositions( void );
++void        SV_Antilag_NoteSnapshot( int clientNum );
++
++// Called from G_TRACE / G_TRACECAPSULE syscall handler in sv_game.c.
++// Transparently rewinds clients to shooter's fire time, runs trace, restores all.
++// Returns qtrue if the intercept ran (caller should NOT call SV_Trace again).
++// Returns qfalse if conditions not met (caller calls SV_Trace normally).
++qboolean    SV_Antilag_InterceptTrace(
++                trace_t     *results,
++                const vec3_t start,
++                const vec3_t mins,
++                const vec3_t maxs,
++                const vec3_t end,
++                int         passEntityNum,
++                int         contentmask,
++                qboolean    capsule
++            );
++
++#endif // SV_ANTILAG_H
+-- 
+2.53.0
+
