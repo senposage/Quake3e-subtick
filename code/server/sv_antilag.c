@@ -308,59 +308,21 @@ static int SV_Antilag_GetClientFireTime( int shooterNum ) {
 
 
 /*
-SV_Antilag_GetMostRecentPosition
-
-Gets the most recent shadow history position for a client.
-Used to override the QVM FIFO rewind before we apply our own.
-Returns qfalse if no history exists yet.
-*/
-static qboolean SV_Antilag_GetMostRecentPosition(
-    int     clientNum,
-    vec3_t  outOrigin,
-    vec3_t  outAbsmin,
-    vec3_t  outAbsmax
-) {
-    svShadowHistory_t   *hist;
-    svShadowPos_t       *slot;
-    int                 idx;
-
-    if ( clientNum < 0 || clientNum >= sv_maxclients->integer )
-        return qfalse;
-
-    hist = &sv_shadowHistory[clientNum];
-    if ( hist->count == 0 )
-        return qfalse;
-
-    // Most recent slot is one behind head
-    idx = ( hist->head - 1 + sv_shadowHistorySlots ) % sv_shadowHistorySlots;
-    slot = &hist->slots[idx];
-
-    if ( !slot->valid )
-        return qfalse;
-
-    VectorCopy( slot->origin, outOrigin );
-    VectorCopy( slot->absmin, outAbsmin );
-    VectorCopy( slot->absmax, outAbsmax );
-    return qtrue;
-}
-
-
-/*
 SV_Antilag_RewindAll
 
 Saves and rewinds all active non-shooter clients to targetTime.
 
-Critical: the QVM's G_TimeShiftAllClients has ALREADY run before this
-is called (it fires before trap_Trace in utTrace). Entities are currently
-at their 40Hz FIFO-rewound positions. We must:
-  1. Override FIFO state with our most recent shadow snapshot (true position)
-  2. Then rewind from that true position to targetTime via shadow history
-  3. Save the TRUE position (not the FIFO position) for restore
+Critical: the QVM's G_TimeShiftAllClients may have ALREADY run before
+this is called.  For human targets the FIFO has shifted them to past
+positions; for bots the FIFO typically skips them (zero lag).
 
-This ensures our high-resolution shadow rewind takes full priority over
-the QVM FIFO system. The QVM's G_UnTimeShiftAllClients will fire after
-we return but restore from its own saved state — harmless since we
-restore first inside InterceptTrace before returning to the QVM.
+We save each entity's CURRENT position (whatever the engine/FIFO has
+set) and restore to that exact state after the trace.  This guarantees
+the entity returns to its pre-intercept state regardless of whether the
+QVM's G_UnTimeShiftAllClients covers it.  For FIFO-shifted humans the
+subsequent G_UnTimeShiftAllClients restores to the pre-FIFO position;
+for bots (which FIFO skips) our restore alone keeps them at the correct
+current position.
 
 MUST be paired with SV_Antilag_RestoreAll.
 */
@@ -368,7 +330,6 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
     int             i, rewound = 0;
     sharedEntity_t  *gent;
     client_t        *cl;
-    vec3_t          trueOrigin, trueAbsmin, trueAbsmax;
     vec3_t          rwOrigin, rwAbsmin, rwAbsmax;
 
     for ( i = 0; i < sv_maxclients->integer; i++ ) {
@@ -381,25 +342,18 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
         gent = SV_GentityNum( i );
         if ( !gent || !gent->r.linked ) continue;
 
-        // Step 1: Get the true current-frame position from shadow history.
-        // This overrides whatever the QVM FIFO has already done to this entity.
-        // If we have no shadow history yet, fall back to whatever is current.
-        if ( SV_Antilag_GetMostRecentPosition( i,
-                trueOrigin, trueAbsmin, trueAbsmax ) ) {
-            // Shadow history exists — use it as ground truth
-            // Save the TRUE position for restore (not the FIFO-shifted position)
-            sv_shadowSaved[i].saved = qtrue;
-            VectorCopy( trueOrigin, sv_shadowSaved[i].origin );
-            VectorCopy( trueAbsmin, sv_shadowSaved[i].absmin );
-            VectorCopy( trueAbsmax, sv_shadowSaved[i].absmax );
-        } else {
-            // No shadow history yet — save whatever is current
-            // (will be FIFO position but we have nothing better)
-            sv_shadowSaved[i].saved = qtrue;
-            VectorCopy( gent->r.currentOrigin, sv_shadowSaved[i].origin );
-            VectorCopy( gent->r.absmin,        sv_shadowSaved[i].absmin );
-            VectorCopy( gent->r.absmax,        sv_shadowSaved[i].absmax );
-        }
+        // Step 1: Save the entity's CURRENT position for restore.
+        // This is whatever the engine/QVM has set — it may be a FIFO-
+        // shifted position (for human targets) or the actual current
+        // position (for bots, which FIFO typically skips).  After the
+        // trace we restore to exactly this state so the entity is back
+        // to its pre-intercept position.  The QVM's G_UnTimeShiftAllClients
+        // then handles the final FIFO restore for human targets; for bots
+        // our restore alone keeps them at the correct current position.
+        sv_shadowSaved[i].saved = qtrue;
+        VectorCopy( gent->r.currentOrigin, sv_shadowSaved[i].origin );
+        VectorCopy( gent->r.absmin,        sv_shadowSaved[i].absmin );
+        VectorCopy( gent->r.absmax,        sv_shadowSaved[i].absmax );
 
         // Step 2: Apply our high-resolution shadow rewind to targetTime.
         // This is the actual lag compensation — done at shadow Hz resolution.
@@ -422,17 +376,10 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
             VectorCopy( rwAbsmax, gent->r.absmax );
             SV_LinkEntity( gent );
             rewound++;
-        } else {
-            // No history for targetTime — restore to true position
-            // so at minimum the QVM FIFO offset is neutralised
-            if ( sv_antilagDebug && sv_antilagDebug->integer >= 2 ) {
-                Com_Printf( "  AL rewind cl[%d]: no shadow history for t=%d, using true pos\n", i, targetTime );
-            }
-            VectorCopy( sv_shadowSaved[i].origin, gent->r.currentOrigin );
-            VectorCopy( sv_shadowSaved[i].absmin, gent->r.absmin );
-            VectorCopy( sv_shadowSaved[i].absmax, gent->r.absmax );
-            SV_LinkEntity( gent );
         }
+        // else: no shadow history for targetTime — leave the entity at
+        // its current position.  The trace will run against whatever the
+        // QVM's own antilag (or lack thereof for bots) has set.
     }
 
     return rewound;
