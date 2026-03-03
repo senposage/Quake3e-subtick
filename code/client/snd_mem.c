@@ -34,6 +34,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #define DEF_COMSOUNDMEGS "8"
 
+#include "snd_dmahd.h"
+
 /*
 ===============================================================================
 
@@ -85,15 +87,18 @@ void SND_setup( void )
 	static int old_scs = -1;
 
 	cv = Cvar_Get( "com_soundMegs", DEF_COMSOUNDMEGS, CVAR_LATCH | CVAR_ARCHIVE );
+    Cvar_SetDescription(cv, "The megabytes to allocate for sound can be adjusted to provide better performance on systems with more than 64mb of memory\nDefault: 8");
 	Cvar_CheckRange( cv, "1", "512", CV_INTEGER );
-	Cvar_SetDescription( cv, "Amount of memory (RAM) assigned to the sound buffer (in MB)." );
 
-	scs = ( cv->integer * /*1536*/ 12 * dma.speed ) / 22050;
-	scs *= 128;
+    scs = (
+#ifndef NO_DMAHD
+        dmaHD_Enabled() ? (2*1536) :
+#endif
+        (cv->integer*1536));
 
 	sz = scs * sizeof( sndBuffer );
 
-	// realloc buffer if com_soundMegs changed
+	// realloc buffer if com_comSoundMegs changed
 	if ( old_scs != scs ) {
 		if ( buffer != NULL ) {
 			free( buffer );
@@ -271,6 +276,10 @@ qboolean S_LoadSound( sfx_t *sfx )
 	short	*samples;
 	snd_info_t	info;
 //	int		size;
+
+#ifndef NO_DMAHD
+    if (dmaHD_Enabled()) return dmaHD_LoadSound(sfx);
+#endif
 
 	// load it in
 	data = S_CodecLoad(sfx->soundName, &info);

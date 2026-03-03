@@ -602,11 +602,7 @@ static void Cvar_Print( const cvar_t *v ) {
 		Com_Printf (" default:\"%s" S_COLOR_WHITE "\"",
 			v->resetString );
 	}
-#ifdef _DEBUG
-	if ( v->modified ) {
-		Com_Printf( " (modified)" );
-	}
-#endif
+
 	Com_Printf ("\n");
 
 	if ( v->latchedString ) {
@@ -963,7 +959,7 @@ Prints the contents of a cvar
 */
 static void Cvar_Print_f( void )
 {
-	const char *name;
+	char *name;
 	cvar_t *cv;
 	
 	if(Cmd_Argc() != 2)
@@ -1038,7 +1034,7 @@ weren't declared in C code.
 */
 static void Cvar_Set_f( void ) {
 	int		c;
-	const char	*cmd;
+	char	*cmd;
 	cvar_t	*v;
 
 	c = Cmd_Argc();
@@ -1094,7 +1090,7 @@ static void Cvar_Reset_f( void ) {
 }
 
 
-// returns NULL for non-existent "-" argument
+// returns NULL for non-existent "-" agrument
 static const char *GetValue( int index, int *ival, float *fval ) 
 {
 	static char buf[ MAX_CVAR_VALUE_STRING ];
@@ -1271,7 +1267,7 @@ static void Cvar_Func_f( void ) {
 
 	funcType_t	ftype;
 	const char	*cvar_name;
-	char		value[ 64 ];
+	char		value[ 32 ];
 	cvar_t		*cvar;
 	int			ival;
 	float		fval;
@@ -1384,7 +1380,7 @@ Cvar_List_f
 static void Cvar_List_f( void ) {
 	cvar_t	*var;
 	int		i;
-	const char	*match;
+	char	*match;
 
 	// sort to get more predictable output
 	if ( cvar_sort ) {
@@ -1730,7 +1726,7 @@ static void Cvar_Trim_f( void )
 		return;
 	}
 
-#ifdef DEDICATED	
+#ifdef DEDICATED
 	Com_Printf( S_COLOR_YELLOW " You're not running a server, so not all subsystems/VMs are loaded.\n" );
 #else
 	Com_Printf( S_COLOR_YELLOW " You're not running a listen server, so not all subsystems/VMs are loaded.\n" );
@@ -1909,33 +1905,6 @@ void Cvar_SetDescription( cvar_t *var, const char *var_description )
 
 /*
 =====================
-Cvar_SetDescription
-=====================
-*/
-void Cvar_SetDescription2( const char *var_name, const char* var_description )
-{
-	cvar_t *var;
-
-	var = Cvar_FindVar( var_name );
-	if ( !var || !var_description )
-		return;
-
-	if ( strlen( var_description ) >= MAX_CVAR_VALUE_STRING )
-		return;
-
-	if ( var_description[0] != '\0' )
-	{
-		if ( var->description != NULL )
-		{
-			Z_Free( var->description );
-		}
-		var->description = CopyString( var_description );
-	}
-}
-
-
-/*
-=====================
 Cvar_SetGroup
 =====================
 */
@@ -2004,7 +1973,7 @@ void Cvar_Register( vmCvar_t *vmCvar, const char *varName, const char *defaultVa
 		flags &= ~CVAR_ROM;
 	}
 
-	// Don't allow VM to specify a different creator or other internal flags.
+	// Don't allow VM to specific a different creator or other internal flags.
 	if ( flags & INVALID_FLAGS ) {
 		Com_DPrintf( S_COLOR_YELLOW "WARNING: VM tried to set invalid flags 0x%02x on cvar '%s'\n", ( flags & INVALID_FLAGS ), varName );
 		flags &= ~INVALID_FLAGS;
@@ -2089,7 +2058,7 @@ void Cvar_CompleteCvarName( const char *args, int argNum )
 	if( argNum == 2 )
 	{
 		// Skip "<cmd> "
-		const char *p = Com_SkipTokens( args, 1, " " );
+		char *p = Com_SkipTokens( args, 1, " " );
 
 		if( p > args )
 			Field_CompleteCommand( p, qfalse, qtrue );
@@ -2110,30 +2079,50 @@ void Cvar_Init (void)
 	Com_Memset(hashTable, '\0', sizeof(hashTable));
 
 	cvar_cheats = Cvar_Get( "sv_cheats", "1", CVAR_ROM | CVAR_SYSTEMINFO );
-	Cvar_SetDescription( cvar_cheats, "Enable cheating commands (server side only)." );
 	cvar_developer = Cvar_Get( "developer", "0", CVAR_TEMP );
-	Cvar_SetDescription( cvar_developer, "Toggles developer mode. Prints more info to console and provides more commands." );
 
 	Cmd_AddCommand ("print", Cvar_Print_f);
 	Cmd_AddCommand ("toggle", Cvar_Toggle_f);
-	Cmd_SetCommandCompletionFunc( "toggle", Cvar_CompleteCvarName );
+    Cmd_SetDescription("toggle", "Toggles a cvar for easy single key binding\nusage: toggle <variable> [value1, value2, ...]");
+
+    Cmd_SetCommandCompletionFunc( "toggle", Cvar_CompleteCvarName );
 	Cmd_AddCommand ("set", Cvar_Set_f);
 	Cmd_SetCommandCompletionFunc( "set", Cvar_CompleteCvarName );
-	Cmd_AddCommand ("sets", Cvar_Set_f);
-	Cmd_SetCommandCompletionFunc( "sets", Cvar_CompleteCvarName );
-	Cmd_AddCommand ("setu", Cvar_Set_f);
-	Cmd_SetCommandCompletionFunc( "setu", Cvar_CompleteCvarName );
-	Cmd_AddCommand ("seta", Cvar_Set_f);
-	Cmd_SetCommandCompletionFunc( "seta", Cvar_CompleteCvarName );
-	Cmd_AddCommand ("reset", Cvar_Reset_f);
-	Cmd_SetCommandCompletionFunc( "reset", Cvar_CompleteCvarName );
-	Cmd_AddCommand ("unset", Cvar_Unset_f);
-	Cmd_SetCommandCompletionFunc("unset", Cvar_CompleteCvarName);
+    Cmd_SetDescription("set", "Set a variable\nusage: set <variable> (<value>)");
 
-	Cmd_AddCommand( "varfunc", Cvar_Func_f );
+    Cmd_AddCommand ("sets", Cvar_Set_f);
+	Cmd_SetCommandCompletionFunc( "sets", Cvar_CompleteCvarName );
+    Cmd_SetDescription("sets", "Set a variable with the server flag so it is sent to the server\nusage: sets <variable> (<value>)");
+
+    Cmd_AddCommand ("setu", Cvar_Set_f);
+	Cmd_SetCommandCompletionFunc( "setu", Cvar_CompleteCvarName );
+    Cmd_SetDescription("setu", "Set a variable with the userinfo flag so it is sent to the server while connecting\nusage: setu <variable> (<value>)");
+
+    Cmd_AddCommand ("seta", Cvar_Set_f);
+	Cmd_SetCommandCompletionFunc( "seta", Cvar_CompleteCvarName );
+    Cmd_SetDescription("seta", "Set a variable with the archive flag so it is saved in q3config.cfg file\nusage: seta <variable> (<value>)");
+
+    Cmd_AddCommand ("reset", Cvar_Reset_f);
+	Cmd_SetCommandCompletionFunc( "reset", Cvar_CompleteCvarName );
+    Cmd_SetDescription("reset", "Reset specified variable to the default value\nusage: reset <variable>");
+
+    Cmd_AddCommand ("unset", Cvar_Unset_f);
+	Cmd_SetCommandCompletionFunc("unset", Cvar_CompleteCvarName);
+    Cmd_SetDescription("unset", "Unset a user defined variable\nusage: unset <variable>");
+
+
+    Cmd_AddCommand( "varfunc", Cvar_Func_f );
+    Cmd_SetDescription( "varfunc", "Set a variable based on a function\nusage: varfunc <add|sub|mul|div|mod|sin|cos> <cvar> <value>");
 
 	Cmd_AddCommand ("cvarlist", Cvar_List_f);
-	Cmd_AddCommand ("cvar_modified", Cvar_ListModified_f);
-	Cmd_AddCommand ("cvar_restart", Cvar_Restart_f);
-	Cmd_AddCommand ("cvar_trim", Cvar_Trim_f);
+    Cmd_SetDescription( "cvarlist", "List all available console variables and their values\nusage: cvarlist");
+
+    Cmd_AddCommand ("cvar_modified", Cvar_ListModified_f);
+    Cmd_SetDescription( "cvar_modified", "List all modified variables from their default values\nusage: cvar_modified");
+
+    Cmd_AddCommand ("cvar_restart", Cvar_Restart_f);
+    Cmd_SetDescription( "cvar_restart", "Reset all variables back to factory defaults\nusage: cvar_restart");
+
+    Cmd_AddCommand ("cvar_trim", Cvar_Trim_f);
+    Cmd_SetDescription("cvar_trim", "Removes all user-created cvars\nusage: cvar_trim");
 }

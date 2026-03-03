@@ -411,23 +411,36 @@ void S_Init( void )
 	Com_Printf( "------ Initializing Sound ------\n" );
 
 	s_volume = Cvar_Get( "s_volume", "0.8", CVAR_ARCHIVE );
+    Cvar_SetDescription(s_volume, "Sound FX volume\nDefault: 0.8");
+
+    s_musicVolume = Cvar_Get( "s_musicvolume", "0.25", CVAR_ARCHIVE );
+    Cvar_SetDescription(s_musicVolume, "Music volume level\nDefault: 0.25");
+
+    s_doppler = Cvar_Get( "s_doppler", "1", CVAR_ARCHIVE_ND );
+    Cvar_SetDescription( s_doppler, "How much the sound changes based on the speed the source is moving\nDefault: 1");
+
+    s_muteWhenUnfocused = Cvar_Get( "s_muteWhenUnfocused", "1", CVAR_ARCHIVE );
+    Cvar_SetDescription( s_muteWhenUnfocused, "Mute the sound when the window is in the background\nDefault: 1" );
+
+    s_muteWhenMinimized = Cvar_Get( "s_muteWhenMinimized", "1", CVAR_ARCHIVE );
+    Cvar_SetDescription( s_muteWhenMinimized, "Mute the sound when the window is minimized\nDefault: 1");
+
+    cv = Cvar_Get( "s_initsound", "1", 0 );
+    Cvar_SetDescription(cv, "Use sounds, or disable them entirely\nDefault: 1");
+
 	Cvar_CheckRange( s_volume, "0", "1", CV_FLOAT );
-	Cvar_SetDescription( s_volume, "Sets master volume for all game audio." );
-	s_musicVolume = Cvar_Get( "s_musicVolume", "0.25", CVAR_ARCHIVE );
 	Cvar_CheckRange( s_musicVolume, "0", "1", CV_FLOAT );
-	Cvar_SetDescription( s_musicVolume, "Sets volume for in-game music only." );
-	s_doppler = Cvar_Get( "s_doppler", "1", CVAR_ARCHIVE_ND );
 	Cvar_CheckRange( s_doppler, "0", "1", CV_INTEGER );
-	Cvar_SetDescription( s_doppler, "Enables doppler effect on moving projectiles." );
-	s_muteWhenUnfocused = Cvar_Get( "s_muteWhenUnfocused", "1", CVAR_ARCHIVE );
 	Cvar_CheckRange( s_muteWhenUnfocused, "0", "1", CV_INTEGER );
-	Cvar_SetDescription( s_muteWhenUnfocused, "Mutes all audio while game window is unfocused." );
-	s_muteWhenMinimized = Cvar_Get( "s_muteWhenMinimized", "1", CVAR_ARCHIVE );
 	Cvar_CheckRange( s_muteWhenMinimized, "0", "1", CV_INTEGER );
-	Cvar_SetDescription( s_muteWhenMinimized, "Mutes all audio while game is minimized." );
+
+	Cvar_CheckRange( s_volume, "0", "1", CV_FLOAT );
+	Cvar_CheckRange( s_musicVolume, "0", "1", CV_FLOAT );
+	Cvar_CheckRange( s_doppler, "0", "1", CV_INTEGER );
+	Cvar_CheckRange( s_muteWhenUnfocused, "0", "1", CV_INTEGER );
+	Cvar_CheckRange( s_muteWhenMinimized, "0", "1", CV_INTEGER );
 
 	cv = Cvar_Get( "s_initsound", "1", 0 );
-	Cvar_SetDescription( cv, "Whether or not to startup the sound system." );
 	if ( !cv->integer ) {
 		Com_Printf( "Sound disabled.\n" );
 	} else {
@@ -435,11 +448,23 @@ void S_Init( void )
 		S_CodecInit();
 
 		Cmd_AddCommand( "play", S_Play_f );
-		Cmd_AddCommand( "music", S_Music_f );
-		Cmd_AddCommand( "stopmusic", S_StopMusic_f );
-		Cmd_AddCommand( "s_list", S_SoundList );
-		Cmd_AddCommand( "s_stop", S_StopAllSounds );
-		Cmd_AddCommand( "s_info", S_SoundInfo );
+        Cmd_SetDescription("play", "Play a sound file\nusage: play <filename>");
+
+        Cmd_AddCommand( "music", S_Music_f );
+        Cmd_SetDescription("music", "Play a specific music file\nusage: music <filename>");
+
+        Cmd_AddCommand( "stopmusic", S_StopMusic_f );
+        Cmd_SetDescription("stopmusic", "Stop playing music\nusage: stopmusic");
+
+        Cmd_AddCommand( "s_list", S_SoundList );
+        Cmd_SetDescription("s_list", "Display paths and filenames of all sound files as they are played\nusage: s_list");
+
+        Cmd_AddCommand( "s_stop", S_StopAllSounds );
+        Cmd_SetDescription("s_stop", "Stop whatever sound that is currently playing from playing\nusage: s_stop");
+
+        Cmd_AddCommand( "s_info", S_SoundInfo );
+        Cmd_SetDescription("s_info", "Display information about sound system\nusage: s_info");
+
 
 		if ( !started ) {
 			started = S_Base_Init( &si );
@@ -472,7 +497,7 @@ void S_Shutdown( void )
 		si.StopAllSounds();
 	}
 
-	if ( si.Shutdown ) {
+	if( si.Shutdown ) {
 		si.Shutdown();
 	}
 
