@@ -152,9 +152,9 @@ void Sys_Print( const char *msg )
 Sys_Mkdir
 ==============
 */
-void Sys_Mkdir( const char *path )
+qboolean Sys_Mkdir( const char *path )
 {
-	_mkdir( path );
+	return _mkdir( path ) == 0 || errno == EEXIST;
 }
 
 
@@ -329,7 +329,7 @@ void Sys_Sleep( int msec ) {
 Sys_ListFiles
 =============
 */
-char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, qboolean wantsubs ) {
+char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, int wantsubs ) {
 	char		search[MAX_OSPATH*2+MAX_QPATH+1];
 	int			nfiles;
 	char		**listCopy;

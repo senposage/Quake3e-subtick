@@ -4544,11 +4544,12 @@ Field_CompleteCommand
 void Field_CompleteCommand( char *cmd, qboolean doCommands, qboolean doCvars )
 {
 	int	completionArgument;
+	const char *p;
 
 	// Skip leading whitespace and quotes
-	cmd = Com_SkipCharset( cmd, " \"" );
+	p = Com_SkipCharset( cmd, " \"" );
 
-	Cmd_TokenizeStringIgnoreQuotes( cmd );
+	Cmd_TokenizeStringIgnoreQuotes( p );
 	completionArgument = Cmd_Argc();
 
 	// If there is trailing whitespace on the cmd

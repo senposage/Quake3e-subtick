@@ -239,13 +239,6 @@ static const keyname_t keynames[] =
 	{"PAD0_LEFTTRIGGER", K_PAD0_LEFTTRIGGER },
 	{"PAD0_RIGHTTRIGGER", K_PAD0_RIGHTTRIGGER },
 
-	{"PAD0_MISC1", K_PAD0_MISC1 },
-	{"PAD0_PADDLE1", K_PAD0_PADDLE1 },
-	{"PAD0_PADDLE2", K_PAD0_PADDLE2 },
-	{"PAD0_PADDLE3", K_PAD0_PADDLE3 },
-	{"PAD0_PADDLE4", K_PAD0_PADDLE4 },
-	{"PAD0_TOUCHPAD", K_PAD0_TOUCHPAD },
-
 	{NULL,0}
 };
 
@@ -593,7 +586,7 @@ static void Key_CompleteBind( const char *args, int argNum )
 		if ( *p == '\0' && ( key = Key_StringToKeynum( Cmd_Argv( 1 ) ) ) >= 0 ) {
 			Field_CompleteKeyBind( key );
 		} else if ( p > args ) {
-			Field_CompleteCommand( p, qtrue, qtrue );
+			Field_CompleteCommand( (char *)p, qtrue, qtrue );
 		}
 	}
 }
@@ -628,7 +621,7 @@ void Key_ParseBinding( int key, qboolean down, unsigned time )
 {
 	char buf[ MAX_STRING_CHARS ], *p, *end;
 
-	if( !keys[key].binding || keys[key].binding[0] == '\0' )
+	if( !keys[key].binding || !keys[key].binding[0] )
 		return;
 
 	p = buf;
@@ -648,12 +641,11 @@ void Key_ParseBinding( int key, qboolean down, unsigned time )
 			// so that multiple sources can be discriminated and
 			// subframe corrected
 			char cmd[1024];
-			Com_sprintf( cmd, sizeof( cmd ), "%c%s %d %d\n", ( down ) ? '+' : '-', p + 1, key, time );
+			Com_sprintf( cmd, sizeof( cmd ), "%c%s %d %d\n",
+				( down ) ? '+' : '-', p + 1, key, time );
 			Cbuf_AddText( cmd );
-			if ( down )
-				keys[ key ].bound = qtrue;
 		}
-		else if ( down )
+		else if( down )
 		{
 			// normal commands only execute on key press
 			Cbuf_AddText( p );
@@ -673,11 +665,18 @@ Com_InitKeyCommands
 */
 void Com_InitKeyCommands( void )
 {
-	// register client functions
+	// register our functions
 	Cmd_AddCommand( "bind", Key_Bind_f );
 	Cmd_SetCommandCompletionFunc( "bind", Key_CompleteBind );
+    Cmd_SetDescription( "bind", "Assign a key to command\nusage: bind <key> <command>");
+
 	Cmd_AddCommand( "unbind", Key_Unbind_f );
 	Cmd_SetCommandCompletionFunc( "unbind", Key_CompleteUnbind );
-	Cmd_AddCommand( "unbindall", Key_Unbindall_f );
-	Cmd_AddCommand( "bindlist", Key_Bindlist_f );
+    Cmd_SetDescription( "unbind", "Unbind a specific key\nusage: unbind <key>");
+
+    Cmd_AddCommand( "unbindall", Key_Unbindall_f );
+    Cmd_SetDescription( "unbindall", "Unbind all keys\nusage: unbindall");
+
+    Cmd_AddCommand( "bindlist", Key_Bindlist_f );
+    Cmd_SetDescription( "bindlist", "List all currently bound keys and what command they are bound\nusage: bindlist");
 }

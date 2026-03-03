@@ -440,7 +440,6 @@ static qboolean setup_ALSA( smode_t mode )
 		case 48: speed = 48000; break;
 		case 44: speed = 44100; break;
 		case 11: speed = 11025; break;
-		case  8: speed =  8000; break;
 		case 22:
 		default: speed = 22050; break;
 	};
@@ -729,14 +728,10 @@ static int xrun_recovery( snd_pcm_t *handle, int err )
 	else if ( err == -ESTRPIPE )
 	{
 		int tries = 0;
-		struct timespec req;
-		req.tv_sec = period_time / 1000000;
-		req.tv_nsec = ( period_time % 1000000 ) * 1000;
-
 		/* wait until the suspend flag is released */
 		while ( ( err = _snd_pcm_resume( handle ) ) == -EAGAIN )
 		{
-			nanosleep( &req, NULL );
+			usleep( period_time );
 			if ( tries++ < 16 )
 			{
 				break;
@@ -1127,6 +1122,10 @@ void Snd_Memset( void* dest, const int val, const size_t count )
 	Com_Memset( dest, val, count );
 }
 
+#ifndef NO_DMAHD
+qboolean dmaHD_Enabled(void);
+#endif
+
 qboolean SNDDMA_Init( void )
 {
 	cvar_t *sndbits;
@@ -1144,10 +1143,8 @@ qboolean SNDDMA_Init( void )
 		return qtrue;
 
 	sndbits = Cvar_Get("sndbits", "16", CVAR_ARCHIVE_ND | CVAR_LATCH);
-	Cvar_SetDescription( sndbits, "Bit resolution." );
 	sndspeed = Cvar_Get("sndspeed", "0", CVAR_ARCHIVE_ND | CVAR_LATCH);
 	sndchannels = Cvar_Get("sndchannels", "2", CVAR_ARCHIVE_ND |  CVAR_LATCH);
-	Cvar_SetDescription( sndchannels, "Number of channels." );
 	snddevice = Cvar_Get("snddevice", "/dev/dsp", CVAR_ARCHIVE_ND | CVAR_LATCH);
 
 	map_size = 0;
@@ -1199,6 +1196,16 @@ qboolean SNDDMA_Init( void )
 	dma.channels = (int)sndchannels->value;
 	if (dma.channels < 1 || dma.channels > 2)
 		dma.channels = 2;
+
+#ifndef NO_DMAHD
+    if (dmaHD_Enabled())
+    {
+        // p5yc0runn3r - Fix dmaHD sound to 44KHz, Stereo and 16 bits per sample.
+        dma.speed = 44100;
+        dma.channels = 2;
+        dma.samplebits = 16;
+    }
+#endif
 
 	/*  mmap() call moved forward */
 

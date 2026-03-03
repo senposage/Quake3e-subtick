@@ -380,7 +380,8 @@ void CL_cURL_BeginDownload( const char *localName, const char *remoteURL )
 		!clc.cURLDisconnected) {
 
 		CL_AddReliableCommand("disconnect", qtrue);
-		CL_WritePacket( 2 );
+		CL_WritePacket();
+		CL_WritePacket();
 		clc.cURLDisconnected = qtrue;
 	}
 }

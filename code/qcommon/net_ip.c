@@ -320,17 +320,18 @@ static void SockadrToNetadr( const sockaddr_t *s, netadr_t *a ) {
 		a->port = s->v4.sin_port;
 	}
 #ifdef USE_IPV6
-	else if ( s->ss.ss_family == AF_INET6 ) {
+	else if ( s->ss.ss_family == AF_INET6 )
+	{
 		a->type = NA_IP6;
 		memcpy( a->ipv._6, &s->v6.sin6_addr, sizeof( a->ipv._6 ) );
 		a->port = s->v6.sin6_port;
-		a->scope_id = (uint32_t)s->v6.sin6_scope_id;
+		a->scope_id = s->v6.sin6_scope_id;
 	}
 #endif
 }
 
 
-static const struct addrinfo *SearchAddrInfo( const struct addrinfo *hints, sa_family_t family )
+static struct addrinfo *SearchAddrInfo( struct addrinfo *hints, sa_family_t family )
 {
 	while ( hints )
 	{
@@ -370,23 +371,25 @@ static const char *gai_error_str( int ecode )
 Sys_StringToSockaddr
 =============
 */
-static qboolean Sys_StringToSockaddr( const char *s, sockaddr_t *sadr, int sadr_len, sa_family_t family, int type )
+static qboolean Sys_StringToSockaddr( const char *s, sockaddr_t *sadr, int sadr_len, sa_family_t family )
 {
-	struct addrinfo hint;
+	struct addrinfo hints;
 	struct addrinfo *res = NULL;
+	struct addrinfo *hintsp;
 	int retval;
 
-	memset( sadr, 0x0, sadr_len );
-	memset( &hint, 0x0, sizeof( hint ) );
+	memset( sadr, '\0', sadr_len );
+	memset( &hints, '\0', sizeof( hints ) );
 
-	hint.ai_family = family;
-	hint.ai_socktype = type;
+	hintsp = &hints;
+	hintsp->ai_family = family;
+	hintsp->ai_socktype = SOCK_DGRAM;
 
-	retval = getaddrinfo( s, NULL, &hint, &res );
+	retval = getaddrinfo(s, NULL, hintsp, &res);
 
-	if ( retval == 0 )
+	if ( !retval )
 	{
-		const struct addrinfo *search = NULL;
+		struct addrinfo *search = NULL;
 
 		if ( family == AF_UNSPEC )
 		{
@@ -416,9 +419,10 @@ static qboolean Sys_StringToSockaddr( const char *s, sockaddr_t *sadr, int sadr_
 
 		if ( search )
 		{
-			size_t addrlen = MIN( search->ai_addrlen, sadr_len );
+			if ( search->ai_addrlen > sadr_len )
+				search->ai_addrlen = sadr_len;
 
-			memcpy ( sadr, search->ai_addr, addrlen );
+			memcpy ( sadr, search->ai_addr, search->ai_addrlen );
 			freeaddrinfo( res );
 
 			return qtrue;
@@ -481,7 +485,7 @@ qboolean Sys_StringToAdr( const char *s, netadr_t *a, netadrtype_t family ) {
 		break;
 	}
 
-	if ( !Sys_StringToSockaddr( s, &sadr, sizeof( sadr ), fam, SOCK_DGRAM ) ) {
+	if ( !Sys_StringToSockaddr( s, &sadr, sizeof( sadr ), fam ) ) {
 		return qfalse;
 	}
 
@@ -1000,9 +1004,9 @@ static SOCKET NET_IPSocket( const char *net_interface, int port, int *err ) {
 	}
 	else
 	{
-		if ( !Sys_StringToSockaddr( net_interface, (sockaddr_t *)&address, sizeof( address ), AF_INET, SOCK_DGRAM ) )
+		if ( !Sys_StringToSockaddr( net_interface, (sockaddr_t *)&address, sizeof( address ), AF_INET ) )
 		{
-			closesocket( newsocket );
+			closesocket(newsocket);
 			return INVALID_SOCKET;
 		}
 	}
@@ -1082,7 +1086,7 @@ static SOCKET NET_IP6Socket( const char *net_interface, int port, struct sockadd
 	}
 	else
 	{
-		if ( !Sys_StringToSockaddr( net_interface, (sockaddr_t *)&address, sizeof(address), AF_INET6, SOCK_DGRAM ) )
+		if ( !Sys_StringToSockaddr( net_interface, (sockaddr_t *)&address, sizeof(address), AF_INET6 ) )
 		{
 			closesocket(newsocket);
 			return INVALID_SOCKET;
@@ -1120,7 +1124,7 @@ static void NET_SetMulticast6( void )
 {
 	struct sockaddr_in6 addr;
 
-	if ( !*net_mcast6addr->string || !Sys_StringToSockaddr( net_mcast6addr->string, (sockaddr_t *) &addr, sizeof( addr ), AF_INET6, SOCK_DGRAM ) )
+	if ( !*net_mcast6addr->string || !Sys_StringToSockaddr( net_mcast6addr->string, (sockaddr_t *) &addr, sizeof( addr ), AF_INET6 ) )
 	{
 		Com_Printf("WARNING: NET_JoinMulticast6: Incorrect multicast address given, "
 			   "please set cvar %s to a sane value.\n", net_mcast6addr->name);
@@ -1224,6 +1228,7 @@ NET_OpenSocks
 */
 static void NET_OpenSocks( int port ) {
 	struct sockaddr_in	address;
+	struct hostent		*h;
 	int					len;
 	unsigned char		buf[4 + 255 * 2];
 	socks5_request_t	cmd;
@@ -1237,11 +1242,18 @@ static void NET_OpenSocks( int port ) {
 		return;
 	}
 
-	if ( !Sys_StringToSockaddr( net_socksServer->string, (sockaddr_t*)&address, sizeof( address ), AF_INET, SOCK_STREAM ) ) {
-		Com_Printf( "WARNING: %s failed\n", __func__ );
+	h = gethostbyname( net_socksServer->string );
+	if ( h == NULL ) {
+		Com_Printf( "WARNING: NET_OpenSocks: gethostbyname: %s\n", NET_ErrorString() );
+		return;
+	}
+	if ( h->h_addrtype != AF_INET ) {
+		Com_Printf( "WARNING: NET_OpenSocks: gethostbyname: address type was not AF_INET\n" );
 		return;
 	}
 
+	address.sin_family = AF_INET;
+	address.sin_addr.s_addr = *(uint32_t *)h->h_addr_list[0];
 	address.sin_port = htons( net_socksPort->integer );
 
 	if ( connect( socks_socket, ( struct sockaddr * )&address, sizeof( struct sockaddr_in ) ) == SOCKET_ERROR ) {
@@ -1610,75 +1622,75 @@ static qboolean NET_GetCvars( void ) {
 	net_enabled->modified = qfalse;
 
 	net_ip = Cvar_Get( "net_ip", "0.0.0.0", CVAR_LATCH );
-	Cvar_SetDescription( net_ip, "Specifies network interface address client should use for outgoing UDP connections using IPv4." );
-	modified += net_ip->modified;
+    Cvar_SetDescription(net_ip, "The IP of the local machine, supplied by the OS\nDefault: 0.0.0.0 (bind all)");
+    modified += net_ip->modified;
 	net_ip->modified = qfalse;
 
 	net_port = Cvar_Get( "net_port", va( "%i", PORT_SERVER ), CVAR_LATCH | CVAR_NORESTART );
-	Cvar_CheckRange( net_port, "0", "65535", CV_INTEGER );
-	Cvar_SetDescription( net_port, "The network port to use (IPv4)." );
-	modified += net_port->modified;
+    Cvar_SetDescription(net_port, "Set port number server will use if you want to run more than one instance\nDefault: 27960");
+    Cvar_CheckRange( net_port, "0", "65535", CV_INTEGER );
+    modified += net_port->modified;
 	net_port->modified = qfalse;
-	
+
 #ifdef USE_IPV6
 	net_ip6 = Cvar_Get( "net_ip6", "::", CVAR_LATCH );
-	Cvar_SetDescription( net_ip6, "Specifies network interface address client should use for outgoing UDP connections using IPv6." );
-	modified += net_ip6->modified;
+    Cvar_SetDescription(net_ip6, "The IPv6 of the local machine\nDefault: :: (bind all)");
+    modified += net_ip6->modified;
 	net_ip6->modified = qfalse;
 
 	net_port6 = Cvar_Get( "net_port6", va( "%i", PORT_SERVER ), CVAR_LATCH | CVAR_NORESTART );
+    Cvar_SetDescription(net_port6, "Set port number server will use if you want to run more than one instance\nDefault: 27960");
 	Cvar_CheckRange( net_port6, "0", "65535", CV_INTEGER );
-	Cvar_SetDescription( net_port6, "The network port to use (IPv6)." );
 	modified += net_port6->modified;
 	net_port6->modified = qfalse;
 
 	// Some cvars for configuring multicast options which facilitates scanning for servers on local subnets.
 	net_mcast6addr = Cvar_Get( "net_mcast6addr", NET_MULTICAST_IP6, CVAR_LATCH | CVAR_ARCHIVE_ND );
-	Cvar_SetDescription( net_mcast6addr, "Multicast address to use for scanning for IPv6 servers on the local network." );
-	modified += net_mcast6addr->modified;
+    Cvar_SetDescription(net_mcast6addr, "The IPv6 multicast address\nDefault: " XSTRING(NET_MULTICAST_IP6));
+    modified += net_mcast6addr->modified;
 	net_mcast6addr->modified = qfalse;
 
 #ifdef _WIN32
 	net_mcast6iface = Cvar_Get( "net_mcast6iface", "0", CVAR_LATCH | CVAR_ARCHIVE_ND );
 #else
 	net_mcast6iface = Cvar_Get( "net_mcast6iface", "", CVAR_LATCH | CVAR_ARCHIVE_ND );
+    Cvar_SetDescription(net_mcast6iface, "IPv6 multicast interface\nDefault: empty");
 #endif
-	Cvar_SetDescription( net_mcast6iface, "Outgoing interface to use for scan." );
 	modified += net_mcast6iface->modified;
 	net_mcast6iface->modified = qfalse;
 #endif // USE_IPV6
 
 	net_socksEnabled = Cvar_Get( "net_socksEnabled", "0", CVAR_LATCH | CVAR_ARCHIVE_ND );
-	Cvar_CheckRange( net_socksEnabled, "0", "1", CV_INTEGER );
-	Cvar_SetDescription( net_socksEnabled, "Toggle the use of network socks 5 protocol enabling firewall access (can only be set at initialization time from the OS command line)." );
-	modified += net_socksEnabled->modified;
+    Cvar_SetDescription(net_socksEnabled, "Toggle the use of network socks 5 protocol enabling firewall access\nDefault: 0");
+    Cvar_CheckRange( net_socksEnabled, "0", "1", CV_INTEGER );
+    modified += net_socksEnabled->modified;
 	net_socksEnabled->modified = qfalse;
 
 	net_socksServer = Cvar_Get( "net_socksServer", "", CVAR_LATCH | CVAR_ARCHIVE_ND );
-	Cvar_SetDescription( net_socksServer, "Set the address (name or IP number) of the SOCKS server (firewall machine), NOT a Q3ATEST server (can only be set at initialization time from the OS command line)." );
-	modified += net_socksServer->modified;
+    Cvar_SetDescription(net_socksServer, "Set the address (name or IP number) of the SOCKS server\nDefault: empty");
+    modified += net_socksServer->modified;
 	net_socksServer->modified = qfalse;
 
 	net_socksPort = Cvar_Get( "net_socksPort", "1080", CVAR_LATCH | CVAR_ARCHIVE_ND );
-	Cvar_CheckRange( net_socksPort, "0", "65535", CV_INTEGER );
-	Cvar_SetDescription( net_socksPort, "Set proxy and/or firewall port, default is 1080 (can only be set at initialization time from the OS command line)." );
-	modified += net_socksPort->modified;
+    Cvar_SetDescription( net_socksPort, "Set proxy and/or firewall port default is 1080\nDefault: 1080");
+    Cvar_CheckRange( net_socksPort, "0", "65535", CV_INTEGER );
+    modified += net_socksPort->modified;
 	net_socksPort->modified = qfalse;
 
 	net_socksUsername = Cvar_Get( "net_socksUsername", "", CVAR_LATCH | CVAR_ARCHIVE_ND );
-	Cvar_SetDescription( net_socksUsername, "Variable holds username for socks firewall. Supports no authentication and username/password authentication method (RFC-1929). It does NOT support GSS-API method (RFC-1961) authentication (can only be set at initialization time from the OS command line)." );
-	modified += net_socksUsername->modified;
+    Cvar_SetDescription(net_socksUsername, "Username for socks firewall supports no authentication and username/password authentication method\nDefault: empty");
+    modified += net_socksUsername->modified;
 	net_socksUsername->modified = qfalse;
 
 	net_socksPassword = Cvar_Get( "net_socksPassword", "", CVAR_LATCH | CVAR_ARCHIVE_ND );
-	Cvar_SetDescription( net_socksPassword, "Variable holds password for socks firewall access. Supports no authentication and username/password authentication method (RFC-1929). It does NOT support GSS-API method (RFC-1961) authentication (can only be set at initialization time from the OS command line)." );
-	modified += net_socksPassword->modified;
+    Cvar_SetDescription(net_socksPassword, "Password for socks firewall access supports no authentication and username/password authentication method\nDefault: empty");
+    modified += net_socksPassword->modified;
 	net_socksPassword->modified = qfalse;
 
 	net_dropsim = Cvar_Get( "net_dropsim", "", CVAR_TEMP );
-	Cvar_SetDescription( net_dropsim, "Simulated packet drops." );
+    Cvar_SetDescription(net_dropsim, "Simulate packet dropping events for debugging purposes in percent\nDefault: empty");
 
-	return modified ? qtrue : qfalse;
+    return modified ? qtrue : qfalse;
 }
 
 
@@ -1787,6 +1799,7 @@ void NET_Init( void ) {
 	NET_Config( qtrue );
 	
 	Cmd_AddCommand( "net_restart", NET_Restart_f );
+    Cmd_SetDescription( "net_restart", "Reset all the network related variables like rate\nusage: net_restart");
 }
 
 
@@ -1854,7 +1867,7 @@ static void NET_Event( const fd_set *fdr )
 ====================
 NET_Sleep
 
-Sleeps msec or until something happens on the network
+Sleeps usec or until something happens on the network
 
 Returns qfalse on network event or qtrue in all other cases
 ====================
@@ -1895,10 +1908,7 @@ qboolean NET_Sleep( int timeout )
 		Sleep( timeout / 1000 );
 		return qtrue;
 #else
-		struct timespec req;
-		req.tv_sec = timeout / 1000000;
-		req.tv_nsec = ( timeout % 1000000 ) * 1000;
-		nanosleep( &req, NULL );
+		usleep( timeout );
 		return qtrue;
 #endif
 	}

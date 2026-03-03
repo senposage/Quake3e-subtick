@@ -121,7 +121,15 @@ typedef struct {
 	void	(*VertexLighting)( qboolean allowed );
 	void	(*SyncRender)( void );
 
-
+    void  (*SetDvrFrame)( float x, float y, float height, float width );
+    void	(*ReloadShaders)( qboolean createNew );
+    qhandle_t  (*CreateShaderFromImageBytes)(const char* name, byte *pic, int width, int height);
+    void (*FastCapture)(byte *data);
+    void (*FastCaptureOld)(byte *captureBuffer, byte *encodeBuffer);
+    void (*UpdateMode)(glconfig_t *glconfigOut);
+    void (*UpdateModel)(const char *name);
+    void (*UpdateShader)(char *shaderName, int lightmapIndex);
+    void (*ResetBannerSpy)( void );
 } refexport_t;
 
 //
@@ -129,10 +137,10 @@ typedef struct {
 //
 typedef struct {
 	// print message on the local console
-	void	FORMAT_PRINTF(2, 3) (QDECL *Printf)( printParm_t printLevel, const char *fmt, ... );
+	void	(QDECL *Printf)( printParm_t printLevel, const char *fmt, ... ) __attribute__ ((format (printf, 2, 3)));
 
 	// abort the game
-	void	NORETURN_PTR FORMAT_PRINTF(2, 3)(QDECL *Error)( errorParm_t errorLevel, const char *fmt, ... );
+	void	(QDECL *Error)( errorParm_t errorLevel, const char *fmt, ... ) __attribute__ ((noreturn, format (printf, 2, 3)));
 
 	// milliseconds should only be used for profiling, never
 	// for anything game related.  Get time from the refdef
@@ -171,6 +179,7 @@ typedef struct {
 
 	void	(*Cmd_AddCommand)( const char *name, void(*cmd)(void) );
 	void	(*Cmd_RemoveCommand)( const char *name );
+	void	(*Cmd_SetDescription)( const char *name, char *description );
 
 	int		(*Cmd_Argc) (void);
 	const char	*(*Cmd_Argv) (int i);
@@ -212,13 +221,12 @@ typedef struct {
 	int		(*Com_RealTime)( qtime_t *qtime );
 
 	// platform-dependent functions
-	void(*GLimp_InitGamma)(glconfig_t *config);
-	void(*GLimp_SetGamma)(unsigned char red[256], unsigned char green[256], unsigned char blue[256]);
-
-	// OpenGL
 	void	(*GLimp_Init)( glconfig_t *config );
 	void	(*GLimp_Shutdown)( qboolean unloadDLL );
 	void	(*GLimp_EndFrame)( void );
+	void	(*GLimp_InitGamma)( glconfig_t *config );
+	void	(*GLimp_SetGamma)( unsigned char red[256], unsigned char green[256], unsigned char blue[256] );
+
 	void*	(*GL_GetProcAddress)( const char *name );
 
 	// Vulkan

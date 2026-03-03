@@ -67,20 +67,20 @@ __asm {
 	mov edi,snd_out
 	mov ebx,snd_linear_count
 	test ebx,ebx
-	jz LExit
+	jz	LExit
 	mov ecx,esi
 	and ecx,63
 	jz LMain
 	and ecx,3
 	jnz LTail
 	shr ecx,2
-	not ecx
+	not ecx		
 	add ecx,17
 LClamp1:
 	mov eax,[esi]
 	sar eax,8
 	cmp eax,32767
-	jg LClampHigh1
+	jg	LClampHigh1
 	cmp eax,-32768
 	jnl LClampDone1
 	mov eax,-32768
@@ -92,9 +92,9 @@ LClampDone1:
 	add esi,4
 	add edi,2
 	dec ebx
-	jz LExit
+	jz	LExit
 	dec ecx
-	jnz LClamp1
+	jnz	LClamp1
 LMain:
 	mov ecx,ebx
 	shr ecx,4
@@ -131,12 +131,12 @@ LAgain:
 	jnz LAgain
 LTail:
 	test ebx, ebx
-	jz LEnd
+	jz	LEnd
 LClamp2:
 	mov eax,[esi]
 	sar eax,8
 	cmp eax,32767
-	jg LClampHigh2
+	jg	LClampHigh2
 	cmp eax,-32768
 	jnl LClampDone2
 	mov eax,-32768
@@ -150,7 +150,7 @@ LClampDone2:
 	dec ebx
 	jnz	LClamp2
 LEnd:
-	emms
+    emms
 LExit:
 	pop edi
 	pop esi
@@ -176,7 +176,7 @@ __asm {
 	and ecx,3
 	jnz LTail
 	shr ecx,2
-	not ecx
+	not ecx		
 	add ecx,17
 LClamp1:
 	mov eax,[esi]
@@ -265,7 +265,7 @@ LExit:
 
 #endif // id386
 
-#if idx64 && (!defined (_MSC_VER) || defined(USE_WIN32_ASM))
+#if idx64 && defined (_MSC_VER)
 void S_WriteLinearBlastStereo16_SSE_x64( int*, short*, int );
 #endif
 
@@ -291,7 +291,7 @@ void S_TransferStereo16( unsigned long *pbuf, int endtime )
 		snd_linear_count <<= 1;
 
 		// write a linear blast of samples
-#if id386 && defined (_MSC_VER)  && defined (USE_WIN32_ASM)
+#if id386 && defined (_MSC_VER)
 		if ( CPU_Flags & CPU_SSE )
 			S_WriteLinearBlastStereo16_SSE();
 		else
@@ -299,7 +299,7 @@ void S_TransferStereo16( unsigned long *pbuf, int endtime )
 			S_WriteLinearBlastStereo16_MMX();
 		else
 #endif
-#if idx64 && (!defined (_MSC_VER) || defined (USE_WIN32_ASM))
+#if idx64 && defined (_MSC_VER)
 		S_WriteLinearBlastStereo16_SSE_x64( snd_p, snd_out, snd_linear_count );
 #else
 		S_WriteLinearBlastStereo16();
@@ -344,23 +344,21 @@ static void S_TransferPaintBuffer( int endtime, byte *buffer )
 		p = (int *) paintbuffer;
 		count = (endtime - s_paintedtime) * dma.channels;
 		out_mask = dma.samples - 1; 
-		out_idx = ( s_paintedtime * dma.channels ) & out_mask;
+		out_idx = s_paintedtime * dma.channels & out_mask;
 		step = 3 - dma.channels;
 
 		if ( dma.samplebits == 32 && dma.isfloat )
 		{
-			const float rdiv = 1.0f / (32768.0f * 256.0f - 128.0f); // 8388480.0f
 			float *out = (float *) pbuf;
 			while ( count-- > 0 )
 			{
-				val = *p;
+				val = *p >> 8;
 				p += step;
-				if (val > 0x7fff00) {
-					val = 0x7fff00;
-				} else if (val < -32768 * 256) {
-					val = -32768 * 256;
-				}
-				out[out_idx] = (float)(val + 128) * rdiv;
+				if (val > 0x7fff)
+					val = 0x7fff;
+				else if (val < -32767)  /* clamp to one less than max to make division max out at -1.0f. */
+					val = -32767;
+				out[out_idx] = ((float) val) / 32767.0f;
 				out_idx = (out_idx + 1) & out_mask;
 			}
 		}
@@ -399,7 +397,7 @@ static void S_TransferPaintBuffer( int endtime, byte *buffer )
 	if ( CL_VideoRecording() ) {
 		//count = (endtime - s_paintedtime) * dma.channels;
 		count = (clc.aviFrameEndTime - s_paintedtime) * dma.channels;
-		out_idx = ( s_paintedtime * dma.channels ) % dma.samples;
+		out_idx = s_paintedtime * dma.channels % dma.samples;
 		while ( count > 0 ) {
 			int n = count;
 			if ( n + out_idx > dma.samples )
@@ -742,7 +740,7 @@ void S_PaintChannels( int endtime ) {
 				count = sc->soundLength - sampleOffset;
 			}
 
-			if ( count > 0 ) {
+			if ( count > 0 ) {	
 				if( sc->soundCompressionMethod == 1) {
 					S_PaintChannelFromADPCM		(ch, sc, count, sampleOffset, ltime - s_paintedtime);
 				} else if( sc->soundCompressionMethod == 2) {

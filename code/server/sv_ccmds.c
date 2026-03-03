@@ -42,7 +42,7 @@ Returns the player with player id or name from Cmd_Argv(1)
 client_t *SV_GetPlayerByHandle( void ) {
 	client_t	*cl;
 	int			i;
-	char		*s;
+	const char		*s;
 	char		cleanName[ MAX_NAME_LENGTH ];
 
 	// make sure server is running
@@ -107,7 +107,7 @@ static client_t *SV_GetPlayerByNum( void ) {
 	client_t	*cl;
 	int			i;
 	int			idnum;
-	char		*s;
+	const char		*s;
 
 	// make sure server is running
 	if ( !com_sv_running->integer ) {
@@ -152,8 +152,8 @@ Restart the server on a different map
 ==================
 */
 static void SV_Map_f( void ) {
-	char		*cmd;
-	char		*map;
+	const char	*cmd;
+	const char	*map;
 	qboolean	killBots, cheat;
 	char		expanded[MAX_QPATH];
 	char		mapname[MAX_QPATH];
@@ -1481,7 +1481,7 @@ static void SVD_StartDemoFile(client_t *client, const char *path) {
     byte            buffer[MAX_MSGLEN];
     fileHandle_t    file;
 #ifdef USE_URT_DEMO
-    char            *s;
+    const char            *s;
     int             v, size;
 #endif
 
@@ -1718,7 +1718,7 @@ static void SV_NameServerDemo(char *filename, int length, const client_t *client
     }
 }
 
-static void SV_StartRecordOne(client_t *client, char *filename) {
+static void SV_StartRecordOne(client_t *client, const char *filename) {
 
     char demoName[ MAX_QPATH ];
 
@@ -1967,7 +1967,7 @@ static void SV_ClientScreenshot_f( void ) {
 SV_CompleteMapName
 ==================
 */
-static void SV_CompleteMapName( char *args, int argNum ) {
+static void SV_CompleteMapName( const char *args, int argNum ) {
 	if ( argNum == 2 ) 	{
 		if ( sv_pure->integer ) {
 			Field_CompleteFilename( "maps", "bsp", qtrue, FS_MATCH_PK3s | FS_MATCH_STICK );

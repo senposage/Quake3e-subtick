@@ -96,7 +96,7 @@ static LPWSTR DeviceID = NULL;
 static qboolean doSndRestart = qfalse;
 
 static IAudioRenderClient	*iAudioRenderClient = NULL;
-static IAudioClient			*iAudioClient = NULL; 
+static IAudioClient			*iAudioClient = NULL;
 static IMMDeviceEnumerator	*pEnumerator = NULL;
 static IMMDevice			*iMMDevice = NULL;
 
@@ -270,7 +270,7 @@ err_exit:
 
 
 static BOOL ValidFormat( const WAVEFORMATEXTENSIBLE *format, const WORD wFormatTag, const GUID *SubFormat ) {
-	
+
 	if ( format->Format.wFormatTag == wFormatTag )
 	{
 		return TRUE;
@@ -297,7 +297,7 @@ NotificationClient_t;
 
 static HRESULT STDMETHODCALLTYPE QueryInterface( IMMNotificationClient *this, REFIID riid, VOID **ppvInterface )
 {
-	if ( !memcmp( riid, &IID_IUnknown, sizeof( GUID ) ) || !memcmp( riid, &IID_IMMNotificationClient, sizeof( GUID ) ) ) 
+	if ( !memcmp( riid, &IID_IUnknown, sizeof( GUID ) ) || !memcmp( riid, &IID_IMMNotificationClient, sizeof( GUID ) ) )
 	{
 		*ppvInterface = (void**)this;
 		this->lpVtbl->AddRef( this );
@@ -433,7 +433,6 @@ static qboolean SNDDMA_InitWASAPI( void )
 		case 48: dma.speed = 48000; break;
 		case 44: dma.speed = 44100; break;
 		case 11: dma.speed = 11025; break;
-		case 8:  dma.speed = 8000;  break;
 		case 22:
 		default: dma.speed = 22050; break;
 	};
@@ -521,7 +520,7 @@ static qboolean SNDDMA_InitWASAPI( void )
 		// because we will call Initialize() with hnsBufferDuration=0 to select minimal buffer size
 		REFERENCE_TIME defDuration;
 		iAudioClient->lpVtbl->GetDevicePeriod( iAudioClient, &defDuration, NULL );
-		Com_Printf( S_COLOR_CYAN "WASAPI buffer duration: %i.%i millisecons\n", 
+		Com_Printf( S_COLOR_CYAN "WASAPI buffer duration: %i.%i millisecons\n",
 			(int)(defDuration / 10000), (int)(( ( defDuration + 500 ) / 1000 ) % 10) );
 	}
 
@@ -548,7 +547,7 @@ static qboolean SNDDMA_InitWASAPI( void )
 	}
 
 	Com_DPrintf( "WASAPI buffer frame count: %i\n", bufferFrameCount );
-	
+
 	dma.submission_chunk = 1;
 	dma.buffer = buffer;
 	dma.isfloat = isfloat;
@@ -629,6 +628,7 @@ error2:
 
 	if ( notification_client.lpVtbl->QueryInterface ) {
 		pEnumerator->lpVtbl->UnregisterEndpointNotificationCallback( pEnumerator, (IMMNotificationClient *)&notification_client );
+		Com_Memset( &notification_client, 0, sizeof( notification_client ) );
 	}
 
 	pEnumerator->lpVtbl->Release( pEnumerator ); pEnumerator = NULL;
@@ -765,6 +765,10 @@ void SNDDMA_Shutdown( void ) {
 }
 
 
+#ifndef NO_DMAHD
+qboolean dmaHD_Enabled(void);
+#endif
+
 /*
 ==================
 SNDDMA_Init
@@ -779,16 +783,25 @@ qboolean SNDDMA_Init( void ) {
 	const char *defdrv;
 	cvar_t *s_driver;
 
-	if ( IsWindows7OrGreater() )
+#ifndef NO_DMAHD
+	if ( IsWindows7OrGreater() && !dmaHD_Enabled())
+#else
+    if ( IsWindows7OrGreater() )
+#endif
 		defdrv = "wasapi";
-	else
+    else
 		defdrv = "dsound";
 
-	s_driver = Cvar_Get( "s_driver", defdrv, CVAR_LATCH | CVAR_ARCHIVE_ND );
-
+    s_driver = Cvar_Get( "s_driver", defdrv, CVAR_LATCH | CVAR_ARCHIVE_ND );
 	Cvar_SetDescription( s_driver, "Specify sound subsystem in win32 environment:\n"
-		" dsound - DirectSound\n"
-		" wasapi - WASAPI\n" );
+		" dsound - DirectSound (forced with `dmaHD_enable 1`)\n"
+        " wasapi - WASAPI (cannot be used with `dmaHD_enable 1`)\n" );
+
+#ifndef NO_DMAHD
+	if ( dmaHD_Enabled() ) {
+	    Cvar_Set("s_driver", "dsound");
+	}
+#endif
 #endif
 
 	memset( &dma, 0, sizeof( dma ) );
@@ -883,14 +896,24 @@ static qboolean SNDDMA_InitDS( void )
 		default: dma.speed = 22050; break;
 	};
 
-	memset( &format, 0, sizeof( format ) );
+#ifndef NO_DMAHD
+    if (dmaHD_Enabled())
+    {
+        // p5yc0runn3r - Fix dmaHD sound to 44KHz, Stereo and 16 bits per sample.
+        dma.speed = 44100;
+        dma.channels = 2;
+        dma.samplebits = 16;
+    }
+#endif
+
+	memset (&format, 0, sizeof(format));
 	format.wFormatTag = WAVE_FORMAT_PCM;
 	format.nChannels = dma.channels;
 	format.wBitsPerSample = dma.samplebits;
 	format.nSamplesPerSec = dma.speed;
 	format.nBlockAlign = format.nChannels * format.wBitsPerSample / 8;
 	format.cbSize = 0;
-	format.nAvgBytesPerSec = format.nSamplesPerSec*format.nBlockAlign; 
+	format.nAvgBytesPerSec = format.nSamplesPerSec*format.nBlockAlign;
 
 	memset( &dsbuf, 0, sizeof( dsbuf ) );
 	dsbuf.dwSize = sizeof(DSBUFFERDESC);
@@ -988,9 +1011,9 @@ int SNDDMA_GetDMAPos( void ) {
 		DWORD	dwWriteCursor;
 
 		// write position is the only safe position to start update
-		pDSBuf->lpVtbl->GetCurrentPosition( pDSBuf, NULL, &dwWriteCursor );
+		pDSBuf->lpVtbl->GetCurrentPosition(pDSBuf, NULL, &dwWriteCursor);
 
-		return ( dwWriteCursor >> sample16 ) & ( dma.samples - 1 );
+        return ( dwWriteCursor >> sample16 ) & ( dma.samples - 1 );
 	}
 
 	return 0;
