@@ -89,14 +89,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [arm64, x86, x64]
+        arch: [x86, x64]
         btype: [Release, Debug]
         include:
-          - arch: arm64
-            platform: ARM64
-            suffix: .arm64
-            pkg_suffix: arm64
-
           - arch: x86
             platform: Win32
             pkg_suffix: x86
@@ -197,92 +192,9 @@ jobs:
         if-no-files-found: error
         retention-days: 5
 
-  ubuntu-arm64:
-    name: ${{ matrix.btype }} Ubuntu ${{ matrix.arch }}
-    runs-on: ubuntu-22.04-arm
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [arm64]
-        cc: [gcc]
-        btype: [Release, Debug]
-        include:
-          - btype: Release
-            rule: install
-
-          - btype: Debug
-            rule: debug
-
-    steps:
-
-    - name: Install tools
-      run: |
-        sudo apt-get -qq update
-        sudo apt-get install -y make gcc g++
-        sudo apt-get -y install libcurl4-openssl-dev mesa-common-dev libxxf86dga-dev libxrandr-dev libxxf86vm-dev libasound-dev libsdl2-dev
-
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Build
-      if: ${{ github.event_name != 'release' || matrix.btype != 'Debug' }}
-      run: |
-          make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=vulkan CNAME=quake3e-vulkan BUILD_SERVER=0
-          make clean ARCH=${{ matrix.arch }}
-          make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl
-
-    - uses: actions/upload-artifact@v4
-      if: matrix.cc == 'gcc' && matrix.btype == 'Release'
-      with:
-        name: linux-${{ matrix.arch }}
-        path: bin
-        if-no-files-found: error
-        retention-days: 5
-
-  macos:
-    name: ${{ matrix.btype }} macOS ${{ matrix.arch }}
-    runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86_64, aarch64]
-        cc: [clang]
-        btype: [Release, Debug]
-        include:
-          - btype: Release
-            rule: install
-
-          - btype: Debug
-            rule: debug
-
-    steps:
-
-    - name: Install tools
-      run: brew install coreutils sdl2
-
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Build
-      if: ${{ github.event_name != 'release' || matrix.btype != 'Debug' }}
-      run: |
-        make ${{ matrix.rule }} -j$(sysctl -n hw.logicalcpu) ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin INSTALL=ginstall USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=vulkan CNAME=quake3e-vulkan BUILD_SERVER=0 STRIP=echo
-        make clean ARCH=${{ matrix.arch }}
-        make ${{ matrix.rule }} -j$(sysctl -n hw.logicalcpu) ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin INSTALL=ginstall USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl STRIP=echo
-
-    - uses: actions/upload-artifact@v4
-      if: matrix.cc == 'clang' && matrix.btype == 'Release'
-      with:
-        name: macos-${{ matrix.arch }}
-        path: bin
-        if-no-files-found: error
-        retention-days: 5
-
   create-release:
     if: (github.ref == 'refs/heads/master' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
-    needs: [windows-msys, windows-msvc, ubuntu-x86, ubuntu-arm64, macos]
+    needs: [windows-msys, windows-msvc, ubuntu-x86]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -294,12 +206,8 @@ jobs:
         run: |
           7z a -r quake3e-subtick-linux-x86.zip            ./linux-x86/*
           7z a -r quake3e-subtick-linux-x86_64.zip         ./linux-x86_64/*
-          7z a -r quake3e-subtick-linux-arm64.zip          ./linux-arm64/*
           7z a -r quake3e-subtick-windows-gcc-x86.zip      ./windows-gcc-x86/*
           7z a -r quake3e-subtick-windows-gcc-x86_64.zip   ./windows-gcc-x86_64/*
-          7z a -r quake3e-subtick-windows-msvc-arm64.zip   ./windows-msvc-arm64/*
-          7z a -r quake3e-subtick-macos-x86_64.zip         ./macos-x86_64/*
-          7z a -r quake3e-subtick-macos-aarch64.zip        ./macos-aarch64/*
 
       - name: Create latest build
         uses: czietz/action-automatic-releases@latest
@@ -313,7 +221,7 @@ jobs:
 
   update-release:
     if: ${{ github.event_name == 'release' }}
-    needs: [windows-msys, windows-msvc, ubuntu-x86, ubuntu-arm64, macos]
+    needs: [windows-msys, windows-msvc, ubuntu-x86]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -327,23 +235,11 @@ jobs:
           - artifact_dir: linux-x86_64
             artifact_name: quake3e-subtick-linux-x86_64.zip
 
-          - artifact_dir: linux-arm64
-            artifact_name: quake3e-subtick-linux-arm64.zip
-
           - artifact_dir: windows-gcc-x86
             artifact_name: quake3e-subtick-windows-x86.zip
 
           - artifact_dir: windows-gcc-x86_64
             artifact_name: quake3e-subtick-windows-x86_64.zip
-
-          - artifact_dir: windows-msvc-arm64
-            artifact_name: quake3e-subtick-windows-arm64.zip
-
-          - artifact_dir: macos-x86_64
-            artifact_name: quake3e-subtick-macos-x86_64.zip
-
-          - artifact_dir: macos-aarch64
-            artifact_name: quake3e-subtick-macos-aarch64.zip
 
     steps:
       - name: Download Artifacts
