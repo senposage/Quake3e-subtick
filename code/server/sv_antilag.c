@@ -278,6 +278,12 @@ Previous code used svs.time - cl->ping (full RTT), which over-rewound
 by approximately half the RTT.  For a 40 ms ping player this meant
 a 40 ms rewind when the correct value is ~20 ms, causing bullets to
 register against positions further in the past than the client saw.
+
+CRITICAL: all time comparisons use sv.time, NOT svs.time.
+Snapshots send sv.time to clients, so lastUsercmd.serverTime is in the
+sv.time domain.  svs.time is a different clock (persists across map
+changes) and using it here would create a constant offset that forces
+every shot to clamp to max rewind.
 */
 static int SV_Antilag_GetClientFireTime( int shooterNum ) {
     client_t *cl;
@@ -285,23 +291,29 @@ static int SV_Antilag_GetClientFireTime( int shooterNum ) {
     int maxRewind;
 
     if ( shooterNum < 0 || shooterNum >= sv_maxclients->integer )
-        return svs.time;
+        return sv.time;
 
     cl = &svs.clients[shooterNum];
 
     // Use the client's actual command time — this is exactly what the
     // QVM sees as AttackTime and represents the client's perception of
     // server time when they pressed fire.
+    //
+    // lastUsercmd.serverTime is in the sv.time domain because the client
+    // calibrates its server time estimate from snapshots, and snapshots
+    // use sv.time (not svs.time).  All clamp comparisons below must also
+    // use sv.time to stay in the same domain as the shadow history
+    // timestamps (which record at sv.time).
     fireTime = cl->lastUsercmd.serverTime;
 
     // Clamp: never rewind more than sv_antilagMaxMs
     maxRewind = sv_antilagMaxMs ? sv_antilagMaxMs->integer : SV_ANTILAG_MAX_REWIND_MS;
-    if ( svs.time - fireTime > maxRewind )
-        fireTime = svs.time - maxRewind;
+    if ( sv.time - fireTime > maxRewind )
+        fireTime = sv.time - maxRewind;
 
     // Clamp: never go into the future
-    if ( fireTime > svs.time )
-        fireTime = svs.time;
+    if ( fireTime > sv.time )
+        fireTime = sv.time;
 
     return fireTime;
 }
@@ -494,10 +506,15 @@ void SV_Antilag_RecordPositions( void ) {
     // Bots have zero lag as shooters (InterceptTrace skips bot shooters),
     // but they must be recorded so human players shooting AT bots can
     // rewind bot positions for proper lag compensation.
+    //
+    // Timestamps use sv.time (not svs.time) because the client's
+    // lastUsercmd.serverTime is calibrated from snapshots which use
+    // sv.time.  Using the same time domain ensures the shadow lookup
+    // in GetClientFireTime finds the correct history entries.
     for ( i = 0; i < sv_maxclients->integer; i++ ) {
         client_t *cl = &svs.clients[i];
         if ( cl->state != CS_ACTIVE ) continue;
-        SV_Antilag_RecordClient( i, svs.time );
+        SV_Antilag_RecordClient( i, sv.time );
     }
 }
 
@@ -652,9 +669,9 @@ qboolean SV_Antilag_InterceptTrace(
 
     if ( sv_antilagDebug && sv_antilagDebug->integer >= 1 ) {
         client_t *shooter = &svs.clients[ passEntityNum ];
-        int rewindMs = svs.time - fireTime;
-        Com_Printf( "AL shot cl[%d] ping=%d rewind=%dms (svs.time=%d fireTime=%d)\n",
-            passEntityNum, shooter->ping, rewindMs, svs.time, fireTime );
+        int rewindMs = sv.time - fireTime;
+        Com_Printf( "AL shot cl[%d] ping=%d rewind=%dms (sv.time=%d fireTime=%d)\n",
+            passEntityNum, shooter->ping, rewindMs, sv.time, fireTime );
     }
 
     // Rewind all other clients into shadow positions
