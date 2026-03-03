@@ -25,121 +25,8 @@ permissions:
   contents: read
 
 jobs:
-  windows-msys:
-    name: ${{ matrix.btype }} Windows-${{ matrix.cc }} ${{ matrix.arch }}
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86, x86_64]
-        cc: [gcc]
-        btype: [Release, Debug]
-        include:
-          - arch: x86
-            msystem: MINGW32
-            prefix: mingw-w64-i686
-
-          - arch: x86_64
-            msystem: MINGW64
-            prefix: mingw-w64-x86_64
-
-          - btype: Release
-            rule: install
-
-          - btype: Debug
-            rule: debug
-
-    defaults:
-      run:
-        shell: msys2 {0}
-
-    steps:
-
-    - uses: msys2/setup-msys2@v2
-      with:
-        install: base-devel ${{ matrix.prefix }}-binutils ${{ matrix.prefix }}-make ${{ matrix.prefix }}-${{ matrix.cc }}
-        msystem: ${{ matrix.msystem }}
-        path-type: minimal
-        release: false
-        update: false
-        cache: false
-
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Build
-      if: ${{ github.event_name != 'release' || matrix.btype != 'Debug' }}
-      run: |
-        make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} COMPILE_ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=vulkan CNAME=quake3e-vulkan BUILD_SERVER=0
-        make clean ARCH=${{ matrix.arch }}
-        make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} COMPILE_ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl
-
-    - uses: actions/upload-artifact@v4
-      if: matrix.cc == 'gcc' && matrix.btype == 'Release'
-      with:
-        name: windows-${{ matrix.cc }}-${{ matrix.arch }}
-        path: bin
-        if-no-files-found: error
-        retention-days: 5
-
-  windows-msvc:
-    name: ${{ matrix.btype }} Windows-MSVC ${{ matrix.arch }}
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86, x64]
-        btype: [Release, Debug]
-        include:
-          - arch: x86
-            platform: Win32
-            pkg_suffix: x86
-
-          - arch: x64
-            platform: x64
-            suffix: .x64
-            pkg_suffix: x86_64
-
-    steps:
-
-    - uses: microsoft/setup-msbuild@v2
-
-    - uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Build
-      if: ${{ github.event_name != 'release' || matrix.btype != 'Debug' }}
-      run: |
-        mkdir bin
-
-        msbuild code\win32\msvc2017\quake3e-ded.vcxproj -p:TargetName=quake3e.ded,Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }} /p:PlatformToolset=v143
-        copy code\win32\msvc2017\output\quake3e.ded.exe bin\quake3e.ded${{ matrix.suffix }}.exe
-        msbuild code\win32\msvc2017\quake3e-ded.vcxproj -p:TargetName=quake3e.ded,Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }} -t:Clean
-
-        msbuild code\win32\msvc2017\renderer.vcxproj -p:Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }} /p:PlatformToolset=v143
-        msbuild code\win32\msvc2017\quake3e.vcxproj -p:TargetName=quake3e,Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }},UseWasapi=USE_WASAPI=0 /p:PlatformToolset=v143
-        copy code\win32\msvc2017\output\quake3e.exe bin\quake3e${{ matrix.suffix }}.exe
-        msbuild code\win32\msvc2017\renderer.vcxproj -p:Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }} -t:Clean
-        msbuild code\win32\msvc2017\quake3e.vcxproj -p:TargetName=quake3e,Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }},UseWasapi=USE_WASAPI=0 -t:Clean
-
-        msbuild code\win32\msvc2017\renderervk.vcxproj -p:Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }} /p:PlatformToolset=v143
-        msbuild code\win32\msvc2017\quake3e.vcxproj -p:TargetName=quake3e,Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }},UseWasapi=USE_WASAPI=0 /p:PlatformToolset=v143
-        copy code\win32\msvc2017\output\quake3e.exe bin\quake3e-vulkan${{ matrix.suffix }}.exe
-        msbuild code\win32\msvc2017\renderervk.vcxproj -p:Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }} -t:Clean
-        msbuild code\win32\msvc2017\quake3e.vcxproj -p:TargetName=quake3e,Configuration=${{ matrix.btype }},Platform=${{ matrix.platform }},UseWasapi=USE_WASAPI=0 -t:Clean
-
-    - uses: actions/upload-artifact@v4
-      if: ${{ matrix.btype == 'Release' }}
-      with:
-        name: windows-msvc-${{ matrix.pkg_suffix }}
-        path: bin
-        if-no-files-found: error
-        retention-days: 5
-
-  ubuntu-x86:
-    name: ${{ matrix.btype }} Ubuntu ${{ matrix.arch }}
+  linux:
+    name: ${{ matrix.btype }} Linux ${{ matrix.arch }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -178,7 +65,7 @@ jobs:
         submodules: recursive
 
     - name: Build
-      if: ${{ github.event_name != 'release' || matrix.btype != 'Debug' }}
+      if: ${{ matrix.btype == 'Debug' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
       run: |
         make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} COMPILE_ARCH=${{ matrix.arch }} CC=${{ matrix.cc }} DESTDIR=bin ${{ matrix.use_sdl }} USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=vulkan CNAME=quake3e-vulkan BUILD_SERVER=0
         make clean ARCH=${{ matrix.arch }}
@@ -192,9 +79,50 @@ jobs:
         if-no-files-found: error
         retention-days: 5
 
+  windows-mingw:
+    name: ${{ matrix.btype }} Windows-MinGW ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86, x86_64]
+        btype: [Release, Debug]
+        include:
+          - btype: Release
+            rule: install
+
+          - btype: Debug
+            rule: debug
+
+    steps:
+
+    - name: Install MinGW
+      run: |
+        sudo apt-get -qq update
+        sudo apt-get -y install mingw-w64
+
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Build
+      if: ${{ matrix.btype == 'Debug' || github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
+      run: |
+        make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} DESTDIR=bin PLATFORM=mingw32 USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=vulkan CNAME=quake3e-vulkan BUILD_SERVER=0
+        make clean ARCH=${{ matrix.arch }} PLATFORM=mingw32
+        make ${{ matrix.rule }} -j$(nproc) ARCH=${{ matrix.arch }} DESTDIR=bin PLATFORM=mingw32 USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl
+
+    - uses: actions/upload-artifact@v4
+      if: ${{ matrix.btype == 'Release' }}
+      with:
+        name: windows-mingw-${{ matrix.arch }}
+        path: bin
+        if-no-files-found: error
+        retention-days: 5
+
   create-release:
     if: (github.ref == 'refs/heads/master' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
-    needs: [windows-msys, windows-msvc, ubuntu-x86]
+    needs: [linux, windows-mingw]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -206,8 +134,8 @@ jobs:
         run: |
           7z a -r quake3e-subtick-linux-x86.zip            ./linux-x86/*
           7z a -r quake3e-subtick-linux-x86_64.zip         ./linux-x86_64/*
-          7z a -r quake3e-subtick-windows-gcc-x86.zip      ./windows-gcc-x86/*
-          7z a -r quake3e-subtick-windows-gcc-x86_64.zip   ./windows-gcc-x86_64/*
+          7z a -r quake3e-subtick-windows-mingw-x86.zip    ./windows-mingw-x86/*
+          7z a -r quake3e-subtick-windows-mingw-x86_64.zip ./windows-mingw-x86_64/*
 
       - name: Create latest build
         uses: czietz/action-automatic-releases@latest
@@ -221,7 +149,7 @@ jobs:
 
   update-release:
     if: ${{ github.event_name == 'release' }}
-    needs: [windows-msys, windows-msvc, ubuntu-x86]
+    needs: [linux, windows-mingw]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -235,10 +163,10 @@ jobs:
           - artifact_dir: linux-x86_64
             artifact_name: quake3e-subtick-linux-x86_64.zip
 
-          - artifact_dir: windows-gcc-x86
+          - artifact_dir: windows-mingw-x86
             artifact_name: quake3e-subtick-windows-x86.zip
 
-          - artifact_dir: windows-gcc-x86_64
+          - artifact_dir: windows-mingw-x86_64
             artifact_name: quake3e-subtick-windows-x86_64.zip
 
     steps:
