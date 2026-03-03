@@ -117,7 +117,7 @@ DEFORMATIONS
 RB_CalcDeformVertexes
 ========================
 */
-static void RB_CalcDeformVertexes( deformStage_t *ds )
+void RB_CalcDeformVertexes( deformStage_t *ds )
 {
 	int i;
 	vec3_t	offset;
@@ -169,7 +169,7 @@ RB_CalcDeformNormals
 Wiggle the normals for wavy environment mapping
 =========================
 */
-static void RB_CalcDeformNormals( deformStage_t *ds ) {
+void RB_CalcDeformNormals( deformStage_t *ds ) {
 	int i;
 	float	scale;
 	float	*xyz = ( float * ) tess.xyz;
@@ -201,14 +201,14 @@ static void RB_CalcDeformNormals( deformStage_t *ds ) {
 RB_CalcBulgeVertexes
 ========================
 */
-static void RB_CalcBulgeVertexes( deformStage_t *ds ) {
+void RB_CalcBulgeVertexes( deformStage_t *ds ) {
 	int i;
 	const float *st = ( const float * ) tess.texCoords[0][0];
 	float		*xyz = ( float * ) tess.xyz;
 	float		*normal = ( float * ) tess.normal;
 	double		now;
 
-	now = backEnd.refdef.floatTime * ds->bulgeSpeed;
+	now = backEnd.refdef.time * 0.001 * ds->bulgeSpeed;
 
 	for ( i = 0; i < tess.numVertexes; i++, xyz += 4, st += 2, normal += 4 ) {
 		int64_t off;
@@ -232,7 +232,7 @@ RB_CalcMoveVertexes
 A deformation that can move an entire surface along a wave path
 ======================
 */
-static void RB_CalcMoveVertexes( deformStage_t *ds ) {
+void RB_CalcMoveVertexes( deformStage_t *ds ) {
 	int			i;
 	float		*xyz;
 	float		*table;
@@ -262,12 +262,12 @@ DeformText
 Change a polygon into a bunch of text polygons
 =============
 */
-static void DeformText( const char *text ) {
+void DeformText( const char *text ) {
 	int		i;
 	vec3_t	origin, width, height;
 	int		len;
 	int		ch;
-	color4ub_t color;
+	byte	color[4];
 	float	bottom, top;
 	vec3_t	mid;
 
@@ -306,7 +306,7 @@ static void DeformText( const char *text ) {
 	tess.numIndexes = 0;
 	tess.numVertexes = 0;
 
-	color.u32 = ~0U;
+	color[0] = color[1] = color[2] = color[3] = 255;
 
 	// draw each character
 	for ( i = 0 ; i < len ; i++ ) {
@@ -410,7 +410,7 @@ static void AutospriteDeform( void ) {
 			VectorScale(up, axisLength, up);
 		}
 
-		RB_AddQuadStamp( mid, left, up, tess.vertexColors[i] );
+		RB_AddQuadStamp( mid, left, up, tess.vertexColors[i].rgba );
 	}
 }
 
@@ -813,7 +813,7 @@ void RB_CalcFogTexCoords( float *st ) {
 	float		s, t;
 	float		eyeT;
 	qboolean	eyeOutside;
-	const fog_t		*fog;
+	fog_t		*fog;
 	vec3_t		local;
 	vec4_t		fogDistanceVector, fogDepthVector = {0, 0, 0, 0};
 

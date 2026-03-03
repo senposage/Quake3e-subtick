@@ -157,10 +157,10 @@ locals from sp
 int VM_CallInterpreted2( vm_t *vm, int nargs, int32_t *args ) {
 	int32_t	stack[MAX_OPSTACK_SIZE];
 	int32_t	*opStack, *opStackTop;
-	int32_t	programStack;
-	int32_t	stackOnEntry;
+	int		programStack;
+	int		stackOnEntry;
 	byte	*image;
-	int32_t	v1, v0;
+	int		v1, v0;
 	int		dataMask;
 	instruction_t *inst, *ci;
 	floatint_t	r0, r1;

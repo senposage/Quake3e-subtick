@@ -3,52 +3,30 @@
 #include "../renderercommon/vulkan/vulkan.h"
 #include "tr_common.h"
 
-#define MAX_SWAPCHAIN_IMAGES 8
+#define MAX_SWAPCHAIN_IMAGES 4
 #define MIN_SWAPCHAIN_IMAGES_IMM 3
-#define MIN_SWAPCHAIN_IMAGES_FIFO   3
-#define MIN_SWAPCHAIN_IMAGES_FIFO_0 4
+#define MIN_SWAPCHAIN_IMAGES_FIFO 3
 #define MIN_SWAPCHAIN_IMAGES_MAILBOX 3
 
 #define MAX_VK_SAMPLERS 32
-#define MAX_VK_PIPELINES ((1024 + 128)*2)
+#define MAX_VK_PIPELINES (1024 + 128)
 
-#define VERTEX_BUFFER_SIZE     (4 * 1024 * 1024)  /* by default */
-#define VERTEX_BUFFER_SIZE_HI  (8 * 1024 * 1024)
-
-#define STAGING_BUFFER_SIZE    (2 * 1024 * 1024)  /* by default */
-#define STAGING_BUFFER_SIZE_HI (24 * 1024 * 1024) /* enough for max.texture size upload with all mip levels at once */
-
+#define VERTEX_BUFFER_SIZE (4 * 1024 * 1024)
 #define IMAGE_CHUNK_SIZE (32 * 1024 * 1024)
-#define MAX_IMAGE_CHUNKS 56
+#define MAX_IMAGE_CHUNKS 48
 
 #define NUM_COMMAND_BUFFERS 2	// number of command buffers / render semaphores / framebuffer sets
 
 #define USE_REVERSED_DEPTH
-
-//#define USE_UPLOAD_QUEUE
+//#define USE_BUFFER_CLEAR
 
 #define VK_NUM_BLOOM_PASSES 4
 
-#ifndef _DEBUG
 #define USE_DEDICATED_ALLOCATION
-#endif
 //#define MIN_IMAGE_ALIGN (128*1024)
-#define MAX_ATTACHMENTS_IN_POOL (8+VK_NUM_BLOOM_PASSES*2) // depth + msaa + msaa-resolve + depth-resolve + screenmap.msaa + screenmap.resolve + screenmap.depth + bloom_extract + blur pairs
-
-#define VK_DESC_STORAGE      0
-#define VK_DESC_UNIFORM      0
-#define VK_DESC_TEXTURE0     1
-#define VK_DESC_TEXTURE1     2
-#define VK_DESC_TEXTURE2     3
-#define VK_DESC_FOG_COLLAPSE 4
-#define VK_DESC_COUNT        5
-
-#define VK_DESC_TEXTURE_BASE VK_DESC_TEXTURE0
-#define VK_DESC_FOG_ONLY     VK_DESC_TEXTURE1
-#define VK_DESC_FOG_DLIGHT   VK_DESC_TEXTURE1
+#define MAX_ATTACHMENTS_IN_POOL (6+1+VK_NUM_BLOOM_PASSES*2) // depth + msaa + msaa-resolve + screenmap.msaa + screenmap.resolve + screenmap.depth + bloom_extract + blur pairs
 
 typedef enum {
-	TYPE_COLOR_BLACK,
 	TYPE_COLOR_WHITE,
 	TYPE_COLOR_GREEN,
 	TYPE_COLOR_RED,
@@ -59,41 +37,23 @@ typedef enum {
 	TYPE_SIGNLE_TEXTURE_LIGHTING_LINEAR,
 
 	TYPE_SIGNLE_TEXTURE_DF,
+	TYPE_SIGNLE_TEXTURE_IDENTITY,
 
-	TYPE_GENERIC_BEGIN, // start of non-env/env shader pairs
+	TYPE_GENERIC_BEGIN,
 	TYPE_SIGNLE_TEXTURE = TYPE_GENERIC_BEGIN,
 	TYPE_SIGNLE_TEXTURE_ENV,
 
-	TYPE_SIGNLE_TEXTURE_IDENTITY,
-	TYPE_SIGNLE_TEXTURE_IDENTITY_ENV,
-
-	TYPE_SIGNLE_TEXTURE_FIXED_COLOR,
-	TYPE_SIGNLE_TEXTURE_FIXED_COLOR_ENV,
-
-	TYPE_SIGNLE_TEXTURE_ENT_COLOR,
-	TYPE_SIGNLE_TEXTURE_ENT_COLOR_ENV,
-
-	TYPE_MULTI_TEXTURE_ADD2_IDENTITY,
-	TYPE_MULTI_TEXTURE_ADD2_IDENTITY_ENV,
-	TYPE_MULTI_TEXTURE_MUL2_IDENTITY,
-	TYPE_MULTI_TEXTURE_MUL2_IDENTITY_ENV,
-
-	TYPE_MULTI_TEXTURE_ADD2_FIXED_COLOR,
-	TYPE_MULTI_TEXTURE_ADD2_FIXED_COLOR_ENV,
-	TYPE_MULTI_TEXTURE_MUL2_FIXED_COLOR,
-	TYPE_MULTI_TEXTURE_MUL2_FIXED_COLOR_ENV,
-
 	TYPE_MULTI_TEXTURE_MUL2,
 	TYPE_MULTI_TEXTURE_MUL2_ENV,
-	TYPE_MULTI_TEXTURE_ADD2_1_1,
-	TYPE_MULTI_TEXTURE_ADD2_1_1_ENV,
+	TYPE_MULTI_TEXTURE_ADD2_IDENTITY,
+	TYPE_MULTI_TEXTURE_ADD2_IDENTITY_ENV,
 	TYPE_MULTI_TEXTURE_ADD2,
 	TYPE_MULTI_TEXTURE_ADD2_ENV,
 
 	TYPE_MULTI_TEXTURE_MUL3,
 	TYPE_MULTI_TEXTURE_MUL3_ENV,
-	TYPE_MULTI_TEXTURE_ADD3_1_1,
-	TYPE_MULTI_TEXTURE_ADD3_1_1_ENV,
+	TYPE_MULTI_TEXTURE_ADD3_IDENTITY,
+	TYPE_MULTI_TEXTURE_ADD3_IDENTITY_ENV,
 	TYPE_MULTI_TEXTURE_ADD3,
 	TYPE_MULTI_TEXTURE_ADD3_ENV,
 
@@ -107,7 +67,6 @@ typedef enum {
 	TYPE_BLEND2_ONE_MINUS_ALPHA_ENV,
 	TYPE_BLEND2_MIX_ALPHA,
 	TYPE_BLEND2_MIX_ALPHA_ENV,
-
 	TYPE_BLEND2_MIX_ONE_MINUS_ALPHA,
 	TYPE_BLEND2_MIX_ONE_MINUS_ALPHA_ENV,
 
@@ -149,24 +108,24 @@ typedef enum {
 } Vk_Primitive_Topology;
 
 typedef enum {
-	DEPTH_RANGE_NORMAL,		// [0..1]
-	DEPTH_RANGE_ZERO,		// [0..0]
-	DEPTH_RANGE_ONE,		// [1..1]
-	DEPTH_RANGE_WEAPON,		// [0..0.3]
+	DEPTH_RANGE_NORMAL, // [0..1]
+	DEPTH_RANGE_ZERO, // [0..0]
+	DEPTH_RANGE_ONE, // [1..1]
+	DEPTH_RANGE_WEAPON, // [0..0.3]
 	DEPTH_RANGE_COUNT
 }  Vk_Depth_Range;
 
 typedef struct {
 	VkSamplerAddressMode address_mode; // clamp/repeat texture addressing mode
-	int gl_mag_filter;		// GL_XXX mag filter
-	int gl_min_filter;		// GL_XXX min filter
-	qboolean max_lod_1_0;	// fixed 1.0 lod
+	int gl_mag_filter; // GL_XXX mag filter
+	int gl_min_filter; // GL_XXX min filter
+	qboolean max_lod_1_0; // fixed 1.0 lod
 	qboolean noAnisotropy;
 } Vk_Sampler_Def;
 
 typedef enum {
-	RENDER_PASS_MAIN = 0,
-	RENDER_PASS_SCREENMAP,
+	RENDER_PASS_SCREENMAP = 0,
+	RENDER_PASS_MAIN,
 	RENDER_PASS_POST_BLOOM,
 	RENDER_PASS_COUNT
 } renderPass_t;
@@ -179,15 +138,10 @@ typedef struct {
 	qboolean mirror;
 	Vk_Shadow_Phase shadow_phase;
 	Vk_Primitive_Topology primitives;
-	int line_width;
 	int fog_stage; // off, fog-in / fog-out
+	int line_width;
 	int abs_light;
 	int allow_discard;
-	int acff; // none, rgb, rgba, alpha
-	struct {
-		byte rgb;
-		byte alpha;
-	} color;
 } Vk_Pipeline_Def;
 
 typedef struct VK_Pipeline {
@@ -197,23 +151,18 @@ typedef struct VK_Pipeline {
 
 // this structure must be in sync with shader uniforms!
 typedef struct vkUniform_s {
-	// light/env parameters:
-	vec4_t eyePos;				// vertex
-	union {
-		struct {
-			vec4_t pos;			// vertex: light origin
-			vec4_t color;		// fragment: rgb + 1/(r*r)
-			vec4_t vector;		// fragment: linear dynamic light
-		} light;
-		struct {
-			vec4_t color[3];	// ent.color[3]
-		} ent;
-	};
-	// fog parameters:
-	vec4_t fogDistanceVector;	// vertex
-	vec4_t fogDepthVector;		// vertex
-	vec4_t fogEyeT;				// vertex
-	vec4_t fogColor;			// fragment
+	// vertex shader reference
+	vec4_t eyePos;
+	vec4_t lightPos;
+	// vertex - fog parameters
+	vec4_t fogDistanceVector;
+	vec4_t fogDepthVector;
+	vec4_t fogEyeT;
+	// fragment shader reference
+	vec4_t lightColor; // rgb + 1/(r*r)
+	vec4_t fogColor;
+	// fragment - linear dynamic light
+	vec4_t lightVector;
 } vkUniform_t;
 
 #define TESS_XYZ   (1)
@@ -225,10 +174,7 @@ typedef struct vkUniform_s {
 #define TESS_ST2   (64)
 #define TESS_NNN   (128)
 #define TESS_VPOS  (256)  // uniform with eyePos
-#define TESS_ENV   (512)  // mark shader stage with environment mapping
-#define TESS_ENT0  (1024) // uniform with ent.color[0]
-#define TESS_ENT1  (2048) // uniform with ent.color[1]
-#define TESS_ENT2  (4096) // uniform with ent.color[2]
+#define TESS_ENV   (512) // mark shader stage with environment mapping
 //
 // Initialization.
 //
@@ -241,24 +187,21 @@ void vk_initialize( void );
 void vk_init_descriptors( void );
 
 // Shutdown vulkan subsystem by releasing resources acquired by Vk_Instance.
-void vk_shutdown( refShutdownCode_t code );
+void vk_shutdown( void );
 
 // Releases vulkan resources allocated during program execution.
 // This effectively puts vulkan subsystem into initial state (the state we have after vk_initialize call).
 void vk_release_resources( void );
 
 void vk_wait_idle( void );
-void vk_queue_wait_idle( void );
 
 //
 // Resources allocation.
 //
-void vk_create_image( image_t *image, int width, int height, int mip_levels );
-void vk_upload_image_data( image_t *image, int x, int y, int width, int height, int miplevels, byte *pixels, int size, qboolean update );
+void vk_create_image( int width, int height, VkFormat format, int mip_levels, image_t *image );
+void vk_upload_image_data( VkImage image, int x, int y, int width, int height, qboolean mipmap, const uint8_t* pixels, int bytes_per_pixel );
+byte *resample_image_data( const image_t *image, byte *data, const int data_size, int *bytes_per_pixel );
 void vk_update_descriptor_set( image_t *image, qboolean mipmap );
-void vk_destroy_image_resources( VkImage *image, VkImageView *imageView );
-void vk_update_attachment_descriptors( void );
-void vk_destroy_samplers( void );
 
 uint32_t vk_find_pipeline_ext( uint32_t base, const Vk_Pipeline_Def *def, qboolean use );
 void vk_get_pipeline_def( uint32_t pipeline, Vk_Pipeline_Def *def );
@@ -274,10 +217,10 @@ void vk_clear_color( const vec4_t color );
 void vk_clear_depth( qboolean clear_stencil );
 void vk_begin_frame( void );
 void vk_end_frame( void );
-void vk_present_frame( void );
 
 void vk_end_render_pass( void );
 void vk_begin_main_render_pass( void );
+void vk_begin_screenmap_render_pass( void );
 
 void vk_bind_pipeline( uint32_t pipeline );
 void vk_bind_index( void );
@@ -285,7 +228,8 @@ void vk_bind_index_ext( const int numIndexes, const uint32_t*indexes );
 void vk_bind_geometry( uint32_t flags );
 void vk_bind_lighting( int stage, int bundle );
 void vk_draw_geometry( Vk_Depth_Range depth_range, qboolean indexed );
-void vk_draw_dot( uint32_t storage_offset );
+
+void vk_draw_light( uint32_t pipeline, Vk_Depth_Range depth_range, uint32_t uniform_offset, int fog);
 
 void vk_read_pixels( byte* buffer, uint32_t width, uint32_t height ); // screenshots
 qboolean vk_bloom( void );
@@ -295,9 +239,7 @@ void vk_update_mvp( const float *m );
 
 uint32_t vk_tess_index( uint32_t numIndexes, const void *src );
 void vk_bind_index_buffer( VkBuffer buffer, uint32_t offset );
-#ifdef USE_VBO
-void vk_draw_indexed( uint32_t indexCount, uint32_t firstIndex );
-#endif
+
 void vk_reset_descriptor( int index );
 void vk_update_descriptor( int index, VkDescriptorSet descriptor );
 void vk_update_descriptor_offset( int index, uint32_t offset );
@@ -310,21 +252,19 @@ void VBO_PrepareQueues( void );
 void VBO_RenderIBOItems( void );
 void VBO_ClearQueue( void );
 
+qboolean vk_surface_format_color_depth( VkFormat format, int* r, int* g, int* b );
+
 typedef struct vk_tess_s {
 	VkCommandBuffer command_buffer;
 
 	VkSemaphore image_acquired;
-	uint32_t	swapchain_image_index;
-	qboolean	swapchain_image_acquired;
-#ifdef USE_UPLOAD_QUEUE
-	VkSemaphore rendering_finished2;
-#endif
+	VkSemaphore rendering_finished;
 	VkFence rendering_finished_fence;
 	qboolean waitForFence;
 
 	VkBuffer vertex_buffer;
 	byte *vertex_buffer_ptr; // pointer to mapped vertex buffer
-	uint32_t vertex_buffer_offset; // VkDeviceSize
+	VkDeviceSize vertex_buffer_offset;
 
 	VkDescriptorSet uniform_descriptor;
 	uint32_t		uniform_read_offset;
@@ -336,12 +276,12 @@ typedef struct vk_tess_s {
 
 	struct {
 		uint32_t		start, end;
-		VkDescriptorSet	current[5]; // 0:uniform, 1:color0, 2:color1, 3:color2, 4:fog
-		uint32_t		offset[1]; // 0 (uniform)
+		VkDescriptorSet	current[6]; // 0:storage, 1:uniform, 2:color0, 3:color1, 4:color2, 5:fog
+		uint32_t		offset[2]; // 0 (uniform) and 5 (storage)
 	} descriptor_set;
 
-	Vk_Depth_Range		depth_range;
-	VkPipeline			last_pipeline;
+	Vk_Depth_Range depth_range;
+	VkPipeline last_pipeline;
 
 	uint32_t num_indexes; // value from most recent vk_bind_index() call
 
@@ -352,7 +292,9 @@ typedef struct vk_tess_s {
 // Vk_Instance contains engine-specific vulkan resources that persist entire renderer lifetime.
 // This structure is initialized/deinitialized by vk_initialize/vk_shutdown functions correspondingly.
 typedef struct {
+	VkInstance instance;
 	VkPhysicalDevice physical_device;
+	VkSurfaceKHR surface;
 	VkSurfaceFormatKHR base_format;
 	VkSurfaceFormatKHR present_format;
 
@@ -364,13 +306,9 @@ typedef struct {
 	uint32_t swapchain_image_count;
 	VkImage swapchain_images[MAX_SWAPCHAIN_IMAGES];
 	VkImageView swapchain_image_views[MAX_SWAPCHAIN_IMAGES];
-	VkSemaphore swapchain_rendering_finished[MAX_SWAPCHAIN_IMAGES];
-	//uint32_t swapchain_image_index;
+	uint32_t swapchain_image_index;
 
 	VkCommandPool command_pool;
-#ifdef USE_UPLOAD_QUEUE
-	VkCommandBuffer staging_command_buffer;
-#endif
 
 	VkDeviceMemory image_memory[ MAX_ATTACHMENTS_IN_POOL ];
 	uint32_t image_memory_count;
@@ -391,7 +329,7 @@ typedef struct {
 	VkDescriptorSetLayout set_layout_storage;	// feedback buffer
 
 	VkPipelineLayout pipeline_layout;			// default shaders
-	VkPipelineLayout pipeline_layout_storage;	// flare test shader layout
+	//VkPipelineLayout pipeline_layout_storage;	// flare test shader layout
 	VkPipelineLayout pipeline_layout_post_process;	// post-processing
 	VkPipelineLayout pipeline_layout_blend;		// post-processing
 
@@ -439,12 +377,6 @@ typedef struct {
 		VkFramebuffer capture;
 	} framebuffers;
 
-#ifdef USE_UPLOAD_QUEUE
-	VkSemaphore rendering_finished;	// reference to vk.cmd->rendering_finished2
-	VkSemaphore image_uploaded2;
-	VkSemaphore image_uploaded;		// reference to vk.image_uploaded2
-#endif
-
 	vk_tess_t tess[ NUM_COMMAND_BUFFERS ], *cmd;
 	int cmd_index;
 
@@ -482,18 +414,15 @@ typedef struct {
 	struct {
 		struct {
 			VkShaderModule gen[3][2][2][2]; // tx[0,1,2], cl[0,1] env0[0,1] fog[0,1]
-			VkShaderModule ident1[2][2][2]; // tx[0,1], env0[0,1] fog[0,1]
-			VkShaderModule fixed[2][2][2];  // tx[0,1], env0[0,1] fog[0,1]
-			VkShaderModule light[2];        // fog[0,1]
-		} vert;
+			VkShaderModule light[2]; // fog[0,1]
+			VkShaderModule gen0_ident;
+		}	vert;
 		struct {
+			VkShaderModule gen0_ident;
 			VkShaderModule gen0_df;
 			VkShaderModule gen[3][2][2]; // tx[0,1,2] cl[0,1] fog[0,1]
-			VkShaderModule ident1[2][2]; // tx[0,1], fog[0,1]
-			VkShaderModule fixed[2][2];  // tx[0,1], fog[0,1]
-			VkShaderModule ent[1][2];    // tx[0], fog[0,1]
-			VkShaderModule light[2][2];  // linear[0,1] fog[0,1]
-		} frag;
+			VkShaderModule light[2][2]; // linear[0,1] fog[0,1]
+		}	frag;
 
 		VkShaderModule color_fs;
 		VkShaderModule color_vs;
@@ -561,7 +490,6 @@ typedef struct {
 	uint32_t surface_debug_pipeline_solid;
 	uint32_t surface_debug_pipeline_outline;
 	uint32_t images_debug_pipeline;
-	uint32_t images_debug_pipeline2;
 	uint32_t surface_beam_pipeline;
 	uint32_t surface_axis_pipeline;
 	uint32_t dot_pipeline;
@@ -571,6 +499,10 @@ typedef struct {
 	VkPipeline bloom_extract_pipeline;
 	VkPipeline blur_pipeline[VK_NUM_BLOOM_PASSES*2]; // horizontal & vertical pairs
 	VkPipeline bloom_blend_pipeline;
+
+#ifndef NDEBUG
+	VkDebugReportCallbackEXT debug_callback;
+#endif
 
 	uint32_t frame_count;
 	qboolean active;
@@ -590,7 +522,7 @@ typedef struct {
 
 	VkImageLayout initSwapchainLayout;
 
-	qboolean clearAttachment;		// requires VK_IMAGE_USAGE_TRANSFER_DST_BIT for swapchains
+	qboolean fastSky;		// requires VK_IMAGE_USAGE_TRANSFER_DST_BIT
 	qboolean fboActive;
 	qboolean blitEnabled;
 	qboolean msaaActive;
@@ -618,36 +550,6 @@ typedef struct {
 
 	uint32_t maxBoundDescriptorSets;
 
-#ifdef USE_UPLOAD_QUEUE
-	VkFence aux_fence;
-	qboolean aux_fence_wait;
-#endif
-
-	struct staging_buffer_s {
-		VkBuffer handle;
-		VkDeviceMemory memory;
-		VkDeviceSize size;
-		byte *ptr; // pointer to mapped staging buffer
-#ifdef USE_UPLOAD_QUEUE
-		VkDeviceSize offset;
-#endif
-	} staging_buffer;
-
-	struct samplers_s {
-		int count;
-		Vk_Sampler_Def def[MAX_VK_SAMPLERS];
-		VkSampler handle[MAX_VK_SAMPLERS];
-		int filter_min;
-		int filter_max;
-	} samplers;
-
-	struct defaults_t {
-		VkDeviceSize staging_size;
-		VkDeviceSize geometry_size;
-	} defaults;
-
-	char driverNote[200];
-
 } Vk_Instance;
 
 typedef struct {
@@ -659,10 +561,23 @@ typedef struct {
 // It is reinitialized on a map change.
 typedef struct {
 	//
+	// Resources.
+	//
+	int num_samplers;
+	Vk_Sampler_Def sampler_defs[MAX_VK_SAMPLERS];
+	VkSampler samplers[MAX_VK_SAMPLERS];
+
+	//
 	// Memory allocations.
 	//
 	int num_image_chunks;
 	ImageChunk image_chunks[MAX_IMAGE_CHUNKS];
+
+	// Host visible memory used to copy image data to device local memory.
+	VkBuffer staging_buffer;
+	VkDeviceMemory staging_buffer_memory;
+	VkDeviceSize staging_buffer_size;
+	byte *staging_buffer_ptr; // pointer to mapped staging buffer
 
 	//
 	// State.
@@ -681,3 +596,10 @@ typedef struct {
 
 extern Vk_Instance	vk;				// shouldn't be cleared during ref re-init
 extern Vk_World		vk_world;		// this data is cleared during ref re-init
+
+// Most of the renderer's code uses Vulkan API via function provides in this file but
+// there are few places outside of vk.c where we use Vulkan commands directly.
+
+extern PFN_vkDestroyImage qvkDestroyImage;
+extern PFN_vkDestroyImageView qvkDestroyImageView;
+extern PFN_vkCmdDrawIndexed qvkCmdDrawIndexed;

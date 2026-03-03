@@ -112,24 +112,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define Q_EXPORT
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
-#define NORETURN __attribute__((noreturn))
-#define NORETURN_PTR __attribute__((noreturn))
-#elif defined(_MSC_VER)
-#define NORETURN __declspec(noreturn)
-// __declspec doesn't work on function pointers
-#define NORETURN_PTR /* nothing */
-#else
-#define NORETURN /* nothing */
-#define NORETURN_PTR /* nothing */
-#endif
-
-#if defined(__GNUC__) || defined(__clang__)
-#define FORMAT_PRINTF(x, y) __attribute__((format (printf, x, y)))
-#else
-#define FORMAT_PRINTF(x, y) /* nothing */
-#endif
-
 /**********************************************************************
   VM Considerations
 
@@ -169,8 +151,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 short ShortSwap( short l );
 int LongSwap( int l );
 float FloatSwap( const float *f );
-void CopyShortSwap( void *dest, void *src );
-void CopyLongSwap( void *dest, void *src );
 
 #include "q_platform.h"
 
@@ -179,12 +159,12 @@ void CopyLongSwap( void *dest, void *src );
 #ifdef Q3_VM
 	typedef int intptr_t;
 #else
-	#if defined (_MSC_VER) && !defined(__clang__)
+	#ifdef _MSC_VER
 		#include <io.h>
 		typedef __int64 int64_t;
 		typedef __int32 int32_t;
 		typedef __int16 int16_t;
-		typedef signed __int8 int8_t;
+		typedef __int8 int8_t;
 		typedef unsigned __int64 uint64_t;
 		typedef unsigned __int32 uint32_t;
 		typedef unsigned __int16 uint16_t;
@@ -410,7 +390,7 @@ typedef	int	fixed16_t;
 #endif
 
 #ifndef M_LN2
-#define M_LN2      0.693147180559945309417f
+#define M_LN2      0.693147180559945309417
 #endif
 
 #ifdef __linux__
@@ -478,10 +458,6 @@ extern	vec4_t		colorDkGrey;
 #define S_COLOR_CYAN	"^5"
 #define S_COLOR_MAGENTA	"^6"
 #define S_COLOR_WHITE	"^7"
-
-#define S_COLOR_DEVEL	S_COLOR_CYAN
-#define S_COLOR_WARNING	S_COLOR_YELLOW
-#define S_COLOR_ERROR	S_COLOR_RED
 
 extern const vec4_t	g_color_table[ 64 ];
 extern int ColorIndexFromChar( char ccode );
@@ -1061,7 +1037,7 @@ typedef struct {
 	cplane_t	plane;		// surface normal at impact, transformed to world space
 	int			surfaceFlags;	// surface hit
 	int			contents;	// contents on other side of surface hit
-	int			entityNum;	// entity the contacted surface is a part of
+	int			entityNum;	// entity the contacted sirface is a part of
 } trace_t;
 
 // trace->entityNum can also be 0 to (MAX_GENTITIES-1)
@@ -1094,7 +1070,7 @@ typedef struct {
 
 // sound channels
 // channel 0 never willingly overrides
-// other channels will always override a playing sound on that channel
+// other channels will allways override a playing sound on that channel
 typedef enum {
 	CHAN_AUTO,
 	CHAN_LOCAL,		// menu sounds, etc

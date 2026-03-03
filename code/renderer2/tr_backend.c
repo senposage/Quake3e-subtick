@@ -295,11 +295,7 @@ static void RB_Hyperspace( void ) {
 		// do initialization shit
 	}
 
-	if ( r_teleporterFlash->integer == 0 ) {
-		c = 0.0; // fade to black
-	} else {
-		c = ( backEnd.refdef.time & 255 ) / 255.0f; // fade to white
-	}
+	c = ( backEnd.refdef.time & 255 ) / 255.0f;
 	qglClearColor( c, c, c, 1 );
 	qglClear( GL_COLOR_BUFFER_BIT );
 	qglClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -326,7 +322,7 @@ Any mirrored or portaled views have already been drawn, so prepare
 to actually render the visible surfaces for this view
 =================
 */
-static void RB_BeginDrawingView (void) {
+void RB_BeginDrawingView (void) {
 	int clearBits = 0;
 
 	// sync with gl if needed
@@ -426,7 +422,7 @@ static void RB_BeginDrawingView (void) {
 RB_RenderDrawSurfList
 ==================
 */
-static void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
+void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	shader_t		*shader, *oldShader;
 	int				fogNum, oldFogNum;
 	int				entityNum, oldEntityNum;
@@ -624,7 +620,7 @@ RB_SetGL2D
 
 ================
 */
-static void	RB_SetGL2D (void) {
+void	RB_SetGL2D (void) {
 	mat4_t matrix;
 	int width, height;
 
@@ -675,7 +671,7 @@ Stretches a raw 32 bit power of 2 bitmap image over the given screen rectangle.
 Used for cinematics.
 =============
 */
-void RE_StretchRaw( int x, int y, int w, int h, int cols, int rows, const byte *data, int client, qboolean dirty ) {
+void RE_StretchRaw( int x, int y, int w, int h, int cols, int rows, byte *data, int client, qboolean dirty ) {
 	int			i, j;
 	int			start, end;
 	vec4_t quadVerts[4];
@@ -741,7 +737,7 @@ void RE_StretchRaw( int x, int y, int w, int h, int cols, int rows, const byte *
 	RB_InstantQuad2(quadVerts, texCoords);
 }
 
-void RE_UploadCinematic (int w, int h, int cols, int rows, const byte *data, int client, qboolean dirty) {
+void RE_UploadCinematic (int w, int h, int cols, int rows, byte *data, int client, qboolean dirty) {
 	GLuint texture;
 
 	if (!tr.scratchImage[client])
@@ -777,7 +773,7 @@ RB_SetColor
 
 =============
 */
-static const void	*RB_SetColor( const void *data ) {
+const void	*RB_SetColor( const void *data ) {
 	const setColorCommand_t	*cmd;
 
 	cmd = (const setColorCommand_t *)data;
@@ -795,7 +791,7 @@ static const void	*RB_SetColor( const void *data ) {
 RB_StretchPic
 =============
 */
-static const void *RB_StretchPic ( const void *data ) {
+const void *RB_StretchPic ( const void *data ) {
 	const stretchPicCommand_t	*cmd;
 	shader_t *shader;
 	int		numVerts, numIndexes;
@@ -880,7 +876,7 @@ RB_DrawSurfs
 
 =============
 */
-static const void	*RB_DrawSurfs( const void *data ) {
+const void	*RB_DrawSurfs( const void *data ) {
 	const drawSurfsCommand_t	*cmd;
 	qboolean isShadowView;
 
@@ -1190,7 +1186,7 @@ RB_DrawBuffer
 
 =============
 */
-static const void	*RB_DrawBuffer( const void *data ) {
+const void	*RB_DrawBuffer( const void *data ) {
 	const drawBufferCommand_t	*cmd;
 
 	cmd = (const drawBufferCommand_t *)data;
@@ -1278,7 +1274,7 @@ RB_ColorMask
 
 =============
 */
-static const void *RB_ColorMask(const void *data)
+const void *RB_ColorMask(const void *data)
 {
 	const colorMaskCommand_t *cmd = data;
 
@@ -1306,7 +1302,7 @@ RB_ClearDepth
 
 =============
 */
-static const void *RB_ClearDepth(const void *data)
+const void *RB_ClearDepth(const void *data)
 {
 	const clearDepthCommand_t *cmd = data;
 	
@@ -1350,7 +1346,7 @@ RB_SwapBuffers
 
 =============
 */
-static const void	*RB_SwapBuffers( const void *data ) {
+const void	*RB_SwapBuffers( const void *data ) {
 	const swapBuffersCommand_t	*cmd;
 
 	// finish any 2D drawing if needed
@@ -1420,7 +1416,7 @@ RB_CapShadowMap
 
 =============
 */
-static const void *RB_CapShadowMap(const void *data)
+const void *RB_CapShadowMap(const void *data)
 {
 	const capShadowmapCommand_t *cmd = data;
 
@@ -1456,7 +1452,7 @@ RB_PostProcess
 
 =============
 */
-static const void *RB_PostProcess(const void *data)
+const void *RB_PostProcess(const void *data)
 {
 	const postProcessCommand_t *cmd = data;
 	FBO_t *srcFbo;
@@ -1676,7 +1672,7 @@ RB_ExportCubemaps
 
 =============
 */
-static const void *RB_ExportCubemaps(const void *data)
+const void *RB_ExportCubemaps(const void *data)
 {
 	const exportCubemapsCommand_t *cmd = data;
 

@@ -42,7 +42,7 @@ libvar_t *libvarlist = NULL;
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
-static float LibVarStringValue( const char *string )
+float LibVarStringValue( const char *string )
 {
 	int dotfound = 0;
 	float value = 0;
@@ -259,7 +259,6 @@ void LibVarSet( const char *var_name, const char *value )
 	//variable is modified
 	v->modified = qtrue;
 } //end of the function LibVarSet
-#if 0
 //===========================================================================
 //
 // Parameter:				-
@@ -296,4 +295,3 @@ void LibVarSetNotModified( const char *var_name )
 		v->modified = qfalse;
 	} //end if
 } //end of the function LibVarSetNotModified
-#endif

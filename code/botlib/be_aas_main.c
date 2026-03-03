@@ -90,7 +90,7 @@ int AAS_Initialized(void)
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
-static void AAS_SetInitialized(void)
+void AAS_SetInitialized(void)
 {
 	aasworld.initialized = qtrue;
 	botimport.Print(PRT_MESSAGE, "AAS initialized.\n");
@@ -217,7 +217,7 @@ void AAS_ProjectPointOntoVector( vec3_t point, vec3_t vStart, vec3_t vEnd, vec3_
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
-static int AAS_LoadFiles(const char *mapname)
+int AAS_LoadFiles(const char *mapname)
 {
 	int errnum;
 	char aasfile[MAX_PATH];
@@ -242,7 +242,7 @@ static int AAS_LoadFiles(const char *mapname)
 	return BLERR_NOERROR;
 } //end of the function AAS_LoadFiles
 //===========================================================================
-// called every time a map changes
+// called everytime a map changes
 //
 // Parameter:				-
 // Returns:					-

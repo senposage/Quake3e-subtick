@@ -58,7 +58,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // 4. Exit the game and there will be three dat files and at least three tga files. The 
 //    tga's are in 256x256 pages so if it takes three images to render a 24 point font you 
 //    will end up with fontImage_0_24.tga through fontImage_2_24.tga
-// 5. In future runs of the game, the system looks for these images and data files when a
+// 5. In future runs of the game, the system looks for these images and data files when a s
 //    specific point sized font is rendered and loads them for use. 
 // 6. Because of the original beta nature of the FreeType code you will probably want to hand
 //    touch the font bitmaps.
@@ -144,7 +144,7 @@ FT_Bitmap *R_RenderGlyph(FT_GlyphSlot glyph, glyphInfo_t* glyphOut) {
 	return NULL;
 }
 
-static void WriteTGA (const char *filename, byte *data, int width, int height) {
+void WriteTGA (char *filename, byte *data, int width, int height) {
 	byte			*buffer;
 	int				i, c;
 	int             row;
@@ -306,7 +306,7 @@ static glyphInfo_t *RE_ConstructGlyphInfo(unsigned char *imageOut, int *xOut, in
 static int fdOffset;
 static byte	*fdFile;
 
-static int readInt( void ) {
+int readInt( void ) {
 	int i = ((unsigned int)fdFile[fdOffset] | ((unsigned int)fdFile[fdOffset+1]<<8) | ((unsigned int)fdFile[fdOffset+2]<<16) | ((unsigned int)fdFile[fdOffset+3]<<24));
 	fdOffset += 4;
 	return i;

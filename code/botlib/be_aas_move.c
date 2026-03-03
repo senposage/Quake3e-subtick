@@ -227,10 +227,10 @@ int AAS_Swimming(vec3_t origin)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
-static const vec3_t VEC_UP			= {0, -1,  0};
-static const vec3_t MOVEDIR_UP		= {0,  0,  1};
-static const vec3_t VEC_DOWN		= {0, -2,  0};
-static const vec3_t MOVEDIR_DOWN	= {0,  0, -1};
+static vec3_t VEC_UP			= {0, -1,  0};
+static vec3_t MOVEDIR_UP		= {0,  0,  1};
+static vec3_t VEC_DOWN		= {0, -2,  0};
+static vec3_t MOVEDIR_DOWN	= {0,  0, -1};
 
 void AAS_SetMovedir(vec3_t angles, vec3_t movedir)
 {
@@ -287,7 +287,7 @@ void AAS_JumpReachRunStart(aas_reachability_t *reach, vec3_t runstart)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
-static float AAS_WeaponJumpZVelocity(vec3_t origin, float radiusdamage)
+float AAS_WeaponJumpZVelocity(vec3_t origin, float radiusdamage)
 {
 	vec3_t kvel, v, start, end, forward, right, viewangles, dir;
 	float	mass, knockback, points;
@@ -340,7 +340,7 @@ static float AAS_WeaponJumpZVelocity(vec3_t origin, float radiusdamage)
 //===========================================================================
 float AAS_RocketJumpZVelocity(vec3_t origin)
 {
-	//rocket radius damage is 120
+	//rocket radius damage is 120 (p_weapon.c: Weapon_RocketLauncher_Fire)
 	return AAS_WeaponJumpZVelocity(origin, 120);
 } //end of the function AAS_RocketJumpZVelocity
 //===========================================================================
@@ -351,7 +351,7 @@ float AAS_RocketJumpZVelocity(vec3_t origin)
 //===========================================================================
 float AAS_BFGJumpZVelocity(vec3_t origin)
 {
-	//bfg radius damage is 120
+	//bfg radius damage is 1000 (p_weapon.c: weapon_bfg_fire)
 	return AAS_WeaponJumpZVelocity(origin, 120);
 } //end of the function AAS_BFGJumpZVelocity
 //===========================================================================
@@ -361,7 +361,7 @@ float AAS_BFGJumpZVelocity(vec3_t origin)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
-static void AAS_Accelerate(vec3_t velocity, float frametime, vec3_t wishdir, float wishspeed, float accel)
+void AAS_Accelerate(vec3_t velocity, float frametime, vec3_t wishdir, float wishspeed, float accel)
 {
 	// q2 style
 	int			i;
@@ -388,7 +388,7 @@ static void AAS_Accelerate(vec3_t velocity, float frametime, vec3_t wishdir, flo
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
-static void AAS_ApplyFriction(vec3_t vel, float friction, float stopspeed,
+void AAS_ApplyFriction(vec3_t vel, float friction, float stopspeed,
 													float frametime)
 {
 	float speed, control, newspeed;
@@ -405,6 +405,8 @@ static void AAS_ApplyFriction(vec3_t vel, float friction, float stopspeed,
 		vel[1] *= newspeed;
 	} //end if
 } //end of the function AAS_ApplyFriction
+
+
 //===========================================================================
 //
 // Parameter:			-
@@ -474,6 +476,8 @@ static qboolean AAS_ClipToBBox( aas_trace_t *trace, const vec3_t start, const ve
 	} //end if
 	return qfalse;
 } //end of the function AAS_ClipToBBox
+
+
 //===========================================================================
 // predicts the movement
 // assumes regular bounding box sizes
@@ -976,6 +980,8 @@ static int AAS_ClientMovementPrediction( aas_clientmove_t *move,
 	//
 	return qtrue;
 } //end of the function AAS_ClientMovementPrediction
+
+
 //===========================================================================
 //
 // Parameter:			-
@@ -983,9 +989,9 @@ static int AAS_ClientMovementPrediction( aas_clientmove_t *move,
 // Changes Globals:		-
 //===========================================================================
 int AAS_PredictClientMovement(struct aas_clientmove_s *move,
-								int entnum, const vec3_t origin,
+								int entnum, vec3_t origin,
 								int presencetype, int onground,
-								const vec3_t velocity, const vec3_t cmdmove,
+								vec3_t velocity, vec3_t cmdmove,
 								int cmdframes,
 								int maxframes, float frametime,
 								int stopevent, int stopareanum, int visualize)
@@ -997,6 +1003,8 @@ int AAS_PredictClientMovement(struct aas_clientmove_s *move,
 										frametime, stopevent, stopareanum,
 										mins, maxs, visualize);
 } //end of the function AAS_PredictClientMovement
+
+
 //===========================================================================
 //
 // Parameter:			-
@@ -1004,19 +1012,18 @@ int AAS_PredictClientMovement(struct aas_clientmove_s *move,
 // Changes Globals:		-
 //===========================================================================
 int AAS_ClientMovementHitBBox(struct aas_clientmove_s *move,
-								int entnum, const vec3_t origin,
+								int entnum, vec3_t origin,
 								int presencetype, int onground,
-								const vec3_t velocity, const vec3_t cmdmove,
+								vec3_t velocity, vec3_t cmdmove,
 								int cmdframes,
 								int maxframes, float frametime,
-								const vec3_t mins, const vec3_t maxs, int visualize)
+								vec3_t mins, vec3_t maxs, int visualize)
 {
 	return AAS_ClientMovementPrediction(move, entnum, origin, presencetype, onground,
 										velocity, cmdmove, cmdframes, maxframes,
 										frametime, SE_HITBOUNDINGBOX, 0,
 										mins, maxs, visualize);
 } //end of the function AAS_ClientMovementHitBBox
-#if 0
 //===========================================================================
 //
 // Parameter:			-
@@ -1041,7 +1048,6 @@ void AAS_TestMovementPrediction(int entnum, vec3_t origin, vec3_t dir)
 		botimport.Print(PRT_MESSAGE, "leave ground\n");
 	} //end if
 } //end of the function TestMovementPrediction
-#endif
 //===========================================================================
 // calculates the horizontal velocity needed to perform a jump from start
 // to end

@@ -51,7 +51,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
-static void AAS_SwapAASData(void)
+void AAS_SwapAASData(void)
 {
 	int i, j;
 	//bounding boxes
@@ -237,7 +237,7 @@ void AAS_DumpAASData(void)
 // Changes Globals:		-
 //===========================================================================
 #ifdef AASFILEDEBUG
-static void AAS_FileInfo(void)
+void AAS_FileInfo(void)
 {
 	int i, n, optimized;
 
@@ -277,7 +277,7 @@ static void AAS_FileInfo(void)
 					aasworld.reachabilitysize * sizeof(aas_reachability_t) +
 					aasworld.numportals * sizeof(aas_portal_t) +
 					aasworld.numclusters * sizeof(aas_cluster_t);
-	botimport.Print(PRT_MESSAGE, "optimized size %d KB\n", optimized >> 10);
+	botimport.Print(PRT_MESSAGE, "optimzed size %d KB\n", optimized >> 10);
 } //end of the function AAS_FileInfo
 #endif //AASFILEDEBUG
 //===========================================================================
@@ -287,7 +287,7 @@ static void AAS_FileInfo(void)
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
-static char *AAS_LoadAASLump(fileHandle_t fp, int offset, int length, int *lastoffset, int size)
+char *AAS_LoadAASLump(fileHandle_t fp, int offset, int length, int *lastoffset, int size)
 {
 	char *buf;
 	//
@@ -324,7 +324,7 @@ static char *AAS_LoadAASLump(fileHandle_t fp, int offset, int length, int *lasto
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
-static void AAS_DData(unsigned char *data, int size)
+void AAS_DData(unsigned char *data, int size)
 {
 	int i;
 
@@ -495,7 +495,7 @@ int AAS_LoadAASFile(char *filename)
 //===========================================================================
 static int AAS_WriteAASLump_offset;
 
-static int AAS_WriteAASLump(fileHandle_t fp, aas_header_t *h, int lumpnum, void *data, int length)
+int AAS_WriteAASLump(fileHandle_t fp, aas_header_t *h, int lumpnum, void *data, int length)
 {
 	aas_lump_t *lump;
 

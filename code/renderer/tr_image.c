@@ -22,10 +22,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // tr_image.c
 #include "tr_local.h"
 
-static byte	s_intensitytable[256];
-static byte	s_gammatable[256];
+static byte			 s_intensitytable[256];
+static unsigned char s_gammatable[256];
 
-static byte	s_gammatable_linear[256];
+static unsigned char s_gammatable_linear[256];
 
 GLint	gl_filter_min = GL_LINEAR_MIPMAP_NEAREST;
 GLint	gl_filter_max = GL_LINEAR;
@@ -46,14 +46,8 @@ return a hash value for the filename
 */
 void R_GammaCorrect( byte *buffer, int bufSize ) {
 	int i;
-#ifdef USE_FBO
-	if ( fboEnabled ) {
+	if ( fboEnabled )
 		return;
-	}
-#endif
-	if ( !gls.deviceSupportsGamma ) {
-		return;
-	}
 	for ( i = 0; i < bufSize; i++ ) {
 		buffer[i] = s_gammatable[buffer[i]];
 	}
@@ -304,11 +298,7 @@ static void R_LightScaleTexture( byte *in, int inwidth, int inheight, qboolean o
 
 	if ( only_gamma )
 	{
-#ifdef USE_FBO
 		if ( !glConfig.deviceSupportsGamma && !fboEnabled )
-#else
-		if ( !glConfig.deviceSupportsGamma )
-#endif
 		{
 			int		i, c;
 			byte	*p;
@@ -333,11 +323,7 @@ static void R_LightScaleTexture( byte *in, int inwidth, int inheight, qboolean o
 
 		c = inwidth*inheight;
 
-#ifdef USE_FBO
 		if ( glConfig.deviceSupportsGamma || fboEnabled )
-#else
-		if ( glConfig.deviceSupportsGamma )
-#endif
 		{
 			for (i=0 ; i<c ; i++, p+=4)
 			{
@@ -601,9 +587,9 @@ Upload32
 static void Upload32( byte *data, int x, int y, int width, int height, image_t *image, qboolean subImage )
 {
 	qboolean allowCompression = !(image->flags & IMGFLAG_NO_COMPRESSION);
-	qboolean lightMap = (image->flags & IMGFLAG_LIGHTMAP) ? qtrue : qfalse;
-	qboolean mipmap = (image->flags & IMGFLAG_MIPMAP) ? qtrue : qfalse;
-	qboolean picmip = (image->flags & IMGFLAG_PICMIP) ? qtrue : qfalse;
+	qboolean lightMap = image->flags & IMGFLAG_LIGHTMAP;
+	qboolean mipmap = image->flags & IMGFLAG_MIPMAP;
+	qboolean picmip = image->flags & IMGFLAG_PICMIP;
 	byte		*resampledBuffer = NULL;
 	int			scaled_width, scaled_height;
 
@@ -655,7 +641,7 @@ static void Upload32( byte *data, int x, int y, int width, int height, image_t *
 		byte *p = data;
 		int i, n = width * height;
 		for ( i = 0; i < n; i++, p+=4 ) {
-			R_ColorShiftLightingBytes( p, p, qfalse );
+			R_ColorShiftLightingBytes( p, p );
 		}
 	}
 
@@ -901,7 +887,7 @@ static const int numImageLoaders = ARRAY_LEN( imageLoaders );
 =================
 R_LoadImage
 
-Loads any of the supported image types into a canonical
+Loads any of the supported image types into a cannonical
 32 bit format.
 =================
 */
@@ -1364,37 +1350,16 @@ void R_SetColorMappings( void ) {
 	float	g;
 	int		inf;
 	int		shift;
-	qboolean applyGamma;
-
-	if ( !tr.inited ) {
-		// it may be called from window handling functions where gamma flags is now yet known/set
-		return;
-	}
 
 	// setup the overbright lighting
 	// negative value will force gamma in windowed mode
 	tr.overbrightBits = abs( r_overBrightBits->integer );
+	if ( !glConfig.deviceSupportsGamma && !fboEnabled )
+		tr.overbrightBits = 0;		// need hardware gamma for overbright
 
 	// never overbright in windowed mode
-#ifdef USE_FBO
-	if ( !glConfig.isFullscreen && r_overBrightBits->integer >= 0 && !fboEnabled ) {
-#else
-	if ( !glConfig.isFullscreen && r_overBrightBits->integer >= 0 ) {
-#endif
+	if ( !glConfig.isFullscreen && r_overBrightBits->integer >= 0 && !fboEnabled )
 		tr.overbrightBits = 0;
-		applyGamma = qfalse;
-	} else {
-#ifdef USE_FBO
-		if ( !glConfig.deviceSupportsGamma && !fboEnabled ) {
-#else
-		if ( !glConfig.deviceSupportsGamma ) {
-#endif
-			tr.overbrightBits = 0; // need hardware gamma for overbright
-			applyGamma = qfalse;
-		} else {
-			applyGamma = qtrue;
-		}
-	}
 
 	// allow 2 overbright bits in 24 bit, but only 1 in 16 bit
 	if ( glConfig.colorBits > 16 ) {
@@ -1441,17 +1406,11 @@ void R_SetColorMappings( void ) {
 		s_intensitytable[i] = j;
 	}
 
-	if ( gls.deviceSupportsGamma ) {
-#ifdef USE_FBO
+	if ( glConfig.deviceSupportsGamma ) {
 		if ( fboEnabled )
 			ri.GLimp_SetGamma( s_gammatable_linear, s_gammatable_linear, s_gammatable_linear );
 		else
-#endif
-		{
-			if ( applyGamma ) {
-				ri.GLimp_SetGamma( s_gammatable, s_gammatable, s_gammatable );
-			}
-		}
+			ri.GLimp_SetGamma( s_gammatable, s_gammatable, s_gammatable );
 	}
 }
 
@@ -1485,14 +1444,11 @@ R_DeleteTextures
 ===============
 */
 void R_DeleteTextures( void ) {
+	image_t *img;
 	int i;
 
-	if ( tr.numImages == 0 ) {
-		return;
-	}
-
 	for ( i = 0; i < tr.numImages; i++ ) {
-		image_t *img = tr.images[ i ];
+		img = tr.images[ i ];
 		qglDeleteTextures( 1, &img->texnum );
 	}
 
@@ -1526,7 +1482,7 @@ SKINS
 CommaParse
 
 This is unfortunate, but the skin files aren't
-compatible with our normal parsing rules.
+compatable with our normal parsing rules.
 ==================
 */
 static char *CommaParse( const char **data_p ) {

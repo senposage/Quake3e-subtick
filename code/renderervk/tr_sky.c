@@ -257,7 +257,7 @@ static void ClearSkyBox (void) {
 RB_ClipSkyPolygons
 ================
 */
-static void RB_ClipSkyPolygons( const shaderCommands_t *input )
+void RB_ClipSkyPolygons( shaderCommands_t *input )
 {
 	vec3_t		p[5];	// need one extra point for clipping
 	int			i, j;
@@ -352,7 +352,7 @@ static qboolean CullPoints( vec4_t v[], const int count )
 				break;
 			}
 		}
-		// all points are completely behind at least of one frustum plane
+		// all points is completely behind at least of one frustum plane
 		if ( j == count ) {
 			return qtrue;
 		}
@@ -632,7 +632,7 @@ static void FillCloudBox( void )
 /*
 ** R_BuildCloudData
 */
-static void R_BuildCloudData( const shaderCommands_t *input )
+void R_BuildCloudData( shaderCommands_t *input )
 {
 	const shader_t *shader;
 
@@ -771,12 +771,10 @@ void RB_DrawSun( float scale, shader_t *shader ) {
 	float		size;
 	float		dist;
 	vec3_t		origin, vec1, vec2;
-	color4ub_t	sunColor;
+	byte		sunColor[4] = { 255, 255, 255, 255 };
 
 	if ( !backEnd.skyRenderedThisView )
 		return;
-
-	sunColor.u32 = ~0U;
 
 #ifdef USE_VULKAN
 	vk_update_mvp( NULL );
@@ -827,8 +825,8 @@ Other things could be stuck in here, like birds in the sky, etc
 */
 void RB_StageIteratorSky( void ) {
 
-#if defined (USE_VULKAN) && !defined (USE_BUFFER_CLEAR)
-	if ( r_fastsky->integer && vk.clearAttachment ) {
+#ifdef USE_VULKAN
+	if ( r_fastsky->integer && vk.fastSky ) {
 #else
 	if ( r_fastsky->integer ) {
 #endif

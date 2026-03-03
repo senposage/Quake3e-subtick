@@ -45,11 +45,11 @@ void R_GammaCorrect( byte *buffer, int bufSize ) {
 }
 
 typedef struct {
-	const char *name;
+	char *name;
 	int	minimize, maximize;
 } textureMode_t;
 
-static const textureMode_t modes[] = {
+textureMode_t modes[] = {
 	{"GL_NEAREST", GL_NEAREST, GL_NEAREST},
 	{"GL_LINEAR", GL_LINEAR, GL_LINEAR},
 	{"GL_NEAREST_MIPMAP_NEAREST", GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST},
@@ -155,8 +155,8 @@ void R_ImageList_f( void ) {
 	for ( i = 0 ; i < tr.numImages ; i++ )
 	{
 		image_t *image = tr.images[i];
-		const char *format = "????   ";
-		const char *sizeSuffix;
+		char *format = "????   ";
+		char *sizeSuffix;
 		int estSize;
 		int displaySize;
 
@@ -204,7 +204,7 @@ void R_ImageList_f( void ) {
 				// same as DXT1?
 				estSize /= 2;
 				break;
-			case GL_RGBA16F_ARB:
+			case GL_RGBA16F:
 				format = "RGBA16F";
 				// 8 bytes per pixel
 				estSize *= 8;
@@ -1252,7 +1252,7 @@ Scale up the pixel values in a texture to increase the
 lighting range
 ================
 */
-static void R_LightScaleTexture (byte *in, int inwidth, int inheight, qboolean only_gamma )
+void R_LightScaleTexture (byte *in, int inwidth, int inheight, qboolean only_gamma )
 {
 	if ( only_gamma )
 	{
@@ -1419,7 +1419,7 @@ R_BlendOverTexture
 Apply a color blend over a set of pixels
 ==================
 */
-static void R_BlendOverTexture( byte *data, int pixelCount, const byte blend[4] ) {
+static void R_BlendOverTexture( byte *data, int pixelCount, byte blend[4] ) {
 	int		i;
 	int		inverseAlpha;
 	int		premult[3];
@@ -1436,7 +1436,7 @@ static void R_BlendOverTexture( byte *data, int pixelCount, const byte blend[4] 
 	}
 }
 
-static const byte	mipBlendColors[16][4] = {
+byte	mipBlendColors[16][4] = {
 	{0,0,0,0},
 	{255,0,0,128},
 	{0,255,0,128},
@@ -2094,7 +2094,7 @@ R_CreateImage2
 This is the only way any image_t are created
 ================
 */
-static image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLenum picFormat, int numMips, imgType_t type, imgFlags_t flags, int internalFormat ) {
+image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLenum picFormat, int numMips, imgType_t type, imgFlags_t flags, int internalFormat ) {
 	byte       *resampledBuffer = NULL;
 	image_t    *image;
 	qboolean    isLightmap = qfalse, scaled = qfalse;
@@ -2261,13 +2261,13 @@ void R_LoadDDS(const char *filename, byte **pic, int *width, int *height, GLenum
 
 typedef struct
 {
-	const char *ext;
+	char *ext;
 	void (*ImageLoader)( const char *, unsigned char **, int *, int * );
 } imageExtToLoaderMap_t;
 
 // Note that the ordering indicates the order of preference used
 // when there are multiple images of different formats available
-static const imageExtToLoaderMap_t imageLoaders[ ] =
+static imageExtToLoaderMap_t imageLoaders[ ] =
 {
 	{ "png",  R_LoadPNG },
 	{ "tga",  R_LoadTGA },
@@ -2277,7 +2277,7 @@ static const imageExtToLoaderMap_t imageLoaders[ ] =
 	{ "bmp",  R_LoadBMP }
 };
 
-static const int numImageLoaders = ARRAY_LEN( imageLoaders );
+static int numImageLoaders = ARRAY_LEN( imageLoaders );
 
 /*
 =================
@@ -2287,7 +2287,7 @@ Loads any of the supported image types into a canonical
 32 bit format.
 =================
 */
-static void R_LoadImage( const char *name, byte **pic, int *width, int *height, GLenum *picFormat, int *numMips )
+void R_LoadImage( const char *name, byte **pic, int *width, int *height, GLenum *picFormat, int *numMips )
 {
 	qboolean orgNameFailed = qfalse;
 	int orgLoader = -1;
@@ -2528,7 +2528,7 @@ image_t	*R_FindImageFile( const char *name, imgType_t type, imgFlags_t flags )
 #endif
 
 			R_CreateImage( normalName, normalPic, normalWidth, normalHeight, IMGTYPE_NORMAL, normalFlags, 0 );
-			ri.Free( normalPic );	
+			ri.Free( normalPic );
 		}
 	}
 
@@ -2947,9 +2947,9 @@ This is unfortunate, but the skin files aren't
 compatible with our normal parsing rules.
 ==================
 */
-static char *CommaParse( const char **data_p ) {
+static char *CommaParse( char **data_p ) {
 	int c = 0, len;
-	const char *data;
+	char *data;
 	static	char	com_token[MAX_TOKEN_CHARS];
 
 	data = *data_p;
@@ -3060,8 +3060,8 @@ qhandle_t RE_RegisterSkin( const char *name ) {
 		char *c;
 		void *v;
 	} text;
-	const char		*text_p;
-	const char		*token;
+	char		*text_p;
+	char		*token;
 	char		surfName[MAX_QPATH];
 	int			totalSurfaces;
 

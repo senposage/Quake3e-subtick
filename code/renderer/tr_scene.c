@@ -22,21 +22,21 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_local.h"
 
-static int			r_firstSceneDrawSurf;
+int			r_firstSceneDrawSurf;
 #ifdef USE_PMLIGHT
-static int			r_firstSceneLitSurf;
+int			r_firstSceneLitSurf;
 #endif
 
 int			r_numdlights;
-static int			r_firstSceneDlight;
+int			r_firstSceneDlight;
 
-static int			r_numentities;
-static int			r_firstSceneEntity;
+int			r_numentities;
+int			r_firstSceneEntity;
 
-static int			r_numpolys;
-static int			r_firstScenePoly;
+int			r_numpolys;
+int			r_firstScenePoly;
 
-static int			r_numpolyverts;
+int			r_numpolyverts;
 
 
 /*
@@ -97,7 +97,7 @@ Adds all the scene's polys into this view's drawsurf list
 void R_AddPolygonSurfaces( void ) {
 	int			i;
 	shader_t	*sh;
-	const srfPoly_t	*poly;
+	srfPoly_t	*poly;
 
 	tr.currentEntityNum = REFENTITYNUM_WORLD;
 	tr.shiftedEntityNum = tr.currentEntityNum << QSORT_REFENTITYNUM_SHIFT;
@@ -118,7 +118,7 @@ void RE_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts
 	srfPoly_t	*poly;
 	int			i, j;
 	int			fogIndex;
-	const fog_t		*fog;
+	fog_t		*fog;
 	vec3_t		bounds[2];
 
 	if ( !tr.registered ) {
@@ -243,7 +243,7 @@ void RE_AddRefEntityToScene( const refEntity_t *ent, qboolean intShaderTime ) {
 RE_AddDynamicLightToScene
 =====================
 */
-static void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, float g, float b, int additive ) {
+void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float r, float g, float b, int additive ) {
 	dlight_t	*dl;
 
 	if ( !tr.registered ) {
@@ -261,7 +261,7 @@ static void RE_AddDynamicLightToScene( const vec3_t org, float intensity, float 
 	}
 #ifdef USE_PMLIGHT
 #ifdef USE_LEGACY_DLIGHTS
-	if ( R_GetDlightMode() )
+	if ( r_dlightMode->integer )
 #endif
 	{
 		r *= r_dlightIntensity->value;
@@ -312,7 +312,7 @@ void RE_AddLinearLightToScene( const vec3_t start, const vec3_t end, float inten
 	}
 #ifdef USE_PMLIGHT
 #ifdef USE_LEGACY_DLIGHTS
-	if ( R_GetDlightMode() )
+	if ( r_dlightMode->integer )
 #endif
 	{
 		r *= r_dlightIntensity->value;

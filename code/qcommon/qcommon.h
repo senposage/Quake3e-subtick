@@ -80,7 +80,7 @@ void MSG_Bitstream( msg_t *buf );
 // copy a msg_t in case we need to store it as is for a bit
 // (as I needed this to keep an msg_t from a static var for later use)
 // sets data buffer as MSG_Init does prior to do the copy
-void MSG_Copy(msg_t *buf, byte *data, int length, const msg_t *src);
+void MSG_Copy(msg_t *buf, byte *data, int length, msg_t *src);
 
 struct usercmd_s;
 struct entityState_s;
@@ -265,8 +265,7 @@ typedef struct {
 
 void		NET_Init( void );
 void		NET_Shutdown( void );
-void		NET_FlushPacketQueue( int time_diff );
-void		NET_QueuePacket( netsrc_t sock, int length, const void *data, const netadr_t *to, int offset );
+void		NET_FlushPacketQueue(void);
 void		NET_SendPacket( netsrc_t sock, int length, const void *data, const netadr_t *to );
 void		QDECL NET_OutOfBandPrint( netsrc_t net_socket, const netadr_t *adr, const char *format, ...) __attribute__ ((format (printf, 3, 4)));
 void		NET_OutOfBandCompress( netsrc_t sock, const netadr_t *adr, const byte *data, int len );
@@ -354,15 +353,12 @@ PROTOCOL
 */
 
 #define	PROTOCOL_VERSION		68
-#define	OLD_PROTOCOL_VERSION	68
 #define URT_PROTOCOL_VERSION    70
 
 // new protocol with UDP spoofing protection:
 #define	NEW_PROTOCOL_VERSION	71
 
 // 1.31 - 67
-
-#define DEFAULT_PROTOCOL_VERSION	OLD_PROTOCOL_VERSION
 
 
 // maintain a list of compatible protocols for demo playing
@@ -477,11 +473,6 @@ typedef enum {
 	VM_COUNT
 } vmIndex_t;
 
-// we don't need more than 4 arguments (counting callnum) for vmMain, at least in Vanilla Quake3
-#define MAX_VMMAIN_CALL_ARGS 4
-
-typedef intptr_t (QDECL *vmMainFunc_t)( int command, int arg0, int arg1, int arg2 );
-
 void	VM_Init( void );
 vm_t	*VM_Create( vmIndex_t index, syscall_t systemCalls, dllSyscall_t dllSyscalls, vmInterpret_t interpret );
 
@@ -554,9 +545,6 @@ void Cbuf_Execute( void );
 // Normally called once per frame, but may be explicitly invoked.
 // Do not call inside a command function, or current args will be destroyed.
 
-void Cbuf_Wait( void );
-// Checks if wait command timeout remaining
-
 //===========================================================================
 
 /*
@@ -581,7 +569,7 @@ void	Cmd_SetDescription( const char *cmd_name, char *description );
 void	Cmd_RemoveCommand( const char *cmd_name );
 void	Cmd_RemoveCgameCommands( void );
 
-typedef void (*completionFunc_t)( const char *args, int argNum );
+typedef void (*completionFunc_t)( char *args, int argNum );
 
 // don't allow VMs to remove system commands
 void	Cmd_RemoveCommandSafe( const char *cmd_name );
@@ -589,12 +577,12 @@ void	Cmd_RemoveCommandSafe( const char *cmd_name );
 void	Cmd_CommandCompletion( void(*callback)(const char *s) );
 // callback with each valid string
 void	Cmd_SetCommandCompletionFunc( const char *command, completionFunc_t complete );
-qboolean Cmd_CompleteArgument( const char *command, const char *args, int argNum );
-void	Cmd_CompleteWriteCfgName( const char *args, int argNum );
+qboolean Cmd_CompleteArgument( const char *command, char *args, int argNum );
+void	Cmd_CompleteWriteCfgName( char *args, int argNum );
 
 int		Cmd_Argc( void );
 void	Cmd_Clear( void );
-const char	*Cmd_Argv( int arg );
+char	*Cmd_Argv( int arg );
 void	Cmd_ArgvBuffer( int arg, char *buffer, int bufferLength );
 char	*Cmd_ArgsFrom( int arg );
 void	Cmd_ArgsBuffer( char *buffer, int bufferLength );
@@ -718,7 +706,7 @@ void	Cvar_ResetGroup( cvarGroup_t group, qboolean resetModifiedFlags );
 
 void	Cvar_Restart( qboolean unsetVM );
 
-void	Cvar_CompleteCvarName( const char *args, int argNum );
+void	Cvar_CompleteCvarName( char *args, int argNum );
 
 extern	int			cvar_modifiedFlags;
 // whenever a cvar is modifed, its flags will be OR'd into this, so
@@ -755,15 +743,12 @@ typedef enum {
 	H_Q3UI
 } handleOwner_t;
 
-#define FS_MATCH_EXTERN    (1<<0)
-#define FS_MATCH_PURE      (1<<1)
-#define FS_MATCH_UNPURE    (1<<2)
-#define FS_MATCH_STICK     (1<<3)
-#define FS_MATCH_SUBDIRS   (1<<4)
-#define FS_MATCH_PK3s      (FS_MATCH_PURE | FS_MATCH_UNPURE)
-#define FS_MATCH_ANY       (FS_MATCH_EXTERN | FS_MATCH_PURE | FS_MATCH_UNPURE)
-
-#define FS_MAX_SUBDIRS		8 /* should be enough for practical use with FS_MATCH_SUBDIRS */
+#define FS_MATCH_EXTERN (1<<0)
+#define FS_MATCH_PURE   (1<<1)
+#define FS_MATCH_UNPURE (1<<2)
+#define FS_MATCH_STICK  (1<<3)
+#define FS_MATCH_PK3s   (FS_MATCH_PURE | FS_MATCH_UNPURE)
+#define FS_MATCH_ANY    (FS_MATCH_EXTERN | FS_MATCH_PURE | FS_MATCH_UNPURE)
 
 #define	MAX_FILE_HANDLES	64
 #define	FS_INVALID_HANDLE	0
@@ -944,7 +929,9 @@ void FS_VM_CloseFiles( handleOwner_t owner );
 const char *FS_GetCurrentGameDir( void );
 const char *FS_GetBaseGameDir( void );
 
+const char *FS_GetBasePath( void );
 const char *FS_GetHomePath( void );
+const char *FS_GetGamePath( void );
 
 qboolean FS_StripExt( char *filename, const char *ext );
 qboolean FS_AllowedExtension( const char *fileName, qboolean allowPk3s, const char **ext );
@@ -988,7 +975,7 @@ void Field_AutoComplete( field_t *edit );
 void Field_CompleteKeyname( void );
 void Field_CompleteKeyBind( int key );
 void Field_CompleteFilename( const char *dir, const char *ext, qboolean stripExt, int flags );
-void Field_CompleteCommand( const char *cmd, qboolean doCommands, qboolean doCvars );
+void Field_CompleteCommand( char *cmd, qboolean doCommands, qboolean doCvars );
 
 void Con_ResetHistory( void );
 void Con_SaveField( const field_t *field );
@@ -1066,7 +1053,6 @@ int			Com_FilterPath( const char *filter, const char *name );
 int			Com_RealTime(qtime_t *qtime);
 qboolean	Com_SafeMode( void );
 void		Com_RunAndTimeServerPacket( const netadr_t *evFrom, msg_t *buf );
-void		Com_SortList( char **list, int n );
 
 void		Com_StartupVariable( const char *match );
 // checks for and removes command line "+set var arg" constructs
@@ -1105,7 +1091,6 @@ extern	cvar_t	*com_buildScript;		// for building release pak files
 extern	cvar_t	*com_journal;
 extern	cvar_t	*com_cameraMode;
 extern	cvar_t	*com_protocol;
-extern	qboolean com_protocolCompat;
 
 // both client and server must agree to pause
 extern	cvar_t	*sv_paused;
@@ -1207,9 +1192,7 @@ void Hunk_FreeTempMemory( void *buf );
 int	Hunk_MemoryRemaining( void );
 void Hunk_Log( void);
 
-unsigned int Com_TouchMemory( void );
-
-void Com_FrameInit( void );
+void Com_TouchMemory( void );
 
 // commandLine should not include the executable name (argv[0])
 void Com_Init( char *commandLine );
@@ -1365,8 +1348,7 @@ void	Sys_Print( const char *msg );
 void	QDECL Sys_SetStatus( const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 
 #ifdef USE_AFFINITY_MASK
-uint64_t Sys_GetAffinityMask( void );
-qboolean Sys_SetAffinityMask( const uint64_t mask );
+void	Sys_SetAffinityMask( int mask );
 #endif
 
 // Sys_Milliseconds should only be used for profiling purposes,
@@ -1392,7 +1374,7 @@ qboolean	Sys_StringToAdr( const char *s, netadr_t *a, netadrtype_t family );
 qboolean	Sys_IsLANAddress(const netadr_t *adr);
 void		Sys_ShowIP(void);
 
-qboolean	Sys_Mkdir( const char *path );
+void	Sys_Mkdir( const char *path );
 FILE	*Sys_FOpen( const char *ospath, const char *mode );
 qboolean Sys_ResetReadOnlyAttribute( const char *ospath );
 
@@ -1401,7 +1383,7 @@ const char *Sys_DefaultBasePath( void );
 const char *Sys_DefaultHomePath( void );
 const char *Sys_SteamPath( void );
 
-char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, int subdirs );
+char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, qboolean wantsubs );
 void Sys_FreeFileList( char **list );
 
 qboolean Sys_GetFileStats( const char *filename, fileOffset_t *size, fileTime_t *mtime, fileTime_t *ctime );

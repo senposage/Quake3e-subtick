@@ -233,7 +233,7 @@ void RB_ShadowTessEnd( void ) {
 	R_RenderShadowEdges();
 
 
-	// re-enable writing to the color buffer
+	// reenable writing to the color buffer
 	qglColorMask(rgba[0], rgba[1], rgba[2], rgba[3]);
 #endif
 }

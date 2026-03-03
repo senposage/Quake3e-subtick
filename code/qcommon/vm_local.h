@@ -28,6 +28,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define	MAX_OPSTACK_SIZE	512
 #define	PROC_OPSTACK_SIZE	30
 
+// we don't need more than 4 arguments (counting callnum) for vmMain, at least in Quake3
+#define MAX_VMMAIN_CALL_ARGS 4
+
 // don't change
 // Hardcoded in q3asm an reserved at end of bss
 #define	PROGRAM_STACK_SIZE	0x10000
@@ -36,7 +39,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define	PROGRAM_STACK_EXTRA	(32*1024)
 
 // reserved space for effective LOCAL+LOAD* checks
-// also to avoid runtime range checks for many small arguments/structs in systemcalls
+// also to avoid runtime range checks for many small agruments/structs in systemcalls
 #define	VM_DATA_GUARD_SIZE	1024
 
 // guard size must cover at least function arguments area
@@ -173,17 +176,17 @@ struct vm_s {
 	int32_t		*opStack;			// pointer to local function stack
 	int32_t		*opStackTop;
 
-	int32_t		programStack;		// the vm may be recursively entered
-	int32_t		stackBottom;		// if programStack < stackBottom, error
+	int			programStack;		// the vm may be recursively entered
+	int			stackBottom;		// if programStack < stackBottom, error
 
 	//------------------------------------
 
-	const char	*name;				// module should be bare: "cgame", not "cgame.dll" or "vm/cgame.qvm"
+	const char	*name;
 	vmIndex_t	index;
 
 	// for dynamic linked modules
 	void		*dllHandle;
-	vmMainFunc_t entryPoint;
+	dllSyscall_t entryPoint;
 	dllSyscall_t dllSyscall;
 	void (*destroy)(vm_t* self);
 
@@ -196,14 +199,13 @@ struct vm_s {
 	unsigned int codeSize;			// code + jump targets, needed for proper munmap()
 	unsigned int codeLength;		// just for information
 
-	int32_t		instructionCount;
+	int			instructionCount;
 	intptr_t	*instructionPointers;
 
-	uint32_t	dataMask;
-	uint32_t	dataLength;			// data segment length
-	uint32_t	exactDataLength;	// from qvm header
-	uint32_t	dataAlloc;			// actually allocated, for mmap()/munmap()
-	uint32_t	programStackExtra;
+	unsigned int dataMask;
+	unsigned int dataLength;			// data segment length
+	unsigned int exactDataLength;	// from qvm header
+	unsigned int dataAlloc;			// actually allocated, for mmap()/munmap()
 
 	int			numSymbols;
 	vmSymbol_t	*symbols;
@@ -212,10 +214,8 @@ struct vm_s {
 	int			breakFunction;		// increment breakCount on function entry to this
 	int			breakCount;
 
-	int			syscallCount;		// syscall counter for current VM_Call invocation
-
 	int32_t		*jumpTableTargets;
-	int32_t		numJumpTableTargets;
+	int			numJumpTableTargets;
 
 	uint32_t	crc32sum;
 

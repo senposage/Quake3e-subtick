@@ -302,8 +302,6 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 
 	backEnd.doneBloom = qfalse;
 
-	backEnd.color2D.u32 = ~0U;
-
 	// check for errors
 	GL_CheckErrors();
 
@@ -339,10 +337,7 @@ void RE_BeginFrame( stereoFrame_t stereoFrame ) {
 					return;
 				}
 				clrcmd->colorMask = qtrue;
-#ifdef USE_FBO
-				if ( !fboEnabled )
-#endif
-				{
+				if ( !fboEnabled ) {
 					// clear both, front and backbuffer.
 					clrcmd->frontAndBack = qtrue;
 				}
@@ -429,9 +424,9 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	}
 	cmd->commandId = RC_SWAP_BUFFERS;
 
-	R_IssueRenderCommands();
-
 	R_PerformanceCounters();
+
+	R_IssueRenderCommands();
 
 	R_InitNextFrame();
 
@@ -449,11 +444,8 @@ void RE_EndFrame( int *frontEndMsec, int *backEndMsec ) {
 	if ( ri.Cvar_CheckGroup( CVG_RENDERER ) )
 	{
 		ARB_UpdatePrograms();
-
-#ifdef USE_FBO
 		if ( r_ext_multisample->modified || r_hdr->modified )
 			QGL_InitFBO();
-#endif
 
 		if ( r_textureMode->modified )
 			GL_TextureMode( r_textureMode->string );
@@ -502,7 +494,6 @@ void RE_ThrottleBackend( void )
 
 void RE_FinishBloom( void )
 {
-#ifdef USE_FBO
 	finishBloomCommand_t *cmd;
 
 	if ( !tr.registered ) {
@@ -515,17 +506,12 @@ void RE_FinishBloom( void )
 	}
 
 	cmd->commandId = RC_FINISHBLOOM;
-#endif // USE_FBO
 }
 
 
 qboolean RE_CanMinimize( void )
 {
-#ifdef USE_FBO
 	return fboEnabled;
-#else
-	return qfalse;
-#endif
 }
 
 
