@@ -1,0 +1,64 @@
+name: Apply patches to UrbanPotato/Quake3e-urt
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch name to create in Quake3e-urt'
+        required: false
+        default: 'subtick-patches'
+
+jobs:
+  apply-patches:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout senposage/Quake3e-subtick (patches source)
+        uses: actions/checkout@v4
+        with:
+          path: subtick
+
+      - name: Clone UrbanPotato/Quake3e-urt
+        run: |
+          git clone "https://x-access-token:${{ secrets.GH_PAT }}@github.com/UrbanPotato/Quake3e-urt.git" urt
+          cd urt
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Create branch
+        run: |
+          cd urt
+          BRANCH="${{ github.event.inputs.branch }}"
+          git checkout -b "$BRANCH"
+
+      - name: Apply patches in order
+        run: |
+          cd urt
+          for patch in $(ls "$GITHUB_WORKSPACE"/subtick/patches/*.patch | sort -V); do
+            echo "Applying $patch ..."
+            git am --3way "$patch" || {
+              echo "::error::Failed to apply patch: $patch"
+              git am --abort
+              exit 1
+            }
+          done
+
+      - name: Push branch to UrbanPotato/Quake3e-urt
+        run: |
+          cd urt
+          BRANCH="${{ github.event.inputs.branch }}"
+          git push origin "$BRANCH"
+
+      - name: Create pull request
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          BRANCH="${{ github.event.inputs.branch }}"
+          gh pr create \
+            --repo UrbanPotato/Quake3e-urt \
+            --head "$BRANCH" \
+            --base main \
+            --title "Apply subtick + FTWGL patches from senposage/Quake3e-subtick" \
+            --body "$(cat "$GITHUB_WORKSPACE/subtick/patches/README.md")"
