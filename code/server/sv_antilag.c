@@ -8,7 +8,7 @@ Architecture overview:
                                → QVM sees this. level.time advances here.
                                  QVM's own FIFO antilag runs here unchanged.
 
-  SHADOW SUB-TICK (sv_fps * sv_physicsScale Hz)
+  SHADOW RECORDING (sv_fps Hz — one entry per engine tick)
                                  → Engine only. Records entity positions into
                                    svShadowHistory[]. QVM never sees this.
 
@@ -109,25 +109,28 @@ static int                  sv_antilag_lastFpsValue = 0; // track sv_fps value i
 /*
 SV_Antilag_ComputeConfig
 
-Recomputes shadow tick rate and history depth from current cvars.
-Called on init and whenever sv_fps or sv_physicsScale change.
+Recomputes shadow tick interval and history depth from current cvars.
+Called on init and whenever sv_fps or sv_antilagMaxMs change.
+
+Recording happens once per engine tick (sv_fps Hz), so the slot count
+and tick interval are based on sv_fps alone.  sv_physicsScale no longer
+affects the recording rate — it was removed from the recording loop to
+avoid filling the ring buffer with duplicate-timestamp entries.
 */
 static void SV_Antilag_ComputeConfig( void ) {
     int fps   = sv_fps ? sv_fps->integer : 40;
-    int scale = sv_physicsScale ? sv_physicsScale->integer : 3;
     int winMs = sv_antilagMaxMs ? sv_antilagMaxMs->integer : SV_ANTILAG_HISTORY_WINDOW_MS;
 
-    // Clamp scale to sane integer range so sub-steps divide game tick evenly
-    if ( scale < 1 )  scale = 1;
-    if ( scale > 8 )  scale = 8;
+    if ( fps < 1 ) fps = 1;
 
-    // Shadow Hz = sv_fps * scale (e.g. 40 * 3 = 120Hz)
-    int shadowHz = fps * scale;
-    sv_shadowTickMs = 1000 / shadowHz;
+    // Shadow tick = engine tick interval (e.g. 25ms at sv_fps 40)
+    sv_shadowTickMs = 1000 / fps;
     if ( sv_shadowTickMs < 1 ) sv_shadowTickMs = 1;
 
-    // History depth = enough slots to cover the window at shadow Hz
-    sv_shadowHistorySlots = ( shadowHz * winMs ) / 1000;
+    // History depth = enough slots to cover the window at sv_fps Hz.
+    // +1 ensures the oldest entry fully reaches the window boundary
+    // (N slots span (N-1) intervals).
+    sv_shadowHistorySlots = ( fps * winMs ) / 1000 + 1;
     if ( sv_shadowHistorySlots < 4 )
         sv_shadowHistorySlots = 4;
     if ( sv_shadowHistorySlots > SV_ANTILAG_MAX_HISTORY_SLOTS )
@@ -496,9 +499,9 @@ void SV_Antilag_Init( void ) {
 /*
 SV_Antilag_RecordPositions
 
-Called from SV_Frame() BEFORE GAME_RUN_FRAME, once per shadow sub-tick.
-Decoupled from game tick — runs at sv_fps * sv_physicsScale Hz.
-Recomputes config if cvars changed.
+Called from SV_Frame() once per engine tick, BEFORE GAME_RUN_FRAME.
+Records all active clients into the shadow history ring buffer.
+Recomputes config if sv_fps or sv_antilagMaxMs changed.
 */
 void SV_Antilag_RecordPositions( void ) {
     int i;

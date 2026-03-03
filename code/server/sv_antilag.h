@@ -24,7 +24,7 @@ extern cvar_t *sv_snapRateLog;
 // Called once at server init — registers cvars, resets state
 void        SV_Antilag_Init( void );
 
-// Called from SV_Frame() before GAME_RUN_FRAME, sv_physicsScale times per game tick.
+// Called from SV_Frame() once per engine tick, before GAME_RUN_FRAME.
 // Records all active client positions into engine-side shadow history.
 // Completely decoupled from level.time and QVM.
 void        SV_Antilag_RecordPositions( void );
