@@ -1,1 +1,2 @@
-404: Not Found
+#define SDL_REVISION "hg-12952:bc90ce38f1e2"
+#define SDL_REVISION_NUMBER 12952

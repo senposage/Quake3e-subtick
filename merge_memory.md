@@ -306,14 +306,40 @@ The fork adds these features on top of upstream:
 
 ---
 
-## AFTER FIXING CORRUPTED FILES - FUTURE WORK
+## PR #40 SESSION - Fix Corrupted Files
 
-Once the 93 corrupted files are fixed, these tasks remain:
-1. **Verify Linux build** on Quake3e-upstreammerge branch
+### What was done:
+1. Read merge_memory.md from Quake3e-upstreammerge branch
+2. Merged Quake3e-upstreammerge into working branch (copilot/merge-memory-changes)
+3. Found 95 corrupted files (not 93 as originally counted - 2 extra .editorconfig files)
+4. Restored all 94 corrupted files from master branch (d22f38b) using `git checkout d22f38b -- <file>`
+5. Deleted vim swap file: `code/renderervk/shaders/spirv/.shader_data.c.swp`
+6. Verified zero corrupted files remain
+7. Verified critical file line counts match expected values:
+   - snd_dmahd.c: 1467 lines ✓
+   - snd_dmahd.h: 17 lines ✓
+   - cm_load_bsp1.c: 988 lines ✓
+   - cm_load_bsp2.c: 625 lines ✓
+   - cm_load_bsp2.h: 234 lines ✓
+   - tr_font.c: 562 lines ✓
+
+### Files fixed (95 total):
+- 6 critical engine source files (snd_dmahd, cm_load_bsp, tr_font)
+- 74 SDL2 Windows headers
+- 12 MSVC 2019 project files
+- 2 binary files (rounded.png, win_resource.aps)
+- 1 vim swap file deleted (.shader_data.c.swp)
+
+---
+
+## REMAINING FUTURE WORK
+
+These tasks remain after fixing corrupted files:
+1. **Verify Linux build** on this branch
 2. **Verify Windows build** (needs MSVC or MinGW cross-compile)
-3. **Diff Quake3e-upstreammerge vs master** to confirm only intentional upstream changes remain
+3. **Diff vs master** to confirm only intentional upstream changes remain
 4. **Test fork features** still work (subtick, antilag, antiwarp, DMAHD, BSP2)
-5. **Eventually merge Quake3e-upstreammerge into master** when everything is verified
+5. **Eventually merge into master** when everything is verified
 
 ---
 
