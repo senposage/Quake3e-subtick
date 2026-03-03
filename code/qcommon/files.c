@@ -4033,7 +4033,7 @@ static void FS_TouchFile_f( void ) {
 FS_CompleteFileName
 ============
 */
-static void FS_CompleteFileName( char *args, int argNum ) {
+static void FS_CompleteFileName( const char *args, int argNum ) {
 	if( argNum == 2 ) {
 		Field_CompleteFilename( "", "", qfalse, FS_MATCH_ANY );
 	}
@@ -4053,7 +4053,7 @@ static void FS_Which_f( void ) {
 	directory_t		*dir;
 	long			hash;
 	FILE			*temp;
-	char			*filename;
+	const char		*filename;
 	char			buf[ MAX_OSPATH*2 + 1 ];
 	int				numfound;
 

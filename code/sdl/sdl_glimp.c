@@ -63,13 +63,22 @@ GLimp_Shutdown
 */
 void GLimp_Shutdown( qboolean unloadDLL )
 {
+	const char* drv = SDL_GetCurrentVideoDriver();
+
 	IN_Shutdown();
 
-	SDL_DestroyWindow( SDL_window );
-	SDL_window = NULL;
+	if ( glw_state.isFullscreen ) {
+		if ( drv && strcmp( drv, "x11" ) == 0 ) {
+			SDL_WarpMouseGlobal( glw_state.desktop_width / 2, glw_state.desktop_height / 2 );
+		} else {
+			SDL_ShowCursor( SDL_TRUE );
+		}
+	}
 
-	if ( glw_state.isFullscreen )
-		SDL_WarpMouseGlobal( glw_state.desktop_width / 2, glw_state.desktop_height / 2 );
+	if ( SDL_window ) {
+		SDL_DestroyWindow( SDL_window );
+		SDL_window = NULL;
+	}
 
 	if ( unloadDLL )
 		SDL_QuitSubSystem( SDL_INIT_VIDEO );
@@ -94,7 +103,7 @@ void GLimp_Minimize( void )
 GLimp_LogComment
 ===============
 */
-void GLimp_LogComment( char *comment )
+void GLimp_LogComment( const char *comment )
 {
 }
 
@@ -272,7 +281,11 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 
 	if ( fullscreen )
 	{
+#ifdef MACOS_X
+		flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#else
 		flags |= SDL_WINDOW_FULLSCREEN;
+#endif
 	}
 	else if ( r_noborder->integer )
 	{
@@ -348,17 +361,11 @@ static int GLW_SetMode( int mode, const char *modeFS, qboolean fullscreen, qbool
 		{ // reduce depthBits
 			if (testDepthBits == 24)
 				testDepthBits = 16;
-			else if (testDepthBits == 16)
-				testDepthBits = 8;
 		}
 
 		if ((i % 4) == 1)
 		{ // reduce stencilBits
-			if (testStencilBits == 24)
-				testStencilBits = 16;
-			else if (testStencilBits == 16)
-				testStencilBits = 8;
-			else
+			if (testStencilBits == 8)
 				testStencilBits = 0;
 		}
 
@@ -602,11 +609,13 @@ void GLimp_Init( glconfig_t *config )
 	glw_state.config = config; // feedback renderer configuration
 
 	in_nograb = Cvar_Get( "in_nograb", "0", 0 );
+	Cvar_SetDescription( in_nograb, "Do not capture mouse in game, may be useful during online streaming." );
 
 	r_allowSoftwareGL = Cvar_Get( "r_allowSoftwareGL", "0", CVAR_LATCH );
 
 	r_swapInterval = Cvar_Get( "r_swapInterval", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_stereoEnabled = Cvar_Get( "r_stereoEnabled", "0", CVAR_ARCHIVE | CVAR_LATCH );
+	Cvar_SetDescription( r_stereoEnabled, "Enable stereo rendering for techniques like shutter glasses." );
 
 	// Create the window and set up the context
 	err = GLimp_StartDriverAndSetMode( r_mode->integer, r_modeFullscreen->string, r_fullscreen->integer, qfalse );
@@ -634,12 +643,12 @@ void GLimp_Init( glconfig_t *config )
 	config->driverType = GLDRV_ICD;
 	config->hardwareType = GLHW_GENERIC;
 
-	Key_ClearStates();
+	// This depends on SDL_INIT_VIDEO, hence having it here
+	IN_Init();
 
 	HandleEvents();
 
-	// This depends on SDL_INIT_VIDEO, hence having it here
-	IN_Init();
+	Key_ClearStates();
 }
 
 
@@ -693,9 +702,11 @@ void VKimp_Init( glconfig_t *config )
 	Com_DPrintf( "VKimp_Init()\n" );
 
 	in_nograb = Cvar_Get( "in_nograb", "0", CVAR_ARCHIVE );
+	Cvar_SetDescription( in_nograb, "Do not capture mouse in game, may be useful during online streaming." );
 
 	r_swapInterval = Cvar_Get( "r_swapInterval", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_stereoEnabled = Cvar_Get( "r_stereoEnabled", "0", CVAR_ARCHIVE | CVAR_LATCH );
+	Cvar_SetDescription( r_stereoEnabled, "Enable stereo rendering for techniques like shutter glasses." );
 
 	// feedback to renderer configuration
 	glw_state.config = config;
@@ -729,16 +740,16 @@ void VKimp_Init( glconfig_t *config )
 		Com_Error( ERR_FATAL, "VKimp_Init: qvkGetInstanceProcAddr is NULL" );
 	}
 
-	// This values force the UI to disable driver selection
+	// These values force the UI to disable driver selection
 	config->driverType = GLDRV_ICD;
 	config->hardwareType = GLHW_GENERIC;
 
-	Key_ClearStates();
+	// This depends on SDL_INIT_VIDEO, hence having it here
+	IN_Init();
 
 	HandleEvents();
 
-	// This depends on SDL_INIT_VIDEO, hence having it here
-	IN_Init();
+	Key_ClearStates();
 }
 
 
@@ -774,18 +785,39 @@ VKimp_Shutdown
 */
 void VKimp_Shutdown( qboolean unloadDLL )
 {
+	const char* drv = SDL_GetCurrentVideoDriver();
+
 	IN_Shutdown();
 
-	SDL_DestroyWindow( SDL_window );
-	SDL_window = NULL;
+	if ( glw_state.isFullscreen ) {
+		if ( drv && strcmp( drv, "x11" ) == 0 ) {
+			SDL_WarpMouseGlobal( glw_state.desktop_width / 2, glw_state.desktop_height / 2 );
+		} else {
+			SDL_ShowCursor( SDL_TRUE );
+		}
+	}
 
-	if ( glw_state.isFullscreen )
-		SDL_WarpMouseGlobal( glw_state.desktop_width / 2, glw_state.desktop_height / 2 );
+	if ( SDL_window ) {
+		SDL_DestroyWindow( SDL_window );
+		SDL_window = NULL;
+	}
 
 	if ( unloadDLL )
 		SDL_QuitSubSystem( SDL_INIT_VIDEO );
 }
 #endif // USE_VULKAN_API
+
+
+/*
+================
+GLW_HideFullscreenWindow
+================
+*/
+void GLW_HideFullscreenWindow( void ) {
+	if ( SDL_window && glw_state.isFullscreen ) {
+		SDL_HideWindow( SDL_window );
+	}
+}
 
 
 /*

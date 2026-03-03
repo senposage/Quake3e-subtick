@@ -113,6 +113,7 @@ const char *MSG_ReadBigString (msg_t *sb);
 const char *MSG_ReadStringLine (msg_t *sb);
 float	MSG_ReadAngle16 (msg_t *sb);
 void	MSG_ReadData (msg_t *sb, void *buffer, int size);
+int	MSG_ReadEntitynum(msg_t *sb);
 
 void MSG_WriteDeltaUsercmdKey( msg_t *msg, int key, const usercmd_t *from, const usercmd_t *to );
 void MSG_ReadDeltaUsercmdKey( msg_t *msg, int key, const usercmd_t *from, usercmd_t *to );
@@ -475,6 +476,15 @@ typedef enum {
 	VM_COUNT
 } vmIndex_t;
 
+// we don't need more than 4 arguments (counting callnum) for vmMain, at least in Vanilla Quake3
+#define MAX_VMMAIN_CALL_ARGS 4
+
+typedef intptr_t (QDECL *vmMainFunc_t)( int command, int arg0, int arg1, int arg2 );
+
+typedef intptr_t (*syscall_t)( intptr_t *parms );
+typedef intptr_t (QDECL *dllSyscall_t)( intptr_t callNum, ... );
+typedef void (QDECL *dllEntry_t)( dllSyscall_t syscallptr );
+
 void	VM_Init( void );
 vm_t	*VM_Create( vmIndex_t index, syscall_t systemCalls, dllSyscall_t dllSyscalls, vmInterpret_t interpret );
 
@@ -536,6 +546,10 @@ void Cbuf_Init( void );
 // allocates an initial text buffer that will grow as needed
 
 void Cbuf_AddText( const char *text );
+
+void Cbuf_NestedAdd( const char *text );
+void Cbuf_NestedReset( void );
+void Cbuf_InsertText( const char *text );
 // Adds command text at the end of the buffer, does NOT add a final \n
 
 void Cbuf_ExecuteText( cbufExec_t exec_when, const char *text );
@@ -546,6 +560,8 @@ void Cbuf_Execute( void );
 // them through Cmd_ExecuteString.  Stops when the buffer is empty.
 // Normally called once per frame, but may be explicitly invoked.
 // Do not call inside a command function, or current args will be destroyed.
+
+void Cbuf_Wait( void );
 
 //===========================================================================
 
@@ -571,7 +587,7 @@ void	Cmd_SetDescription( const char *cmd_name, char *description );
 void	Cmd_RemoveCommand( const char *cmd_name );
 void	Cmd_RemoveCgameCommands( void );
 
-typedef void (*completionFunc_t)( char *args, int argNum );
+typedef void (*completionFunc_t)( const char *args, int argNum );
 
 // don't allow VMs to remove system commands
 void	Cmd_RemoveCommandSafe( const char *cmd_name );
@@ -579,12 +595,12 @@ void	Cmd_RemoveCommandSafe( const char *cmd_name );
 void	Cmd_CommandCompletion( void(*callback)(const char *s) );
 // callback with each valid string
 void	Cmd_SetCommandCompletionFunc( const char *command, completionFunc_t complete );
-qboolean Cmd_CompleteArgument( const char *command, char *args, int argNum );
-void	Cmd_CompleteWriteCfgName( char *args, int argNum );
+qboolean Cmd_CompleteArgument( const char *command, const char *args, int argNum );
+void	Cmd_CompleteWriteCfgName( const char *args, int argNum );
 
 int		Cmd_Argc( void );
 void	Cmd_Clear( void );
-char	*Cmd_Argv( int arg );
+const char	*Cmd_Argv( int arg );
 void	Cmd_ArgvBuffer( int arg, char *buffer, int bufferLength );
 char	*Cmd_ArgsFrom( int arg );
 void	Cmd_ArgsBuffer( char *buffer, int bufferLength );
@@ -701,6 +717,7 @@ const char *Cvar_InfoString_Big( int bit, qboolean *truncated );
 void	Cvar_InfoStringBuffer( int bit, char *buff, int buffsize );
 void	Cvar_CheckRange( cvar_t *cv, const char *minVal, const char *maxVal, cvarValidator_t type );
 void	Cvar_SetDescription( cvar_t *var, const char *var_description );
+void	Cvar_SetDescription2( const char *var_name, const char *var_description );
 
 void	Cvar_SetGroup( cvar_t *var, cvarGroup_t group );
 int		Cvar_CheckGroup( cvarGroup_t group );
@@ -708,7 +725,7 @@ void	Cvar_ResetGroup( cvarGroup_t group, qboolean resetModifiedFlags );
 
 void	Cvar_Restart( qboolean unsetVM );
 
-void	Cvar_CompleteCvarName( char *args, int argNum );
+void	Cvar_CompleteCvarName( const char *args, int argNum );
 
 extern	int			cvar_modifiedFlags;
 // whenever a cvar is modifed, its flags will be OR'd into this, so
@@ -749,8 +766,11 @@ typedef enum {
 #define FS_MATCH_PURE   (1<<1)
 #define FS_MATCH_UNPURE (1<<2)
 #define FS_MATCH_STICK  (1<<3)
+#define FS_MATCH_SUBDIRS   (1<<4)
 #define FS_MATCH_PK3s   (FS_MATCH_PURE | FS_MATCH_UNPURE)
 #define FS_MATCH_ANY    (FS_MATCH_EXTERN | FS_MATCH_PURE | FS_MATCH_UNPURE)
+
+#define FS_MAX_SUBDIRS		8 /* should be enough for practical use with FS_MATCH_SUBDIRS */
 
 #define	MAX_FILE_HANDLES	64
 #define	FS_INVALID_HANDLE	0
@@ -1093,6 +1113,7 @@ extern	cvar_t	*com_buildScript;		// for building release pak files
 extern	cvar_t	*com_journal;
 extern	cvar_t	*com_cameraMode;
 extern	cvar_t	*com_protocol;
+extern	qboolean com_protocolCompat;
 
 // both client and server must agree to pause
 extern	cvar_t	*sv_paused;
@@ -1197,6 +1218,7 @@ void Hunk_Log( void);
 void Com_TouchMemory( void );
 
 // commandLine should not include the executable name (argv[0])
+void Com_FrameInit( void );
 void Com_Init( char *commandLine );
 void Com_Frame( qboolean noDelay );
 
@@ -1339,8 +1361,8 @@ void	Sys_SendKeyEvents( void );
 void	Sys_Sleep( int msec );
 char	*Sys_ConsoleInput( void );
 
-void	QDECL Sys_Error( const char *error, ...) __attribute__ ((noreturn, format (printf, 1, 2)));
-void	Sys_Quit (void) __attribute__ ((noreturn));
+void	NORETURN FORMAT_PRINTF(1, 2) QDECL Sys_Error( const char *error, ... );
+void	NORETURN Sys_Quit( void );
 char	*Sys_GetClipboardData( void );	// note that this isn't journaled...
 void	Sys_SetClipboardBitmap( const byte *bitmap, int length );
 
@@ -1350,7 +1372,8 @@ void	Sys_Print( const char *msg );
 void	QDECL Sys_SetStatus( const char *format, ...) __attribute__ ((format (printf, 1, 2)));
 
 #ifdef USE_AFFINITY_MASK
-void	Sys_SetAffinityMask( int mask );
+uint64_t Sys_GetAffinityMask( void );
+qboolean Sys_SetAffinityMask( const uint64_t mask );
 #endif
 
 // Sys_Milliseconds should only be used for profiling purposes,
@@ -1376,7 +1399,7 @@ qboolean	Sys_StringToAdr( const char *s, netadr_t *a, netadrtype_t family );
 qboolean	Sys_IsLANAddress(const netadr_t *adr);
 void		Sys_ShowIP(void);
 
-void	Sys_Mkdir( const char *path );
+qboolean	Sys_Mkdir( const char *path );
 FILE	*Sys_FOpen( const char *ospath, const char *mode );
 qboolean Sys_ResetReadOnlyAttribute( const char *ospath );
 
@@ -1385,7 +1408,11 @@ const char *Sys_DefaultBasePath( void );
 const char *Sys_DefaultHomePath( void );
 const char *Sys_SteamPath( void );
 
-char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, qboolean wantsubs );
+#ifdef __APPLE__
+char    *Sys_DefaultAppPath( void );
+#endif
+
+char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, int subdirs );
 void Sys_FreeFileList( char **list );
 
 qboolean Sys_GetFileStats( const char *filename, fileOffset_t *size, fileTime_t *mtime, fileTime_t *ctime );

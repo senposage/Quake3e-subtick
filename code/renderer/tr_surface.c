@@ -70,11 +70,13 @@ void RB_CheckOverflow( int verts, int indexes ) {
 RB_AddQuadStampExt
 ==============
 */
-void RB_AddQuadStampExt( const vec3_t origin, const vec3_t left, const vec3_t up, const byte *color, float s1, float t1, float s2, float t2 ) {
+void RB_AddQuadStampExt( const vec3_t origin, const vec3_t left, const vec3_t up, color4ub_t color, float s1, float t1, float s2, float t2 ) {
 	vec3_t		normal;
 	int			ndx;
 
+#ifdef USE_VBO
 	VBO_Flush();
+#endif
 
 	RB_CHECKOVERFLOW( 4, 6 );
 
@@ -83,7 +85,7 @@ void RB_AddQuadStampExt( const vec3_t origin, const vec3_t left, const vec3_t up
 	ndx = tess.numVertexes;
 
 	// triangle indexes for a simple quad
-	tess.indexes[ tess.numIndexes ] = ndx;
+	tess.indexes[ tess.numIndexes + 0 ] = ndx + 0;
 	tess.indexes[ tess.numIndexes + 1 ] = ndx + 1;
 	tess.indexes[ tess.numIndexes + 2 ] = ndx + 3;
 
@@ -107,7 +109,6 @@ void RB_AddQuadStampExt( const vec3_t origin, const vec3_t left, const vec3_t up
 	tess.xyz[ndx+3][1] = origin[1] + left[1] - up[1];
 	tess.xyz[ndx+3][2] = origin[2] + left[2] - up[2];
 
-
 	// constant normal all the way around
 	VectorSubtract( vec3_origin, backEnd.viewParms.or.axis[0], normal );
 
@@ -130,14 +131,70 @@ void RB_AddQuadStampExt( const vec3_t origin, const vec3_t left, const vec3_t up
 
 	// constant color all the way around
 	// should this be identity and let the shader specify from entity?
-	* ( unsigned int * ) &tess.vertexColors[ndx] = 
-	* ( unsigned int * ) &tess.vertexColors[ndx+1] = 
-	* ( unsigned int * ) &tess.vertexColors[ndx+2] = 
-	* ( unsigned int * ) &tess.vertexColors[ndx+3] = 
-		* ( unsigned int * )color;
+	tess.vertexColors[ndx + 0] =
+	tess.vertexColors[ndx + 1] =
+	tess.vertexColors[ndx + 2] =
+	tess.vertexColors[ndx + 3] = color;
 
 	tess.numVertexes += 4;
 	tess.numIndexes += 6;
+}
+
+
+void RB_AddQuadStamp2( float x, float y, float w, float h, float s1, float t1, float s2, float t2, color4ub_t color ) {
+	int			numIndexes;
+	int			numVerts;
+
+#ifdef USE_VBO
+	VBO_Flush();
+#endif
+
+	RB_CHECKOVERFLOW( 4, 6 );
+
+	tess.surfType = SF_TRIANGLES;
+
+	numIndexes = tess.numIndexes;
+	numVerts = tess.numVertexes;
+
+	tess.numVertexes += 4;
+	tess.numIndexes += 6;
+
+	tess.indexes[numIndexes + 0] = numVerts + 3;
+	tess.indexes[numIndexes + 1] = numVerts + 0;
+	tess.indexes[numIndexes + 2] = numVerts + 2;
+	tess.indexes[numIndexes + 3] = numVerts + 2;
+	tess.indexes[numIndexes + 4] = numVerts + 0;
+	tess.indexes[numIndexes + 5] = numVerts + 1;
+
+	tess.vertexColors[numVerts + 0] =
+	tess.vertexColors[numVerts + 1] =
+	tess.vertexColors[numVerts + 2] =
+	tess.vertexColors[numVerts + 3] = color;
+
+	tess.xyz[numVerts + 0][0] = x;
+	tess.xyz[numVerts + 0][1] = y;
+	tess.xyz[numVerts + 0][2] = 0;
+
+	tess.xyz[numVerts + 1][0] = x + w;
+	tess.xyz[numVerts + 1][1] = y;
+	tess.xyz[numVerts + 1][2] = 0;
+
+	tess.xyz[numVerts + 2][0] = x + w;
+	tess.xyz[numVerts + 2][1] = y + h;
+	tess.xyz[numVerts + 2][2] = 0;
+
+	tess.xyz[numVerts + 3][0] = x;
+	tess.xyz[numVerts + 3][1] = y + h;
+	tess.xyz[numVerts + 3][2] = 0;
+
+	tess.texCoords[0][numVerts + 0][0] = s1;
+	tess.texCoords[0][numVerts + 0][1] = t1;
+	tess.texCoords[0][numVerts + 1][0] = s2;
+	tess.texCoords[0][numVerts + 1][1] = t1;
+	tess.texCoords[0][numVerts + 2][0] = s2;
+	tess.texCoords[0][numVerts + 2][1] = t2;
+	tess.texCoords[0][numVerts + 3][0] = s1;
+	tess.texCoords[0][numVerts + 3][1] = t2;
 }
 
 
@@ -146,7 +203,7 @@ void RB_AddQuadStampExt( const vec3_t origin, const vec3_t left, const vec3_t up
 RB_AddQuadStamp
 ==============
 */
-void RB_AddQuadStamp( const vec3_t origin, const vec3_t left, const vec3_t up, const byte *color ) {
+void RB_AddQuadStamp( const vec3_t origin, const vec3_t left, const vec3_t up, color4ub_t color ) {
 	RB_AddQuadStampExt( origin, left, up, color, 0, 0, 1, 1 );
 }
 
@@ -184,7 +241,7 @@ static void RB_SurfaceSprite( void ) {
 		VectorSubtract( vec3_origin, left, left );
 	}
 
-	RB_AddQuadStamp( backEnd.currentEntity->e.origin, left, up, backEnd.currentEntity->e.shader.rgba );
+	RB_AddQuadStamp( backEnd.currentEntity->e.origin, left, up, backEnd.currentEntity->e.shader );
 }
 
 
@@ -193,11 +250,13 @@ static void RB_SurfaceSprite( void ) {
 RB_SurfacePolychain
 =============
 */
-static void RB_SurfacePolychain( srfPoly_t *p ) {
+static void RB_SurfacePolychain( const srfPoly_t *p ) {
 	int		i;
 	int		numv;
 
+#ifdef USE_VBO
 	VBO_Flush();
+#endif
 
 	RB_CHECKOVERFLOW( p->numVerts, 3*(p->numVerts - 2) );
 
@@ -209,7 +268,7 @@ static void RB_SurfacePolychain( srfPoly_t *p ) {
 		VectorCopy( p->verts[i].xyz, tess.xyz[numv] );
 		tess.texCoords[0][numv][0] = p->verts[i].st[0];
 		tess.texCoords[0][numv][1] = p->verts[i].st[1];
-		tess.vertexColors[numv].u32 = p->verts[ i ].modulate.u32;
+		tess.vertexColors[numv] = p->verts[ i ].modulate;
 
 		numv++;
 	}
@@ -231,9 +290,9 @@ static void RB_SurfacePolychain( srfPoly_t *p ) {
 RB_SurfaceTriangles
 =============
 */
-static void RB_SurfaceTriangles( srfTriangles_t *srf ) {
+static void RB_SurfaceTriangles( const srfTriangles_t *srf ) {
 	int			i;
-	drawVert_t	*dv;
+	const drawVert_t	*dv;
 	float		*xyz, *normal;
 	float		*texCoords0;
 	float		*texCoords1;
@@ -242,6 +301,7 @@ static void RB_SurfaceTriangles( srfTriangles_t *srf ) {
 	int			dlightBits;
 #endif
 
+#ifdef USE_VBO
 #ifdef USE_LEGACY_DLIGHTS
 	if ( tess.allowVBO && srf->vboItemIndex && !srf->dlightBits ) {
 #else
@@ -263,6 +323,7 @@ static void RB_SurfaceTriangles( srfTriangles_t *srf ) {
 	}
 
 	VBO_Flush();
+#endif // USE_VBO
 
 	RB_CHECKOVERFLOW( srf->numVerts, srf->numIndexes );
 
@@ -739,7 +800,9 @@ static void RB_SurfaceMesh(md3Surface_t *surface) {
 	int				Bob, Doug;
 	int				numVerts;
 
+#ifdef USE_VBO
 	VBO_Flush();
+#endif
 
 	RB_CHECKOVERFLOW( surface->numVerts, surface->numTriangles * 3 );
 
@@ -794,6 +857,7 @@ static void RB_SurfaceFace( const srfSurfaceFace_t *surf ) {
 	int			dlightBits;
 #endif
 
+#ifdef USE_VBO
 #ifdef USE_LEGACY_DLIGHTS
 	if ( tess.allowVBO && surf->vboItemIndex && !surf->dlightBits ) {
 #else
@@ -815,6 +879,7 @@ static void RB_SurfaceFace( const srfSurfaceFace_t *surf ) {
 	}
 
 	VBO_Flush();
+#endif // USE_VBO
 
 	RB_CHECKOVERFLOW( surf->numPoints, surf->numIndices );
 
@@ -903,7 +968,7 @@ static float LodErrorForVolume( vec3_t local, float radius ) {
 	return r_lodCurveError->value / d;
 }
 
-
+#ifdef USE_VBO_GRID
 void RB_SurfaceGridEstimate( srfGridMesh_t *cv, int *numVertexes, int *numIndexes )
 {
 	int		lodWidth, lodHeight;
@@ -967,7 +1032,7 @@ void RB_SurfaceGridEstimate( srfGridMesh_t *cv, int *numVertexes, int *numIndexe
 	tess.numVertexes = 0;
 	tess.numIndexes = 0;
 }
-
+#endif // USE_VBO_GRID
 
 /*
 =============
@@ -996,6 +1061,7 @@ static void RB_SurfaceGrid( srfGridMesh_t *cv ) {
 	int		*vDlightBits;
 #endif
 
+#ifdef USE_VBO_GRID
 #ifdef USE_LEGACY_DLIGHTS
 	if ( tess.allowVBO && cv->vboItemIndex && !cv->dlightBits ) {
 #else
@@ -1017,6 +1083,11 @@ static void RB_SurfaceGrid( srfGridMesh_t *cv ) {
 	}
 
 	VBO_Flush();
+#else
+#ifdef USE_VBO
+	VBO_Flush();
+#endif
+#endif
 
 #ifdef USE_LEGACY_DLIGHTS
 	dlightBits = cv->dlightBits;
@@ -1072,14 +1143,15 @@ static void RB_SurfaceGrid( srfGridMesh_t *cv ) {
 			// if we don't have enough space for at least one strip, flush the buffer
 			if ( vrows < 2 || irows < 1 ) {
 				if ( tr.mapLoading ) {
+#ifdef USE_VBO_GRID
 					// estimate and flush
 					if ( cv->vboItemIndex ) {
 						VBO_PushData( cv->vboItemIndex, &tess );
 						tess.numIndexes = 0;
 						tess.numVertexes = 0;
-					} else {
-						ri.Error( ERR_DROP, "Unexpected grid flush during map loading!\n" );
-					}
+					} else
+#endif
+					ri.Error( ERR_DROP, "Unexpected grid flush during map loading!\n" );
 				} else {
 					RB_EndSurface();
 					RB_BeginSurface( tess.shader, tess.fogNum );
@@ -1246,8 +1318,10 @@ RB_SurfaceEntity
 Entities that have a single procedurally generated surface
 ====================
 */
-static void RB_SurfaceEntity( surfaceType_t *surfType ) {
+static void RB_SurfaceEntity( const surfaceType_t *surfType ) {
+#ifdef USE_VBO
 	VBO_Flush();
+#endif
 	switch( backEnd.currentEntity->e.reType ) {
 	case RT_SPRITE:
 		RB_SurfaceSprite();
@@ -1272,14 +1346,16 @@ static void RB_SurfaceEntity( surfaceType_t *surfType ) {
 }
 
 
-static void RB_SurfaceBad( surfaceType_t *surfType ) {
+static void RB_SurfaceBad( const surfaceType_t *surfType ) {
 	ri.Printf( PRINT_ALL, "Bad surface tesselated.\n" );
 }
 
 
 static void RB_SurfaceFlare( srfFlare_t *surf ) {
 	if ( r_flares->integer ) {
+#ifdef USE_VBO
 		VBO_Flush();
+#endif
 		tess.surfType = SF_FLARE;
 		RB_AddFlare( surf, tess.fogNum, surf->origin, surf->color, surf->normal );
 	}

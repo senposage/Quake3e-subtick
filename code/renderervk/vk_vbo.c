@@ -39,7 +39,7 @@ instead of tesselation like for regular surfaces. Using items queue also
 eleminates run-time tesselation limits.
 
 When it is time to render - we sort queued items to get longest possible
-index sequence run to check if its long enough i.e. worth issuing a draw call.
+index sequence run to check if it is long enough i.e. worth issuing a draw call.
 So long device-local index runs are rendered via multiple draw calls,
 all remaining short index sequences are grouped together into single
 host-visible index buffer which is finally rendered via single draw call.
@@ -141,13 +141,19 @@ static qboolean isStaticTCgen( const shaderStage_t *stage, int bundle )
 
 static qboolean isStaticTCmod( const textureBundle_t *bundle )
 {
-	texMod_t type;
 	int i;
 
 	for ( i = 0; i < bundle->numTexMods; i++ ) {
-		type = bundle->texMods[i].type;
-		if ( type != TMOD_NONE && type != TMOD_SCALE && type != TMOD_TRANSFORM ) {
-			return qfalse;
+		switch ( bundle->texMods[i].type ) {
+			case TMOD_NONE:
+			case TMOD_SCALE:
+			case TMOD_TRANSFORM:
+			case TMOD_OFFSET:
+			case TMOD_SCALE_OFFSET:
+			case TMOD_OFFSET_SCALE:
+				break;
+			default:
+				return qfalse;
 		}
 	}
 
@@ -481,7 +487,9 @@ void R_BuildWorldVBO( msurface_t *surf, int surfCount )
 	msurface_t **surfList;
 	srfSurfaceFace_t *face;
 	srfTriangles_t *tris;
+#ifdef USE_VBO_GRID
 	srfGridMesh_t *grid;
+#endif
 	msurface_t *sf;
 	int ibo_size;
 	int vbo_size;
@@ -527,6 +535,7 @@ void R_BuildWorldVBO( msurface_t *surf, int surfCount )
 			sf->shader->numIndexes += tris->numIndexes;
 			continue;
 		}
+#ifdef USE_VBO_GRID
 		grid = (srfGridMesh_t *) sf->data;
 		if ( grid->surfaceType == SF_GRID && isStaticShader( sf->shader ) ) {
 			grid->vboItemIndex = ++numStaticSurfaces;
@@ -539,8 +548,8 @@ void R_BuildWorldVBO( msurface_t *surf, int surfCount )
 			sf->shader->numIndexes += grid->vboExpectIndices;
 			continue;
 		}
+#endif // USE_VBO_GRID
 	}
-
 	if ( numStaticSurfaces == 0 ) {
 		ri.Printf( PRINT_ALL, "...no static surfaces for VBO\n" );
 		return;
@@ -593,11 +602,13 @@ void R_BuildWorldVBO( msurface_t *surf, int surfCount )
 			surfList[ n++ ] = sf;
 			continue;
 		}
+#ifdef USE_VBO_GRID
 		grid = (srfGridMesh_t *) sf->data;
 		if ( grid->surfaceType == SF_GRID && grid->vboItemIndex ) {
 			surfList[ n++ ] = sf;
 			continue;
 		}
+#endif // USE_VBO_GRID
 	}
 
 	if ( n != numStaticSurfaces ) {
@@ -618,13 +629,17 @@ void R_BuildWorldVBO( msurface_t *surf, int surfCount )
 		sf = surfList[ i ];
 		face = (srfSurfaceFace_t *) sf->data;
 		tris = (srfTriangles_t *) sf->data;
+#ifdef USE_VBO_GRID
 		grid = (srfGridMesh_t *) sf->data;
+#endif
 		if ( face->surfaceType == SF_FACE )
 			face->vboItemIndex = i + 1;
-		else if ( tris->surfaceType == SF_TRIANGLES ) {
+		else if (tris->surfaceType == SF_TRIANGLES) {
 			tris->vboItemIndex = i + 1;
-		} else if ( grid->surfaceType == SF_GRID ){
+#ifdef USE_VBO_GRID
+		} else if (grid->surfaceType == SF_GRID) {
 			grid->vboItemIndex = i + 1;
+#endif
 		} else {
 			ri.Error( ERR_DROP, "Unexpected surface type" );
 		}
@@ -641,12 +656,14 @@ void R_BuildWorldVBO( msurface_t *surf, int surfCount )
 		rb_surfaceTable[ *sf->data ]( sf->data ); // VBO_PushData() may be called multiple times there
 		// setup colors and texture coordinates
 		VBO_PushData( i + 1, &tess );
+#ifdef USE_VBO_GRID
 		if ( grid->surfaceType == SF_GRID ) {
 			vbo_item_t *vi = vbo->items + i + 1;
 			if ( vi->num_vertexes != grid->vboExpectVertices || vi->num_indexes != grid->vboExpectIndices ) {
 				ri.Error( ERR_DROP, "Unexpected grid vertexes/indexes count" );
 			}
 		}
+#endif // USE_VBO_GRID
 		tess.numIndexes = 0;
 		tess.numVertexes = 0;
 	}
@@ -837,7 +854,7 @@ void VBO_RenderIBOItems( void )
 
 		for ( i = 0; i < vbo->ibo_items_count; i++ )
 		{
-			qvkCmdDrawIndexed( vk.cmd->command_buffer, vbo->ibo_items[ i ].length, 1,  vbo->ibo_items[ i ].offset, 0, 0 );
+			vk_draw_indexed( vbo->ibo_items[ i ].length, vbo->ibo_items[ i ].offset );
 		}
 	}
 
@@ -846,7 +863,7 @@ void VBO_RenderIBOItems( void )
 	{
 		vk_bind_index_buffer( vk.cmd->vertex_buffer, vbo->soft_buffer_offset );
 
-		qvkCmdDrawIndexed( vk.cmd->command_buffer, vbo->soft_buffer_indexes, 1, 0, 0, 0 );
+		vk_draw_indexed( vbo->soft_buffer_indexes, 0 );
 	}
 }
 

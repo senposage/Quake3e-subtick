@@ -120,7 +120,7 @@ static int CM_SignbitsForNormal( const vec3_t normal ) {
 =====================
 CM_PlaneFromPoints
 
-Returns false if the triangle is degenrate.
+Returns false if the triangle is degenerate.
 The normal will point out of the clock for clockwise ordered points
 =====================
 */
@@ -285,7 +285,7 @@ static void CM_SetGridWrapWidth( cGrid_t *grid ) {
 CM_SubdivideGridColumns
 
 Adds columns as necessary to the grid until
-all the aproximating points are within SUBDIVIDE_DISTANCE
+all the approximating points are within SUBDIVIDE_DISTANCE
 from the true curve
 =================
 */
@@ -294,11 +294,11 @@ static void CM_SubdivideGridColumns( cGrid_t *grid ) {
 
 	for ( i = 0 ; i < grid->width - 2 ;  ) {
 		// grid->points[i][x] is an interpolating control point
-		// grid->points[i+1][x] is an aproximating control point
+		// grid->points[i+1][x] is an approximating control point
 		// grid->points[i+2][x] is an interpolating control point
 
 		//
-		// first see if we can collapse the aproximating column away
+		// first see if we can collapse the approximating column away
 		//
 		for ( j = 0 ; j < grid->height ; j++ ) {
 			if ( CM_NeedsSubdivision( grid->points[i][j], grid->points[i+1][j], grid->points[i+2][j] ) ) {
@@ -346,7 +346,7 @@ static void CM_SubdivideGridColumns( cGrid_t *grid ) {
 
 		grid->width += 2;
 
-		// the new aproximating point at i+1 may need to be removed
+		// the new approximating point at i+1 may need to be removed
 		// or subdivided farther, so don't advance i
 	}
 }
@@ -1105,7 +1105,7 @@ static void CM_PatchCollideFromGrid( const cGrid_t *grid, patchCollide_t *pf ) {
 
 			if ( gridPlanes[i][j][0] == gridPlanes[i][j][1] ) {
 				if ( gridPlanes[i][j][0] == -1 ) {
-					continue;		// degenrate
+					continue;		// degenerate
 				}
 				facet->surfacePlane = gridPlanes[i][j][0];
 				facet->numBorders = 4;
@@ -1188,7 +1188,7 @@ CM_GeneratePatchCollide
 Creates an internal structure that will be used to perform
 collision detection with a patch mesh.
 
-Points is packed as concatenated rows.
+Points are packed as concatenated rows.
 ===================
 */
 struct patchCollide_s *CM_GeneratePatchCollide( int width, int height, vec3_t *points ) {
@@ -1344,9 +1344,8 @@ static void CM_TracePointThroughPatchCollide( traceWork_t *tw, const struct patc
 			// we hit this facet
 #ifndef BSPC
 			if (!cv) {
-				cv = Cvar_Get("r_debugSurfaceUpdate", "1", 0);
-                Cvar_SetDescription( cv, "Update surface shapes in debug mode\nDefault: 1" );
-            }
+				cv = Cvar_Get( "r_debugSurfaceUpdate", "1", 0 );
+			}
 			if (cv->integer) {
 				debugPatchCollide = pc;
 				debugFacet = facet;
@@ -1537,8 +1536,7 @@ void CM_TraceThroughPatchCollide( traceWork_t *tw, const struct patchCollide_s *
 #ifndef BSPC
 				if (!cv) {
 					cv = Cvar_Get( "r_debugSurfaceUpdate", "1", 0 );
-                    Cvar_SetDescription( cv, "Update surface shapes in debug mode\nDefault: 1" );
-                }
+				}
 				if (cv && cv->integer) {
 					debugPatchCollide = pc;
 					debugFacet = facet;
@@ -1689,8 +1687,7 @@ void CM_DrawDebugSurface( void (*drawPoly)(int color, int numPoints, float *poin
 	if ( !cv2 )
 	{
 		cv2 = Cvar_Get( "r_debugSurface", "0", 0 );
-        Cvar_SetDescription( cv2, "Debug surface shapes\nDefault: 0" );
-    }
+	}
 
 	if (cv2->integer != 1)
 	{
@@ -1706,8 +1703,7 @@ void CM_DrawDebugSurface( void (*drawPoly)(int color, int numPoints, float *poin
 #ifndef BSPC
 	if ( !cv ) {
 		cv = Cvar_Get( "cm_debugSize", "2", 0 );
-        Cvar_SetDescription( cv, "Size of surface debug area\nDefault: 2" );
-    }
+	}
 #endif
 	pc = debugPatchCollide;
 

@@ -182,7 +182,7 @@ typedef struct {
 	void	(*Cmd_SetDescription)( const char *name, char *description );
 
 	int		(*Cmd_Argc) (void);
-	char	*(*Cmd_Argv) (int i);
+	const char	*(*Cmd_Argv) (int i);
 
 	void	(*Cmd_ExecuteText)( cbufExec_t exec_when, const char *text );
 

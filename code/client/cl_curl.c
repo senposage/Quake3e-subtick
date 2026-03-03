@@ -26,6 +26,8 @@ cvar_t *cl_cURLLib;
 
 #define ALLOWED_PROTOCOLS ( CURLPROTO_HTTP | CURLPROTO_HTTPS | CURLPROTO_FTP | CURLPROTO_FTPS )
 
+#define ALLOWED_PROTOCOLS_STR "http,https,ftp,ftps"
+
 #ifdef USE_CURL_DLOPEN
 
 char* (*qcurl_version)(void);
@@ -63,7 +65,7 @@ static void *cURLLib = NULL;
 GPA
 =================
 */
-static void *GPA(char *str)
+static void *GPA(const char *str)
 {
 	void *rv;
 
@@ -219,8 +221,13 @@ void CL_cURL_Cleanup(void)
 	}
 }
 
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+static int CL_cURL_CallbackProgress( void *dummy, curl_off_t dltotal, curl_off_t dlnow,
+	curl_off_t ultotal, curl_off_t ulnow )
+#else
 static int CL_cURL_CallbackProgress( void *dummy, double dltotal, double dlnow,
 	double ultotal, double ulnow )
+#endif
 {
 	clc.downloadSize = (int)dltotal;
 	Cvar_SetIntegerValue( "cl_downloadSize", clc.downloadSize );
@@ -319,26 +326,39 @@ void CL_cURL_BeginDownload( const char *localName, const char *remoteURL )
 	}
 
 	if ( com_developer->integer )
-		qcurl_easy_setopt( clc.downloadCURL, CURLOPT_VERBOSE, 1 );
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_URL, clc.downloadURL);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_TRANSFERTEXT, 0);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_REFERER, va("ioQ3://%s",
+		qcurl_easy_setopt_warn( clc.downloadCURL, CURLOPT_VERBOSE, 1 );
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_URL, clc.downloadURL);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_TRANSFERTEXT, 0);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_REFERER, va("ioQ3://%s",
 		NET_AdrToString(&clc.serverAddress)));
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_USERAGENT, Q3_VERSION);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_WRITEFUNCTION,
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_USERAGENT, Q3_VERSION);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_WRITEFUNCTION,
 		CL_cURL_CallbackWrite);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_WRITEDATA, &clc.download);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_NOPROGRESS, 0);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_PROGRESSFUNCTION,
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_WRITEDATA, &clc.download);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_NOPROGRESS, 0);
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_XFERINFOFUNCTION,
 		CL_cURL_CallbackProgress);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_PROGRESSDATA, NULL);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_FAILONERROR, 1);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_FOLLOWLOCATION, 1);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_MAXREDIRS, 5);
-	qcurl_easy_setopt(clc.downloadCURL, CURLOPT_PROTOCOLS, ALLOWED_PROTOCOLS);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_XFERINFODATA, NULL);
+#else
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_PROGRESSFUNCTION,
+		CL_cURL_CallbackProgress);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_PROGRESSDATA, NULL);
+#endif
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_FAILONERROR, 1);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_FOLLOWLOCATION, 1);
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_MAXREDIRS, 5);
+#if CURL_AT_LEAST_VERSION(7, 85, 0)
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_PROTOCOLS_STR, ALLOWED_PROTOCOLS_STR);
+#else
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_PROTOCOLS, ALLOWED_PROTOCOLS);
+#endif
 
+#ifdef CURL_MAX_READ_SIZE
+	qcurl_easy_setopt_warn(clc.downloadCURL, CURLOPT_BUFFERSIZE, CURL_MAX_READ_SIZE);
+#endif
 
-	clc.downloadCURLM = qcurl_multi_init();
+	clc.downloadCURLM = qcurl_multi_init();	
 	if( !clc.downloadCURLM ) {
 		qcurl_easy_cleanup( clc.downloadCURL );
 		clc.downloadCURL = NULL;
@@ -360,7 +380,6 @@ void CL_cURL_BeginDownload( const char *localName, const char *remoteURL )
 		!clc.cURLDisconnected) {
 
 		CL_AddReliableCommand("disconnect", qtrue);
-		CL_WritePacket();
 		CL_WritePacket();
 		CL_WritePacket();
 		clc.cURLDisconnected = qtrue;
@@ -700,9 +719,24 @@ static const char *sizeToString( int size )
 Com_DL_CallbackProgress
 =================
 */
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+static int Com_DL_CallbackProgress( void *data, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow )
+#else
 static int Com_DL_CallbackProgress( void *data, double dltotal, double dlnow, double ultotal, double ulnow )
+#endif
 {
-	double percentage, speed;
+#if CURL_AT_LEAST_VERSION(7, 55, 0)
+	curl_off_t speed;
+#else
+	double speed;
+#endif
+
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+	curl_off_t percentage;
+#else
+	double percentage;
+#endif
+
 	download_t *dl = (download_t *)data;
 
 	dl->Size = (int)dltotal;
@@ -715,18 +749,27 @@ static int Com_DL_CallbackProgress( void *data, double dltotal, double dlnow, do
 			Com_Printf( "%s: aborted\n", dl->Name );
 			return -1;
 		}
-		Cvar_Set( "cl_downloadSize", va( "%i", dl->Size ) );
-		Cvar_Set( "cl_downloadCount", va( "%i", dl->Count ) );
+		Cvar_SetIntegerValue( "cl_downloadSize", dl->Size );
+		Cvar_SetIntegerValue( "cl_downloadCount", dl->Count );
 	}
 
 	if ( dl->Size ) {
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+		percentage = ( dlnow * 100 ) / dltotal;
+#else
 		percentage = ( dlnow / dltotal ) * 100.0;
+#endif
 		sprintf( dl->progress, " downloading %s: %s (%i%%)", dl->Name, sizeToString( dl->Count ), (int)percentage );
 	} else {
 		sprintf( dl->progress, " downloading %s: %s", dl->Name, sizeToString( dl->Count ) );
 	}
 
-	if ( dl->func.easy_getinfo( dl->cURL, CURLINFO_SPEED_DOWNLOAD, &speed ) == CURLE_OK ) {
+#if CURL_AT_LEAST_VERSION(7, 55, 0)
+	if ( dl->func.easy_getinfo( dl->cURL, CURLINFO_SPEED_DOWNLOAD_T, &speed ) == CURLE_OK )
+#else
+	if ( dl->func.easy_getinfo( dl->cURL, CURLINFO_SPEED_DOWNLOAD, &speed ) == CURLE_OK )
+#endif
+	{
 		Q_strcat( dl->progress, sizeof( dl->progress ), va( " %s/s", sizeToString( (int)speed ) ) );
 	}
 
@@ -893,7 +936,7 @@ qboolean Com_DL_Begin( download_t *dl, const char *localName, const char *remote
 
 	{
 		char *escapedName = dl->func.easy_escape( dl->cURL, localName, 0 );
-		if ( !escapedName )
+		if ( !escapedName ) 
 		{
 			Com_Printf( S_COLOR_RED "Com_DL_Begin: easy_escape() failed\n" );
 			Com_DL_Cleanup( dl );
@@ -924,8 +967,6 @@ qboolean Com_DL_Begin( download_t *dl, const char *localName, const char *remote
 		Q_strncpyz( dl->gameDir, FS_GetCurrentGameDir(), sizeof( dl->gameDir ) );
 	}
 
-	Com_sprintf(dl->gameDir, MAX_STRING_CHARS, "%s/download", COM_SkipPath(CopyString(dl->gameDir)));
-
 	// try to extract game path from localName
 	// dl->Name should contain only pak name without game dir and extension
 	s = strrchr( localName, '/' );
@@ -954,18 +995,31 @@ qboolean Com_DL_Begin( download_t *dl, const char *localName, const char *remote
 	dl->func.easy_setopt( dl->cURL, CURLOPT_USERAGENT, Q3_VERSION );
 	dl->func.easy_setopt( dl->cURL, CURLOPT_WRITEFUNCTION, Com_DL_CallbackWrite );
 	dl->func.easy_setopt( dl->cURL, CURLOPT_WRITEDATA, dl );
-	if ( dl->headerCheck )
+	if ( dl->headerCheck ) 
 	{
 		dl->func.easy_setopt( dl->cURL, CURLOPT_HEADERFUNCTION, Com_DL_HeaderCallback );
 		dl->func.easy_setopt( dl->cURL, CURLOPT_HEADERDATA, dl );
 	}
 	dl->func.easy_setopt( dl->cURL, CURLOPT_NOPROGRESS, 0 );
+#if CURL_AT_LEAST_VERSION(7, 32, 0)
+	dl->func.easy_setopt( dl->cURL, CURLOPT_XFERINFOFUNCTION, Com_DL_CallbackProgress );
+	dl->func.easy_setopt( dl->cURL, CURLOPT_XFERINFODATA, dl );
+#else
 	dl->func.easy_setopt( dl->cURL, CURLOPT_PROGRESSFUNCTION, Com_DL_CallbackProgress );
 	dl->func.easy_setopt( dl->cURL, CURLOPT_PROGRESSDATA, dl );
+#endif
 	dl->func.easy_setopt( dl->cURL, CURLOPT_FAILONERROR, 1 );
 	dl->func.easy_setopt( dl->cURL, CURLOPT_FOLLOWLOCATION, 1 );
 	dl->func.easy_setopt( dl->cURL, CURLOPT_MAXREDIRS, 5 );
+#if CURL_AT_LEAST_VERSION(7, 85, 0)
+	dl->func.easy_setopt( dl->cURL, CURLOPT_PROTOCOLS_STR, ALLOWED_PROTOCOLS_STR );
+#else
 	dl->func.easy_setopt( dl->cURL, CURLOPT_PROTOCOLS, ALLOWED_PROTOCOLS );
+#endif
+
+#ifdef CURL_MAX_READ_SIZE
+	dl->func.easy_setopt( dl->cURL, CURLOPT_BUFFERSIZE, CURL_MAX_READ_SIZE );
+#endif
 
 	dl->cURLM = dl->func.multi_init();
 
@@ -990,7 +1044,7 @@ qboolean Com_DL_Begin( download_t *dl, const char *localName, const char *remote
 		Cvar_Set( "cl_downloadName", dl->Name );
 		Cvar_Set( "cl_downloadSize", "0" );
 		Cvar_Set( "cl_downloadCount", "0" );
-		Cvar_Set( "cl_downloadTime", va( "%i", cls.realtime ) );
+		Cvar_SetIntegerValue( "cl_downloadTime", cls.realtime );
 	}
 
 	return qtrue;

@@ -624,11 +624,9 @@ static packetQueue_t *list_process( packetQueue_t *head, const int time_diff )
 		now = Sys_Milliseconds();
 		if ( now - item->release >= time_diff ) {
 			packetQueue_t *next = item->next;
-#ifndef DEDICATED
 			if ( item->to.type == NA_LOOPBACK )
 				NET_SendLoopPacket( item->sock, item->length, item->data );
 			else
-#endif
 				Sys_SendPacket( item->length, item->data, &item->to );
 			head = list_remove( head, item );
 			Z_Free( item );
@@ -699,6 +697,9 @@ void NET_SendPacket( netsrc_t sock, int length, const void *data, const netadr_t
 #endif
 	if ( sock == NS_SERVER && sv_packetdelay->integer > 0 ) {
 		NET_QueuePacket( sock, length, data, to, sv_packetdelay->integer );
+	}
+	else if ( to->type == NA_LOOPBACK ) {
+		NET_SendLoopPacket( sock, length, data );
 	}
 #ifndef DEDICATED
 	else if ( to->type == NA_LOOPBACK ) {

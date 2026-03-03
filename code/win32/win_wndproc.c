@@ -439,14 +439,14 @@ BOOL Win_CheckHotkeyMod( void ) {
 	if ( !(HotKey & HK_MOD_XMASK) )
  		return TRUE;
 
- 	if ((HotKey&HK_MOD_LALT) && !GetAsyncKeyState(VK_LMENU)) return FALSE;
- 	if ((HotKey&HK_MOD_RALT) && !GetAsyncKeyState(VK_RMENU)) return FALSE;
- 	if ((HotKey&HK_MOD_LSHIFT) && !GetAsyncKeyState(VK_LSHIFT)) return FALSE;
- 	if ((HotKey&HK_MOD_RSHIFT) && !GetAsyncKeyState(VK_RSHIFT)) return FALSE;
- 	if ((HotKey&HK_MOD_LCONTROL) && !GetAsyncKeyState(VK_LCONTROL)) return FALSE;
- 	if ((HotKey&HK_MOD_RCONTROL) && !GetAsyncKeyState(VK_RCONTROL)) return FALSE;
- 	if ((HotKey&HK_MOD_LWIN) && !GetAsyncKeyState(VK_LWIN)) return FALSE;
- 	if ((HotKey&HK_MOD_RWIN) && !GetAsyncKeyState(VK_RWIN)) return FALSE;
+ 	if ((HotKey&HK_MOD_LALT) && !GetKeyState(VK_LMENU)) return FALSE;
+ 	if ((HotKey&HK_MOD_RALT) && !GetKeyState(VK_RMENU)) return FALSE;
+ 	if ((HotKey&HK_MOD_LSHIFT) && !GetKeyState(VK_LSHIFT)) return FALSE;
+ 	if ((HotKey&HK_MOD_RSHIFT) && !GetKeyState(VK_RSHIFT)) return FALSE;
+ 	if ((HotKey&HK_MOD_LCONTROL) && !GetKeyState(VK_LCONTROL)) return FALSE;
+ 	if ((HotKey&HK_MOD_RCONTROL) && !GetKeyState(VK_RCONTROL)) return FALSE;
+ 	if ((HotKey&HK_MOD_LWIN) && !GetKeyState(VK_LWIN)) return FALSE;
+ 	if ((HotKey&HK_MOD_RWIN) && !GetKeyState(VK_RWIN)) return FALSE;
 
  	return TRUE;
 }
@@ -617,6 +617,7 @@ LRESULT WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam 
 		uTimerT = 0;
 
 		in_forceCharset = Cvar_Get( "in_forceCharset", "1", CVAR_ARCHIVE_ND );
+		Cvar_SetDescription( in_forceCharset, "Try to translate non-ASCII chars in keyboard input or force EN/US keyboard layout." );
 
 		break;
 #if 0
@@ -707,7 +708,7 @@ LRESULT WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam 
 		active = (LOWORD( wParam ) != WA_INACTIVE) ? qtrue : qfalse;
 		minimized = (BOOL)HIWORD( wParam ) ? qtrue : qfalse;
 
-		// We can recieve Active & Minimized when restoring from minimized state
+		// We can receive Active & Minimized when restoring from minimized state
 		if ( active && minimized ) {
 			gw_minimized = qtrue;
 			break;
@@ -822,6 +823,8 @@ LRESULT WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam 
 			WINDOWPLACEMENT wp;
 
 			// set minimized flag as early as possible
+			Com_Memset( &wp, 0, sizeof( wp ) );
+			wp.length = sizeof( WINDOWPLACEMENT );
 			if ( GetWindowPlacement( hWnd, &wp ) && wp.showCmd == SW_SHOWMINIMIZED )
 				gw_minimized = qtrue;
 
@@ -930,7 +933,7 @@ LRESULT WINAPI MainWndProc( HWND hWnd, UINT uMsg, WPARAM  wParam, LPARAM lParam 
 
 	case WM_SYSKEYDOWN:
 	case WM_KEYDOWN:
-		if ( wParam == VK_RETURN && ( uMsg == WM_SYSKEYDOWN || GetAsyncKeyState( VK_RMENU ) & 0x8000 ) ) {
+		if ( wParam == VK_RETURN && ( uMsg == WM_SYSKEYDOWN || GetKeyState( VK_RMENU ) & 0x8000 ) ) {
 			Cvar_SetIntegerValue( "r_fullscreen", glw_state.cdsFullscreen ? 0 : 1 );
 			Cbuf_AddText( "vid_restart\n" );
 			return 0;
@@ -990,6 +993,18 @@ void HandleEvents( void ) {
 
 		TranslateMessage( &msg );
 		DispatchMessage( &msg );
+	}
+}
+
+
+/*
+================
+GLW_HideFullscreenWindow
+================
+*/
+void GLW_HideFullscreenWindow( void ) {
+	if ( g_wv.hWnd && glw_state.cdsFullscreen ) {
+		ShowWindow( g_wv.hWnd, SW_HIDE );
 	}
 }
 

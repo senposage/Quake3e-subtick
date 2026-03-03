@@ -110,7 +110,7 @@ Adds command text immediately after the current command
 Adds a \n to the text
 ============
 */
-static void Cbuf_InsertText( const char *text ) {
+void Cbuf_InsertText( const char *text ) {
 	int		len;
 	int		i;
 
@@ -436,7 +436,7 @@ void Cmd_Clear( void ) {
 Cmd_Argv
 ============
 */
-char *Cmd_Argv( int arg ) {
+const char *Cmd_Argv( int arg ) {
 	if ( (unsigned)arg >= cmd_argc ) {
 		return "";
 	}
@@ -767,7 +767,7 @@ Prints the contents of a cvar
 */
 static void Cmd_Help_f( void )
 {
-    char *name;
+    const char *name;
     cmd_function_t *cmd;
 
     if(Cmd_Argc() != 2)
@@ -903,7 +903,7 @@ void Cmd_CommandCompletion( void(*callback)(const char *s) ) {
 Cmd_CompleteArgument
 ============
 */
-qboolean Cmd_CompleteArgument( const char *command, char *args, int argNum ) {
+qboolean Cmd_CompleteArgument( const char *command, const char *args, int argNum ) {
 	const cmd_function_t *cmd;
 
 	for( cmd = cmd_functions; cmd; cmd = cmd->next ) {
@@ -1019,7 +1019,7 @@ static void Cmd_List_f( void )
 Cmd_CompleteCfgName
 ==================
 */
-static void Cmd_CompleteCfgName( char *args, int argNum ) {
+static void Cmd_CompleteCfgName( const char *args, int argNum ) {
 	if( argNum == 2 ) {
 		Field_CompleteFilename( "", "cfg", qfalse, FS_MATCH_ANY | FS_MATCH_STICK );
 	}
@@ -1031,7 +1031,7 @@ static void Cmd_CompleteCfgName( char *args, int argNum ) {
 Cmd_CompleteWriteCfgName
 ==================
 */
-void Cmd_CompleteWriteCfgName( char *args, int argNum ) {
+void Cmd_CompleteWriteCfgName( const char *args, int argNum ) {
 	if( argNum == 2 ) {
 		Field_CompleteFilename( "", "cfg", qfalse, FS_MATCH_EXTERN | FS_MATCH_STICK );
 	}

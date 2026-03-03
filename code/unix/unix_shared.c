@@ -168,7 +168,7 @@ void Sys_ListFilteredFiles( const char *basedir, const char *subdirs, const char
 
 // bk001129 - in 1.17 this used to be
 // char **Sys_ListFiles( const char *directory, const char *extension, int *numfiles, qboolean wantsubs )
-char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, qboolean wantsubs )
+char **Sys_ListFiles( const char *directory, const char *extension, const char *filter, int *numfiles, int wantsubs )
 {
 	struct dirent *d;
 	DIR		*fdir;
@@ -321,9 +321,9 @@ qboolean Sys_GetFileStats( const char *filename, fileOffset_t *size, fileTime_t 
 Sys_Mkdir
 =================
 */
-void Sys_Mkdir( const char *path )
+qboolean Sys_Mkdir( const char *path )
 {
-    mkdir( path, 0750 );
+    return mkdir( path, 0750 ) == 0 || errno == EEXIST;
 }
 
 
@@ -381,17 +381,6 @@ const char *Sys_Pwd( void )
 	}
 
 	return pwd;
-}
-
-
-/*
-=================
-Sys_DefaultBasePath
-=================
-*/
-const char *Sys_DefaultBasePath( void )
-{
-	return Sys_Pwd();
 }
 
 
@@ -569,7 +558,23 @@ Sys_SetAffinityMask
 =================
 */
 #ifdef USE_AFFINITY_MASK
-void Sys_SetAffinityMask( int mask )
+uint64_t Sys_GetAffinityMask( void )
+{
+	cpu_set_t set;
+	uint64_t mask = 0;
+	int cpu;
+
+	if ( sched_getaffinity( getpid(), sizeof( set ), &set ) == 0 )
+	{
+		for ( cpu = 0; cpu < sizeof( mask ) * 8; cpu++ ) {
+			if ( CPU_ISSET( cpu, &set ) )
+				mask |= ((uint64_t)1 << cpu);
+		}
+	}
+	return mask;
+}
+
+qboolean Sys_SetAffinityMask( const uint64_t mask )
 {
 	static qboolean inited = qfalse;
 	static cpu_set_t old_set;
@@ -585,32 +590,30 @@ void Sys_SetAffinityMask( int mask )
 		else
 		{
 			Com_Printf( S_COLOR_YELLOW "sched_getaffinity() error.\n" );
-			return;
+			return qfalse;
 		}
 	}
 
 	if ( mask == 0 ) // restore default set
 	{
 		memcpy( &set, &old_set, sizeof( set ) );
-		for ( cpu = 0; cpu < sizeof( mask ) * 8; cpu++ ) {
-			if ( CPU_ISSET( cpu, &set ) )
-				mask |= (1 << cpu);
-		}
 	}
 	else
 	{
 		CPU_ZERO( &set );
 		for ( cpu = 0; cpu < sizeof( mask ) * 8; cpu++ )
 		{
-			if ( mask & (1 << cpu) )
+			if ( mask & ((uint64_t)1 << cpu) )
 				CPU_SET( cpu, &set );
 		}
 	}
 
 	if ( sched_setaffinity( getpid(), sizeof( set ), &set ) == 0 ) {
-		Com_Printf( "setting CPU affinity mask to %i\n", mask );
+		Com_Printf( "setting CPU affinity mask to %lu\n", (unsigned long)mask );
+		return qtrue;
 	} else {
-		Com_Printf( S_COLOR_YELLOW "error setting CPU affinity mask %i\n", mask );
+		Com_Printf( S_COLOR_YELLOW "error setting CPU affinity mask %lu\n", (unsigned long)mask );
+		return qfalse;
 	}
 }
 #endif // USE_AFFINITY_MASK

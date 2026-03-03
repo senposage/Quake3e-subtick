@@ -427,6 +427,8 @@ void GL_ClientState( int unit, unsigned stateBits )
 }
 
 
+void RB_SetGL2D( void );
+
 /*
 ================
 RB_Hyperspace
@@ -435,24 +437,46 @@ A player has predicted a teleport, but hasn't arrived yet
 ================
 */
 static void RB_Hyperspace( void ) {
-	float		c;
+	color4ub_t c;
 
 	if ( !backEnd.isHyperspace ) {
 		// do initialization shit
 	}
 
-	c = ( backEnd.refdef.time & 255 ) / 255.0f;
-	qglClearColor( c, c, c, 1 );
-	qglClear( GL_COLOR_BUFFER_BIT );
+	if ( tess.shader != tr.whiteShader ) {
+		RB_EndSurface();
+		RB_BeginSurface( tr.whiteShader, 0 );
+	}
+
+#ifdef USE_VBO
+	VBO_UnBind();
+#endif
+
+	RB_SetGL2D();
+
+	if ( r_teleporterFlash->integer == 0 ) {
+		c.rgba[0] = c.rgba[1] = c.rgba[2] = 0; // fade to black
+	} else {
+		c.rgba[0] = c.rgba[1] = c.rgba[2] = (backEnd.refdef.time & 255); // fade to white
+	}
+	c.rgba[3] = 255;
+
+	RB_AddQuadStamp2( backEnd.refdef.x, backEnd.refdef.y, backEnd.refdef.width, backEnd.refdef.height,
+		0.0, 0.0, 0.0, 0.0, c );
+
+	RB_EndSurface();
+
+	tess.numIndexes = 0;
+	tess.numVertexes = 0;
 
 	backEnd.isHyperspace = qtrue;
 }
 
 
 static void SetViewportAndScissor( void ) {
-	qglMatrixMode(GL_PROJECTION);
+	qglMatrixMode( GL_PROJECTION );
 	qglLoadMatrixf( backEnd.viewParms.projectionMatrix );
-	qglMatrixMode(GL_MODELVIEW);
+	qglMatrixMode( GL_MODELVIEW );
 
 	// set the window clipping
 	qglViewport( backEnd.viewParms.viewportX, backEnd.viewParms.viewportY,
@@ -511,13 +535,11 @@ static void RB_BeginDrawingView( void ) {
 	}
 	qglClear( clearBits );
 
-	if ( backEnd.refdef.rdflags & RDF_HYPERSPACE )
-	{
+	if ( backEnd.refdef.rdflags & RDF_HYPERSPACE ) {
 		RB_Hyperspace();
-		return;
-	}
-	else
-	{
+		backEnd.projection2D = qfalse;
+		SetViewportAndScissor();
+	} else {
 		backEnd.isHyperspace = qfalse;
 	}
 
@@ -545,7 +567,9 @@ static void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	int				i;
 	drawSurf_t		*drawSurf;
 	unsigned int	oldSort;
+#ifdef USE_PMLIGHT
 	float			oldShaderSort;
+#endif
 	double			originalTime; // -EC-
 
 	// save original time for entity shader offsets
@@ -558,7 +582,9 @@ static void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 	oldDepthRange = qfalse;
 	wasCrosshair = qfalse;
 	oldSort = MAX_UINT;
+#ifdef USE_PMLIGHT
 	oldShaderSort = -1;
+#endif
 	depthRange = qfalse;
 
 	backEnd.pc.c_surfaces += numDrawSurfs;
@@ -576,7 +602,7 @@ static void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 		// change the tess parameters if needed
 		// a "entityMergable" shader is a shader that can have surfaces from separate
 		// entities merged into a single batch, like smoke and blood puff sprites
-		if ( ( (oldSort ^ drawSurfs->sort ) & ~QSORT_REFENTITYNUM_MASK ) || !shader->entityMergable ) {
+		if ( ( (oldSort ^ drawSurf->sort ) & ~QSORT_REFENTITYNUM_MASK ) || !shader->entityMergable ) {
 			if ( oldShader != NULL ) {
 				RB_EndSurface();
 			}
@@ -619,7 +645,7 @@ static void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 				// set up the dynamic lighting if needed
 #ifdef USE_LEGACY_DLIGHTS
 #ifdef USE_PMLIGHT
-				if ( !r_dlightMode->integer )
+				if ( !R_GetDlightMode() )
 #endif
 				if ( backEnd.currentEntity->needDlights ) {
 					R_TransformDlights( backEnd.refdef.num_dlights, backEnd.refdef.dlights, &backEnd.or );
@@ -638,7 +664,7 @@ static void RB_RenderDrawSurfList( drawSurf_t *drawSurfs, int numDrawSurfs ) {
 				backEnd.or = backEnd.viewParms.world;
 #ifdef USE_LEGACY_DLIGHTS
 #ifdef USE_PMLIGHT
-				if ( !r_dlightMode->integer )
+				if ( !R_GetDlightMode() )
 #endif
 				R_TransformDlights( backEnd.refdef.num_dlights, backEnd.refdef.dlights, &backEnd.or );
 #endif // USE_LEGACY_DLIGHTS
@@ -926,6 +952,7 @@ RENDER BACK END FUNCTIONS
 ============================================================================
 */
 
+
 /*
 ================
 RB_SetGL2D
@@ -1004,6 +1031,7 @@ void RE_UploadCinematic( int w, int h, int cols, int rows, byte *data, int clien
 
 	if ( !tr.scratchImage[ client ] ) {
 		tr.scratchImage[ client ] = R_CreateImage( va( "*scratch%i", client ), NULL, data, cols, rows, IMGFLAG_CLAMPTOEDGE | IMGFLAG_RGB | IMGFLAG_NOSCALE );
+		return;
 	}
 
 	image = tr.scratchImage[ client ];
@@ -1054,7 +1082,6 @@ RB_StretchPic
 static const void *RB_StretchPic( const void *data ) {
 	const stretchPicCommand_t	*cmd;
 	shader_t *shader;
-	int		numVerts, numIndexes;
 
 	cmd = (const stretchPicCommand_t *)data;
 
@@ -1067,61 +1094,20 @@ static const void *RB_StretchPic( const void *data ) {
 		RB_BeginSurface( shader, 0 );
 	}
 
+#ifdef USE_VBO
 	VBO_UnBind();
+#endif
 
 	if ( !backEnd.projection2D ) {
 		RB_SetGL2D();
 	}
 
+#ifdef USE_FBO
 	//Check if it's time for BLOOM!
 	R_BloomScreen();
+#endif
 
-	RB_CHECKOVERFLOW( 4, 6 );
-	numVerts = tess.numVertexes;
-	numIndexes = tess.numIndexes;
-
-	tess.numVertexes += 4;
-	tess.numIndexes += 6;
-
-	tess.indexes[ numIndexes ] = numVerts + 3;
-	tess.indexes[ numIndexes + 1 ] = numVerts + 0;
-	tess.indexes[ numIndexes + 2 ] = numVerts + 2;
-	tess.indexes[ numIndexes + 3 ] = numVerts + 2;
-	tess.indexes[ numIndexes + 4 ] = numVerts + 0;
-	tess.indexes[ numIndexes + 5 ] = numVerts + 1;
-
-	tess.vertexColors[ numVerts ].u32 =
-		tess.vertexColors[ numVerts + 1 ].u32 =
-		tess.vertexColors[ numVerts + 2 ].u32 =
-		tess.vertexColors[ numVerts + 3 ].u32 = backEnd.color2D.u32;
-
-	tess.xyz[ numVerts ][0] = cmd->x;
-	tess.xyz[ numVerts ][1] = cmd->y;
-	tess.xyz[ numVerts ][2] = 0;
-
-	tess.texCoords[0][ numVerts + 0][0] = cmd->s1;
-	tess.texCoords[0][ numVerts + 0][1] = cmd->t1;
-
-	tess.xyz[ numVerts + 1 ][0] = cmd->x + cmd->w;
-	tess.xyz[ numVerts + 1 ][1] = cmd->y;
-	tess.xyz[ numVerts + 1 ][2] = 0;
-
-	tess.texCoords[0][numVerts + 1][0] = cmd->s2;
-	tess.texCoords[0][numVerts + 1][1] = cmd->t1;
-
-	tess.xyz[ numVerts + 2 ][0] = cmd->x + cmd->w;
-	tess.xyz[ numVerts + 2 ][1] = cmd->y + cmd->h;
-	tess.xyz[ numVerts + 2 ][2] = 0;
-
-	tess.texCoords[0][numVerts + 2][0] = cmd->s2;
-	tess.texCoords[0][numVerts + 2][1] = cmd->t2;
-
-	tess.xyz[ numVerts + 3 ][0] = cmd->x;
-	tess.xyz[ numVerts + 3 ][1] = cmd->y + cmd->h;
-	tess.xyz[ numVerts + 3 ][2] = 0;
-
-	tess.texCoords[0][numVerts + 3][0] = cmd->s1;
-	tess.texCoords[0][numVerts + 3][1] = cmd->t2;
+	RB_AddQuadStamp2( cmd->x, cmd->y, cmd->w, cmd->h, cmd->s1, cmd->t1, cmd->s2, cmd->t2, backEnd.color2D );
 
 	return (const void *)(cmd + 1);
 }
@@ -1133,10 +1119,13 @@ static void RB_LightingPass( void )
 	dlight_t	*dl;
 	int	i;
 
+#ifdef USE_VBO
 	VBO_Flush();
 
-	tess.dlightPass = qtrue;
 	tess.allowVBO = qfalse; // for now
+#endif
+
+	tess.dlightPass = qtrue;
 
 	for ( i = 0; i < backEnd.viewParms.num_dlights; i++ )
 	{
@@ -1256,14 +1245,18 @@ static const void *RB_DrawSurfs( const void *data ) {
 	backEnd.refdef = cmd->refdef;
 	backEnd.viewParms = cmd->viewParms;
 
+#ifdef USE_VBO
 	VBO_UnBind();
+#endif
 
 	// clear the z buffer, set the modelview, etc
 	RB_BeginDrawingView();
 
 	RB_RenderDrawSurfList( cmd->drawSurfs, cmd->numDrawSurfs );
 
+#ifdef USE_VBO
 	VBO_UnBind();
+#endif
 
 	if ( r_drawSun->integer ) {
 		RB_DrawSun( 0.1f, tr.sunShader );
@@ -1282,11 +1275,13 @@ static const void *RB_DrawSurfs( const void *data ) {
 	}
 #endif
 
+#ifdef USE_FBO
 	if ( !backEnd.doneSurfaces && tr.needScreenMap ) {
 		if ( backEnd.viewParms.frameSceneNum == 1 ) {
 			FBO_CopyScreen();
 		}
 	}
+#endif
 
 	// draw main system development information (surface outlines, etc)
 	RB_DebugGraphics();
@@ -1308,12 +1303,16 @@ static const void *RB_DrawBuffer( const void *data ) {
 
 	cmd = (const drawBufferCommand_t *)data;
 
+#ifdef USE_FBO
 	if ( fboEnabled ) {
 		FBO_BindMain();
 		qglDrawBuffer( GL_COLOR_ATTACHMENT0 );
 	} else {
 		qglDrawBuffer( cmd->buffer );
 	}
+#else
+	qglDrawBuffer( cmd->buffer );
+#endif
 
 	// clear screen for debugging
 	if ( r_clear->integer ) {
@@ -1459,6 +1458,7 @@ static const void *RB_ClearColor( const void *data )
 RB_FinishBloom
 =============
 */
+#ifdef USE_FBO
 static const void *RB_FinishBloom( const void *data )
 {
 	const finishBloomCommand_t *cmd = data;
@@ -1496,6 +1496,7 @@ static const void *RB_FinishBloom( const void *data )
 
 	return (const void *)(cmd + 1);
 }
+#endif // USE_FBO
 
 
 static const void *RB_SwapBuffers( const void *data ) {
@@ -1504,7 +1505,10 @@ static const void *RB_SwapBuffers( const void *data ) {
 
 	// finish any 2D drawing if needed
 	RB_EndSurface();
+
+#ifdef USE_VBO
 	VBO_UnBind();
+#endif
 
 	// texture swapping test
 	if ( r_showImages->integer && !backEnd.drawConsole ) {
@@ -1517,21 +1521,23 @@ static const void *RB_SwapBuffers( const void *data ) {
 		qglFinish();
 	}
 
+#ifdef USE_FBO
 	if ( fboEnabled ) {
 		FBO_PostProcess();
 	}
+#endif
 
 	// buffer swap may take undefined time to complete, we can't measure it in a reliable way
 	backEnd.pc.msec = ri.Milliseconds() - backEnd.pc.msec;
 
 	if ( backEnd.screenshotMask && tr.frameCount > 1 ) {
-
+#ifdef USE_FBO
 		if ( superSampled ) {
 			qglScissor( 0, 0, gls.captureWidth, gls.captureHeight );
 			qglViewport( 0, 0, gls.captureWidth, gls.captureHeight );
 			FBO_BlitSS();
 		}
-
+#endif
 		if ( backEnd.screenshotMask & SCREENSHOT_TGA && backEnd.screenshotTGA[0] ) {
 			RB_TakeScreenshot( 0, 0, gls.captureWidth, gls.captureHeight, backEnd.screenshotTGA );
 			if ( !backEnd.screenShotTGAsilent ) {
@@ -1562,7 +1568,9 @@ static const void *RB_SwapBuffers( const void *data ) {
 
 	ri.GLimp_EndFrame();
 
+#ifdef USE_FBO
 	FBO_BindMain();
+#endif
 
 	backEnd.projection2D = qfalse;
 	backEnd.doneBloom = qfalse;
@@ -1603,9 +1611,11 @@ void RB_ExecuteRenderCommands( const void *data ) {
 		case RC_SWAP_BUFFERS:
 			data = RB_SwapBuffers( data );
 			break;
+#ifdef USE_FBO
 		case RC_FINISHBLOOM:
 			data = RB_FinishBloom(data);
 			break;
+#endif
 		case RC_COLORMASK:
 			data = RB_ColorMask(data);
 			break;

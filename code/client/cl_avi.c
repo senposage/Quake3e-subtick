@@ -353,7 +353,7 @@ Creates an AVI file and gets it into a state where
 writing the actual data can begin
 ===============
 */
-qboolean CL_OpenAVIForWriting( const char *fileName, qboolean pipe )
+qboolean CL_OpenAVIForWriting( const char *fileName, qboolean pipe, qboolean reopen )
 {
   if ( afd.fileOpen )
     return qfalse;
@@ -480,10 +480,10 @@ static qboolean CL_CheckFileSize( int bytesToAdd )
 	if( newFileSize > UINT_MAX || newFileSize < afd.fileSize )
 	{
 		// Close the current file...
-		CL_CloseAVI();
+		CL_CloseAVI( qtrue );
 
 		// ...And open a new one
-		CL_OpenAVIForWriting( va( "%s-%02d.avi", clc.videoName, ++clc.videoIndex ), qfalse );
+		CL_OpenAVIForWriting( va( "%s-%02d.avi", clc.videoName, ++clc.videoIndex ), qfalse, qtrue );
 
 		return qtrue;
 	}
@@ -650,7 +650,7 @@ CL_CloseAVI
 Closes the AVI file and writes an index chunk
 ===============
 */
-qboolean CL_CloseAVI( void )
+qboolean CL_CloseAVI( qboolean reopen )
 {
 	int indexRemainder;
 	int indexSize;

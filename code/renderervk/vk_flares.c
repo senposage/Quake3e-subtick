@@ -296,6 +296,7 @@ static void RB_TestFlare( flare_t *f ) {
 	float			fade;
 	float			*m;
 	uint32_t		offset;
+	int				i;
 
 	backEnd.pc.c_flareTests++;
 
@@ -323,13 +324,13 @@ static void RB_TestFlare( flare_t *f ) {
 		else
 			visible = qfalse;
 
-		f->testCount &= 0xFFFF;
+		f->testCount = 1;
 	} else {
 		visible = qfalse;
 	}
 
 	// reset test result in storage buffer
-	Com_Memset( vk.storage.buffer_ptr + offset, 0x0, sizeof( uint32_t ) );
+	// *((uint32_t*)(vk.storage.buffer_ptr + offset)) = 0x00;
 
 	m = vk_ortho( backEnd.viewParms.viewportX, backEnd.viewParms.viewportX + backEnd.viewParms.viewportWidth,
 		backEnd.viewParms.viewportY, backEnd.viewParms.viewportY + backEnd.viewParms.viewportHeight, 0, 1 );
@@ -343,14 +344,14 @@ static void RB_TestFlare( flare_t *f ) {
 #ifdef USE_VBO
 	tess.vboIndex = 0;
 #endif
+	// invalidate descriptors
+	for ( i = 0; i < VK_DESC_COUNT; i++ ) {
+		vk_reset_descriptor( i );
+	}
 	// render test dot
 	vk_bind_pipeline( vk.dot_pipeline );
-	vk_reset_descriptor( 0 );
-	vk_update_descriptor( 0, vk.storage.descriptor );
-	vk_update_descriptor_offset( 0, offset );
-
 	vk_bind_geometry( TESS_XYZ );
-	vk_draw_geometry( DEPTH_RANGE_NORMAL, qfalse );
+	vk_draw_dot( offset );
 
 	//Com_Memcpy( vk_world.modelview_transform, modelMatrix_original, sizeof( modelMatrix_original ) );
 	//vk_update_mvp( NULL );
@@ -387,9 +388,9 @@ RB_RenderFlare
 static void RB_RenderFlare( flare_t *f ) {
 	float			size;
 	vec3_t			color;
-	int				iColor[3];
 	float distance, intensity, factor;
 	byte fogFactors[3] = {255, 255, 255};
+	color4ub_t		c;
 
 	//if ( f->drawIntensity == 0.0 )
 	//	return;
@@ -446,63 +447,14 @@ static void RB_RenderFlare( flare_t *f ) {
 			return;
 	}
 
-	iColor[0] = color[0] * fogFactors[0];
-	iColor[1] = color[1] * fogFactors[1];
-	iColor[2] = color[2] * fogFactors[2];
-
 	RB_BeginSurface( tr.flareShader, f->fogNum );
 
-	// FIXME: use quadstamp?
-	tess.xyz[tess.numVertexes][0] = f->windowX - size;
-	tess.xyz[tess.numVertexes][1] = f->windowY - size;
-	tess.xyz[tess.numVertexes][2] = 0.0;
-	tess.texCoords[0][tess.numVertexes][0] = 0;
-	tess.texCoords[0][tess.numVertexes][1] = 0;
-	tess.vertexColors[tess.numVertexes].rgba[0] = iColor[0];
-	tess.vertexColors[tess.numVertexes].rgba[1] = iColor[1];
-	tess.vertexColors[tess.numVertexes].rgba[2] = iColor[2];
-	tess.vertexColors[tess.numVertexes].rgba[3] = 255;
-	tess.numVertexes++;
+	c.rgba[0] = color[0] * fogFactors[0];
+	c.rgba[1] = color[1] * fogFactors[1];
+	c.rgba[2] = color[2] * fogFactors[2];
+	c.rgba[3] = 255;
 
-	tess.xyz[tess.numVertexes][0] = f->windowX - size;
-	tess.xyz[tess.numVertexes][1] = f->windowY + size;
-	tess.xyz[tess.numVertexes][2] = 0.0;
-	tess.texCoords[0][tess.numVertexes][0] = 0;
-	tess.texCoords[0][tess.numVertexes][1] = 1;
-	tess.vertexColors[tess.numVertexes].rgba[0] = iColor[0];
-	tess.vertexColors[tess.numVertexes].rgba[1] = iColor[1];
-	tess.vertexColors[tess.numVertexes].rgba[2] = iColor[2];
-	tess.vertexColors[tess.numVertexes].rgba[3] = 255;
-	tess.numVertexes++;
-
-	tess.xyz[tess.numVertexes][0] = f->windowX + size;
-	tess.xyz[tess.numVertexes][1] = f->windowY + size;
-	tess.xyz[tess.numVertexes][2] = 0.0;
-	tess.texCoords[0][tess.numVertexes][0] = 1;
-	tess.texCoords[0][tess.numVertexes][1] = 1;
-	tess.vertexColors[tess.numVertexes].rgba[0] = iColor[0];
-	tess.vertexColors[tess.numVertexes].rgba[1] = iColor[1];
-	tess.vertexColors[tess.numVertexes].rgba[2] = iColor[2];
-	tess.vertexColors[tess.numVertexes].rgba[3] = 255;
-	tess.numVertexes++;
-
-	tess.xyz[tess.numVertexes][0] = f->windowX + size;
-	tess.xyz[tess.numVertexes][1] = f->windowY - size;
-	tess.xyz[tess.numVertexes][2] = 0.0;
-	tess.texCoords[0][tess.numVertexes][0] = 1;
-	tess.texCoords[0][tess.numVertexes][1] = 0;
-	tess.vertexColors[tess.numVertexes].rgba[0] = iColor[0];
-	tess.vertexColors[tess.numVertexes].rgba[1] = iColor[1];
-	tess.vertexColors[tess.numVertexes].rgba[2] = iColor[2];
-	tess.vertexColors[tess.numVertexes].rgba[3] = 255;
-	tess.numVertexes++;
-
-	tess.indexes[tess.numIndexes++] = 0;
-	tess.indexes[tess.numIndexes++] = 1;
-	tess.indexes[tess.numIndexes++] = 2;
-	tess.indexes[tess.numIndexes++] = 0;
-	tess.indexes[tess.numIndexes++] = 2;
-	tess.indexes[tess.numIndexes++] = 3;
+	RB_AddQuadStamp2( f->windowX - size, f->windowY - size, size * 2, size * 2, 0, 0, 1, 1, c );
 
 	RB_EndSurface();
 }
@@ -554,7 +506,7 @@ void RB_RenderFlares( void ) {
 	prev = &r_activeFlares;
 	while ( ( f = *prev ) != NULL ) {
 		// throw out any flares that weren't added last frame
-		if ( backEnd.viewParms.frameCount - f->addedFrame > 1 ) {
+		if ( backEnd.viewParms.frameCount - f->addedFrame > 0 && f->portalView == backEnd.viewParms.portalView ) {
 			*prev = f->next;
 			f->next = r_inactiveFlares;
 			r_inactiveFlares = f;

@@ -68,7 +68,7 @@ Determine which dynamic lights may effect this bmodel
 */
 void R_DlightBmodel( bmodel_t *bmodel ) {
 	int			i, j;
-	dlight_t	*dl;
+	const dlight_t	*dl;
 	int			mask;
 	msurface_t	*surf;
 
@@ -249,7 +249,7 @@ static void R_SetupEntityLightingGrid( trRefEntity_t *ent ) {
 LogLight
 ===============
 */
-static void LogLight( trRefEntity_t *ent ) {
+static void LogLight( const trRefEntity_t *ent ) {
 	int	max1, max2;
 
 	if ( !(ent->e.renderfx & RF_FIRST_PERSON ) ) {
@@ -284,7 +284,7 @@ by the Calc_* functions
 */
 void R_SetupEntityLighting( const trRefdef_t *refdef, trRefEntity_t *ent ) {
 	int				i;
-	dlight_t		*dl;
+	const dlight_t		*dl;
 	float			power;
 	vec3_t			dir;
 	float			d;
@@ -338,7 +338,7 @@ void R_SetupEntityLighting( const trRefdef_t *refdef, trRefEntity_t *ent ) {
 	d = VectorLength( ent->directedLight );
 	VectorScale( ent->lightDir, d, lightDir );
 #ifdef USE_PMLIGHT
-	if ( r_dlightMode->integer == 2 ) {
+	if ( R_GetDlightMode() == 2 ) {
 		// only direct lights
 		// but we need to deal with shadow light direction
 		VectorCopy( lightDir, shadowLightDir );
@@ -357,7 +357,7 @@ void R_SetupEntityLighting( const trRefdef_t *refdef, trRefEntity_t *ent ) {
 				VectorMA( shadowLightDir, d, dir, shadowLightDir );
 			}
 		} // if ( r_shadows->integer == 2 )
-	}  // if ( r_dlightMode->integer == 2 )
+	}  // if ( dlightMode == 2 )
 	else
 #endif
 	for ( i = 0 ; i < refdef->num_dlights ; i++ ) {
@@ -399,7 +399,7 @@ void R_SetupEntityLighting( const trRefdef_t *refdef, trRefEntity_t *ent ) {
 	ent->lightDir[2] = DotProduct( lightDir, ent->e.axis[2] );
 
 #ifdef USE_PMLIGHT
-	if ( r_shadows->integer == 2 && r_dlightMode->integer == 2 ) {
+	if ( r_shadows->integer == 2 && R_GetDlightMode() == 2 ) {
 		VectorNormalize( shadowLightDir );
 		ent->shadowLightDir[0] = DotProduct( shadowLightDir, ent->e.axis[0] );
 		ent->shadowLightDir[1] = DotProduct( shadowLightDir, ent->e.axis[1] );
@@ -429,4 +429,29 @@ int R_LightForPoint( vec3_t point, vec3_t ambientLight, vec3_t directedLight, ve
 	VectorCopy(ent.lightDir, lightDir);
 
 	return qtrue;
+}
+
+/*
+=============
+R_GetDlightMode
+
+Get the dynamic lighing method used
+
+Return 0 for legacy vertex lighting
+       1 for per pixel lighting
+	   2 for per pixel lighting also affecting MD3 models
+=============
+*/
+
+int R_GetDlightMode( void )
+{
+#ifdef USE_PMLIGHT
+	if (!qglGenProgramsARB) {
+		return 0;
+	} else {
+		return r_dlightMode->integer;
+	}
+#else
+	return 0;
+#endif
 }

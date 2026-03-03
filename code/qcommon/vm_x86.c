@@ -107,7 +107,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
   edx	scratch (required for divisions)
   esi*	programStack
   edi*	opStack
-  ebp*  procStack ( dataBase + programStack )
+  ebp*  procBase ( dataBase + programStack )
   -------------
   rax   scratch
   rbx*  dataBase
@@ -115,7 +115,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
   rdx   scratch (required for divisions)
   rsi*  programStack
   rdi*  opStack
-  rbp*  procStack ( dataBase + programStack )
+  rbp*  procBase ( dataBase + programStack )
   rsp*
   r8    scratch
   r9    scratch
@@ -137,9 +137,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
   Example how data segment will look like during vmMain execution:
   | .... |
-  |------| vm->programStack -=36 (8+12+16) // set by vmMain
-  | ???? | +0 - unused, reserved for interpreter
-  | ???? | +4 - unused, reserved for interpreter
+  |------| vm->programStack -=36 (8+12+16) // set by vmMain -> procBase
+  | ???? | +0 - unused/scratch, reserved for interpreter
+  | ???? | +4 - unused/scratch, reserved for interpreter
   |-------
   | arg0 | +8  \
   | arg4 | +12  | - passed arguments, accessible from subroutines
@@ -149,9 +149,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
   | loc4 | +24  \ - locals, accessible only from local scope
   | loc8 | +28  /
   | lc12 | +32 /
-  |------| vm->programStack -= 24 ( 8 + MAX_VMMAIN_CALL_ARGS*4 ) // set by VM_CallCompiled()
-  | ???? | +0 - unused, reserved for interpreter
-  | ???? | +4 - unused, reserved for interpreter
+  |------| vm->programStack -= 24 ( 8 + MAX_VMMAIN_CALL_ARGS*4 ) // set by VM_CallCompiled() -> procBase
+  | ???? | +0 - unused/scratch, reserved for interpreter
+  | ???? | +4 - unused/scratch, reserved for interpreter
   | arg0 | +8  \
   | arg1 | +12  \ - passed arguments, accessible from vmMain
   | arg2 | +16  /
@@ -249,19 +249,19 @@ typedef enum {
 	R_ESI = 0x06,
 	R_EDI = 0x07,
 #if idx64
-	R_R8 =  0x08,
-	R_R9 =  0x09,
-	R_R10 = 0x0A,
-	R_R11 = 0x0B,
-	R_R12 = 0x0C,
-	R_R13 = 0x0D,
-	R_R14 = 0x0E,
-	R_R15 = 0x0F,
+	R_R8 =   0x08,
+	R_R9 =   0x09,
+	R_R10 =  0x0A,
+	R_R11 =  0x0B,
+	R_R12 =  0x0C,
+	R_R13 =  0x0D,
+	R_R14 =  0x0E,
+	R_R15 =  0x0F,
 	R_MASK = 0x0F,
-	R_REX = 0x10 // mask to force 64-bit operation
+	R_REX =  0x10 // mask to force 64-bit operation
 #else
 	R_MASK = 0x07,
-	R_REX = 0x00
+	R_REX  = 0x00
 #endif
 } intreg_t;
 
@@ -299,7 +299,7 @@ typedef enum {
 
 typedef union {
 	struct {
-		unsigned r_m : 3; // direct or indirect register operand with opt.sidplacement, REX.b can extend this by 1 bit
+		unsigned r_m : 3; // direct or indirect register operand with opt.displacement, REX.b can extend this by 1 bit
 		unsigned r_x : 3; // register or opcode extension, REX.r can extend this by 1 bit
 		unsigned mod : 2; // see mod_t
 	} s;
@@ -1124,12 +1124,6 @@ static void emit_mov_sx( uint32_t dst, uint32_t src )
 	emit_op_reg( 0x0F, 0x28, src, dst );
 }
 
-static void emit_mov_sx_rx( uint32_t xmmreg, uint32_t intreg )
-{
-	Emit1( 0x66 );
-	emit_op_reg( 0x0F, 0x6E, intreg, xmmreg );
-}
-
 static void emit_mov_rx_sx( uint32_t intreg, uint32_t xmmreg )
 {
 	Emit1( 0x66 );
@@ -1151,16 +1145,30 @@ static void emit_comiss( uint32_t base, uint32_t reg )
 	emit_op_reg( 0x0F, 0x2F, reg, base );
 }
 
-static void emit_load_sx( uint32_t reg, uint32_t base, int32_t offset )
+static void emit_load_sx( uint32_t xmmreg, uint32_t base, int32_t offset )
 {
 	Emit1( 0xF3 );
-	emit_op_reg_base_offset( 0x0F, 0x10, reg, base, offset );
+	emit_op_reg_base_offset( 0x0F, 0x10, xmmreg, base, offset );
 }
 
-static void emit_load_sx_index( uint32_t reg, uint32_t base, uint32_t index )
+static void emit_load_sx_index( uint32_t xmmreg, uint32_t base, uint32_t index )
 {
 	Emit1( 0xF3 );
-	emit_op_reg_base_index( 0x0F, 0x10, reg, base, index, 1, 0 );
+	emit_op_reg_base_index( 0x0F, 0x10, xmmreg, base, index, 1, 0 );
+}
+
+// wrapper function
+static void mov_sx_rx( uint32_t xmmreg, uint32_t intreg )
+{
+	if ( CPU_Flags & CPU_SSE2 ) {
+		// movd xmmreg, intreg
+		Emit1( 0x66 );
+		emit_op_reg( 0x0F, 0x6E, intreg, xmmreg );
+	} else {
+		// SSE1 CPUs do not initialize FP register domain with movd so use movss
+		emit_store_rx( intreg, R_PROCBASE, 0 );	// mov dword ptr [procBase + 0], eax
+		emit_load_sx( xmmreg, R_PROCBASE, 0 );	// movss xmm0, [procBase + 0]
+	}
 }
 
 #if 0
@@ -1200,6 +1208,7 @@ static void emit_mul_sx( uint32_t dst, uint32_t src )
 
 static void emit_div_sx( uint32_t dst, uint32_t src )
 {
+	Emit1( 0xF3 ); // use divss instead of divps to avoid division by zero from src[32...127] and triggering "invalid operation" bit
 	emit_op_reg( 0x0F, 0x5E, src, dst );
 }
 
@@ -1320,13 +1329,13 @@ static uint32_t alloc_sx( uint32_t pref );
 
 // register allocation preferences
 
-#define FORCED 0x20  // load function must return specified register
+#define FORCED 0x20  // load function must return specified register, no dynamic allocation allowed
 #define TEMP   0x40  // hint: temporary allocation, will not be stored on opStack
 #define RCONST 0x80  // register value will be not modified
 #define XMASK  0x100 // exclude masked registers
 #define SHIFT4 0x200 // load bottom item
 
-#define RMASK  0x0F
+#define RMASK  0x0F  // mask to get register number from preference
 
 // array sizes for cached/meta registers
 #if idx64
@@ -1518,14 +1527,15 @@ static void set_rx_var( uint32_t reg, const var_addr_t *v ) {
 #endif
 }
 
+
 static void set_rx_ext( uint32_t reg, ext_t ext ) {
 #ifdef LOAD_OPTIMIZE
 	if ( reg >= ARRAY_LEN( rx_regs ) )
-		DROP( "register value %i s out of range", reg );
-	rx_regs[reg].ext = ext;
+		DROP( "register index %i is out of range", reg );
+	else
+		rx_regs[reg].ext = ext;
 #endif
 }
-
 
 
 static void set_sx_var( uint32_t reg, const var_addr_t *v ) {
@@ -1704,7 +1714,7 @@ static void mov_sx_imm( uint32_t reg, uint32_t imm32 )
 		emit_xor_sx( reg, reg );
 	} else {
 		uint32_t rx = alloc_rx_const( R_ECX | TEMP, imm32 ); // ecx = imm32
-		emit_mov_sx_rx( reg, rx ); // xmmX = ecx
+		mov_sx_rx( reg, rx ); // xmmX = ecx
 		unmask_rx( rx );
 	}
 }
@@ -2162,7 +2172,7 @@ static uint32_t alloc_sx_const( uint32_t pref, uint32_t imm )
 }
 
 
-static uint32_t dyn_alloc_rx( uint32_t pref )
+static uint32_t dyn_alloc_rx( void )
 {
 	const uint32_t _rx_mask = build_rx_mask();
 	const uint32_t mask = _rx_mask | build_opstack_mask( TYPE_RX );
@@ -2224,7 +2234,7 @@ static uint32_t alloc_rx( uint32_t pref )
 
 #ifdef DYN_ALLOC_RX
 	if ( ( pref & FORCED ) == 0 ) {
-		uint32_t v = dyn_alloc_rx( pref );
+		uint32_t v = dyn_alloc_rx();
 		if ( v == ~0U ) {
 			DROP( "no free registers at ip %i, pref %x, opStack %i, mask %04x", ip, pref, opstack * 4, build_rx_mask() );
 		}
@@ -2235,7 +2245,9 @@ static uint32_t alloc_rx( uint32_t pref )
 	reg = pref & RMASK;
 
 #ifdef DEBUG_VM
-	if ( rx_mask[reg] )
+	if ( reg >= ARRAY_LEN( rx_mask ) )
+		DROP( "forced register R%i index overflowed!", reg );
+	else if ( rx_mask[reg] )
 		DROP( "forced register R%i is already masked!", reg );
 #endif
 
@@ -2248,7 +2260,7 @@ static uint32_t alloc_rx( uint32_t pref )
 }
 
 
-static uint32_t dyn_alloc_sx( uint32_t pref )
+static uint32_t dyn_alloc_sx( void )
 {
 	const uint32_t _sx_mask = build_sx_mask();
 	const uint32_t mask = _sx_mask | build_opstack_mask( TYPE_SX );
@@ -2310,7 +2322,7 @@ static uint32_t alloc_sx( uint32_t pref )
 
 #ifdef DYN_ALLOC_SX
 	if ( ( pref & FORCED ) == 0 ) {
-		uint32_t v = dyn_alloc_sx( pref );
+		uint32_t v = dyn_alloc_sx();
 		if ( v == ~0U ) {
 			DROP( "no free registers at ip %i, pref %x, opStack %i, mask %04x", ip, pref, opstack * 4, build_sx_mask() );
 		}
@@ -2321,7 +2333,9 @@ static uint32_t alloc_sx( uint32_t pref )
 	reg = pref & RMASK;
 
 #ifdef DEBUG_VM
-	if ( sx_mask[reg] )
+	if ( reg >= ARRAY_LEN( sx_mask ) )
+		DROP( "forced register S%i index overflowed!", reg );
+	else if ( sx_mask[reg] )
 		DROP( "forced register S%i is already masked!", reg );
 #endif
 
@@ -2683,7 +2697,7 @@ static uint32_t load_sx_opstack( uint32_t pref )
 		// should never happen with FPU type promotion, except syscalls
 		reg = alloc_sx( pref );
 
-		emit_mov_sx_rx( reg, it->value );
+		mov_sx_rx( reg, it->value );
 
 		it->type = TYPE_RAW;
 		return reg;
@@ -2707,7 +2721,7 @@ static uint32_t load_sx_opstack( uint32_t pref )
 		reg = alloc_sx( pref );
 		rx = alloc_rx_local( R_ECX | RCONST, it->value );
 
-		emit_mov_sx_rx( reg, rx ); // move from integer to scalar
+		mov_sx_rx( reg, rx ); // move from integer to scalar
 
 		unmask_rx( rx );
 
@@ -3170,10 +3184,6 @@ static void EmitCallFunc( vm_t *vm )
 	emit_CheckJump( vm, R_EAX, -1, 0 );
 	unmask_rx( R_EAX );
 
-	// save procBase and programStack
-	//emit_push( R_PROCBASE );			// procBase
-	//emit_push( R_PSTACK );			// programStack
-
 	// calling another vm function
 #if idx64
 	emit_call_index( R_INSPOINTERS, R_EAX ); // call qword ptr [instructionPointers+rax*8]
@@ -3181,12 +3191,7 @@ static void EmitCallFunc( vm_t *vm )
 	emit_call_index_offset( (intptr_t)instructionPointers, R_EAX ); // call dword ptr [vm->instructionPointers + eax*8]
 #endif
 
-	// restore proc base and programStack so there is
-	// no need to validate programStack anymore
-	//emit_pop( R_PSTACK );				// pop rsi // programStack
-	//emit_pop( R_PROCBASE );			// pop rbp // procBase
-
-	emit_ret();							// ret
+	emit_ret();	// ret
 
 	sysCallOffset = compiledOfs - sysCallOffset;
 
@@ -3545,9 +3550,14 @@ static qboolean ConstOptimize( vm_t *vm, instruction_t *ci, instruction_t *ni )
 		}
 
 		case OP_ADD: {
-			int rx = load_rx_opstack( R_EAX );			// eax = *opstack
-			emit_op_rx_imm32( X_ADD, rx, ci->value );	// add eax, 0x12345678
-			store_rx_opstack( rx );						// *opstack = eax
+			int rx = load_rx_opstack( R_EAX );				// eax = *opstack
+			if ( ci->value == 128 ) {
+				// small trick to use 1-byte immediate value :P
+				emit_op_rx_imm32( X_SUB, rx, -128 );		// sub eax, -128
+			} else {
+				emit_op_rx_imm32( X_ADD, rx, ci->value );	// add eax, 0x12345678
+			}
+			store_rx_opstack( rx );							// *opstack = eax
 			ip += 1; // OP_ADD
 			return qtrue;
 		}
@@ -4287,7 +4297,6 @@ __compile:
 									// invalidate any mappings that overlaps with high [8..31] bits 
 									//var.addr += 1; var.size = 3;
 									//wipe_reg_range( rx_regs + rx[0], &var );
-									// TODO: just reduce mapping size?
 									reduce_map_size( reg, 1 );
 									// modify constant
 									reg->cnst.value &= 0xFF;
@@ -4393,6 +4402,7 @@ __compile:
 						wipe_var_range( &var );
 						set_rx_var( rx[0], &var ); // update metadata
 					} else {
+						// address specified by register
 						rx[1] = load_rx_opstack( R_EDX | RCONST ); dec_opstack();	// edx = *opstack; opstack -= 4
 						emit_CheckReg( vm, rx[1], FUNC_DATW );
 						switch ( ci->op ) {
@@ -4559,7 +4569,7 @@ __compile:
 						case OP_DIVF: emit_div_sx( sx[1], sx[0] ); break; // xmm1 = xmm1 / xmm0
 					}
 					unmask_sx( sx[0] );
-					store_sx_opstack( sx[1] ); // *opstack = xmm0
+					store_sx_opstack( sx[1] ); // *opstack = xmm1
 				} else {
 					// legacy x87 path
 					flush_opstack_top(); dec_opstack(); // value
@@ -4610,7 +4620,7 @@ __compile:
 				if ( HasSSEFP() ) {
 					rx[0] = alloc_rx( R_EAX );
 					sx[0] = load_sx_opstack( R_XMM0 | RCONST ); // xmm0 = *opstack
-					emit_cvttss2si( rx[0], sx[0] );			// cvttss2si xmm0, eax
+					emit_cvttss2si( rx[0], sx[0] );		// cvttss2si xmm0, eax
 					unmask_sx( sx[0] );
 					store_rx_opstack( rx[0] );				// *opstack = eax
 				} else {
@@ -4746,7 +4756,7 @@ __compile:
 		// remove write permissions.
 		if ( !VirtualProtect( vm->codeBase.ptr, vm->codeSize, PAGE_EXECUTE_READ, &oldProtect ) ) {
 			VM_Destroy_Compiled( vm );
-			Com_Printf( S_COLOR_YELLOW "VM_CompileX86: VirtualProtect failed\n" );
+			Com_Printf( S_COLOR_YELLOW "%s(%s): VirtualProtect failed\n", __func__, vm->name );
 			return qfalse;
 		}
 	}
@@ -4827,7 +4837,7 @@ This function is called directly by the generated code
 int32_t VM_CallCompiled( vm_t *vm, int nargs, int32_t *args )
 {
 	int32_t	opStack[MAX_OPSTACK_SIZE];
-	int		stackOnEntry;
+	int32_t	stackOnEntry;
 	int32_t	*image;
 #if id386
 	int32_t	*oldOpTop;
@@ -4850,8 +4860,8 @@ int32_t VM_CallCompiled( vm_t *vm, int nargs, int32_t *args )
 	}
 
 	// these only needed for interpreter:
-	// image[1] =  0;	// return stack
-	// image[0] = -1;	// will terminate loop on return
+	// image[1] =  0; // return stack
+	// image[0] = -1; // will terminate loop on return
 
 #ifdef DEBUG_VM
 	opStack[0] = 0xDEADC0DE;
@@ -4871,7 +4881,7 @@ int32_t VM_CallCompiled( vm_t *vm, int nargs, int32_t *args )
 		Com_Error( ERR_DROP, "%s(%s): opStack corrupted in compiled code", __func__, vm->name );
 	}
 
-	if ( vm->programStack != stackOnEntry - ( MAX_VMMAIN_CALL_ARGS + 2 ) * sizeof( int32_t ) ) {
+	if ( vm->programStack != (int32_t)( stackOnEntry - ( MAX_VMMAIN_CALL_ARGS + 2 ) * sizeof( int32_t ) ) ) {
 		Com_Error( ERR_DROP, "%s(%s): programStack corrupted in compiled code", __func__, vm->name );
 	}
 #endif

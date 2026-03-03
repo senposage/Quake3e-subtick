@@ -217,15 +217,16 @@ winding_t *BaseWindingForPlane (vec3_t normal, vec_t dist)
 	x = -1;
 	for (i=0 ; i<3; i++)
 	{
-		v = fabs(normal[i]);
+		v = fabsf( normal[i] );
 		if (v > max)
 		{
 			x = i;
 			max = v;
 		}
 	}
-	if (x==-1)
-		Com_Error (ERR_DROP, "BaseWindingForPlane: no axis found");
+
+	if ( x < 0 )
+		Com_Error( ERR_DROP, "BaseWindingForPlane: no axis found" );
 		
 	VectorCopy (vec3_origin, vup);
 	switch (x)
@@ -361,7 +362,7 @@ static void ClipWindingEpsilon( winding_t *in, vec3_t normal, vec_t dist, vec_t 
 		return;
 	}
 
-	maxpts = in->numpoints+4;	// cant use counts[0]+2 because
+	maxpts = in->numpoints+4;	// can't use counts[0]+2 because
 								// of fp grouping errors
 
 	*front = f = AllocWinding (maxpts);
@@ -475,7 +476,7 @@ void ChopWindingInPlace( winding_t **inout, const vec3_t normal, vec_t dist, vec
 	if (!counts[1])
 		return;		// inout stays the same
 
-	maxpts = in->numpoints+4;	// cant use counts[0]+2 because
+	maxpts = in->numpoints+4;	// can't use counts[0]+2 because
 								// of fp grouping errors
 
 	f = AllocWinding (maxpts);
@@ -537,7 +538,7 @@ void ChopWindingInPlace( winding_t **inout, const vec3_t normal, vec_t dist, vec
 ChopWinding
 
 Returns the fragment of in that is on the front side
-of the cliping plane.  The original is freed.
+of the clipping plane.  The original is freed.
 =================
 */
 winding_t	*ChopWinding (winding_t *in, vec3_t normal, vec_t dist)
@@ -591,7 +592,7 @@ void CheckWinding (winding_t *w)
 		if (d < -ON_EPSILON || d > ON_EPSILON)
 			Com_Error (ERR_DROP, "CheckWinding: point off plane");
 	
-	// check the edge isnt degenerate
+	// check the edge is not degenerate
 		p2 = w->p[j];
 		VectorSubtract (p2, p1, dir);
 		
