@@ -269,24 +269,14 @@ VM_Init
 ==============
 */
 void VM_Init( void ) {
-    cvar_t* cv;
-
 #ifndef DEDICATED
-	cv= Cvar_Get( "vm_ui", "2", CVAR_ARCHIVE | CVAR_PROTECTED );	// !@# SHIP WITH SET TO 2
-    Cvar_SetDescription(cv, "Attempt to load the UI QVM and compile it to native assembly code\n2 - compile VM\n1 - interpreted VM\n0 - native VM using dynamic linking\nDefault: 2");
-
-    cv =Cvar_Get( "vm_cgame", "2", CVAR_ARCHIVE | CVAR_PROTECTED );	// !@# SHIP WITH SET TO 2
-    Cvar_SetDescription(cv, "Attempt to load the CGame QVM and compile it to native assembly code\n2 - compile VM\n1 - interpreted VM\n0 - native VM using dynamic linking\nDefault: 2");
-
+	Cvar_Get( "vm_ui", "2", CVAR_ARCHIVE | CVAR_PROTECTED );	// !@# SHIP WITH SET TO 2
+	Cvar_Get( "vm_cgame", "2", CVAR_ARCHIVE | CVAR_PROTECTED );	// !@# SHIP WITH SET TO 2
 #endif
-	cv =Cvar_Get( "vm_game", "2", CVAR_ARCHIVE | CVAR_PROTECTED );	// !@# SHIP WITH SET TO 2
-    Cvar_SetDescription(cv, "Attempt to load the Game QVM and compile it to native assembly code\n2 - compile VM\n1 - interpreted VM\n0 - native VM using dynamic linking\nDefault: 2");
+	Cvar_Get( "vm_game", "2", CVAR_ARCHIVE | CVAR_PROTECTED );	// !@# SHIP WITH SET TO 2
 
-    Cmd_AddCommand( "vmprofile", VM_VmProfile_f );
-    Cmd_SetDescription( "vmprofile", "Show VM profiling information\nusage: vmprofile <game|cgame|ui>" );
-
-    Cmd_AddCommand( "vminfo", VM_VmInfo_f );
-    Cmd_SetDescription( "vminfo", "Show VM information\nusage: vminfo" );
+	Cmd_AddCommand( "vmprofile", VM_VmProfile_f );
+	Cmd_AddCommand( "vminfo", VM_VmInfo_f );
 
 	Com_Memset( vmTable, 0, sizeof( vmTable ) );
 }
@@ -399,7 +389,7 @@ const char *VM_SymbolForCompiledPointer( vm_t *vm, void *code ) {
 ParseHex
 ===============
 */
-int	ParseHex( const char *text ) {
+static int	ParseHex( const char *text ) {
 	int		value;
 	int		c;
 
@@ -428,7 +418,7 @@ int	ParseHex( const char *text ) {
 VM_LoadSymbols
 ===============
 */
-void VM_LoadSymbols( vm_t *vm ) {
+static void VM_LoadSymbols( vm_t *vm ) {
 	union {
 		char	*c;
 		void	*v;
@@ -758,7 +748,6 @@ static vmHeader_t *VM_LoadQVM( vm_t *vm, qboolean alloc ) {
 	int					length;
 	unsigned int		dataLength;
 	unsigned int		dataAlloc;
-	int					i;
 	char				filename[MAX_QPATH], *errorMsg;
 	unsigned int		crc32sum;
 	qboolean			tryjts;
@@ -798,17 +787,31 @@ static vmHeader_t *VM_LoadQVM( vm_t *vm, qboolean alloc ) {
 	}
 
 	vm->exactDataLength = header->dataLength + header->litLength + header->bssLength;
-	dataLength = vm->exactDataLength + PROGRAM_STACK_EXTRA;
-	if ( dataLength < PROGRAM_STACK_SIZE + PROGRAM_STACK_EXTRA ) {
-		dataLength = PROGRAM_STACK_SIZE + PROGRAM_STACK_EXTRA;
+
+	dataLength = vm->exactDataLength;
+	if ( dataLength < PROGRAM_STACK_SIZE ) {
+		dataLength = PROGRAM_STACK_SIZE;
 	}
+
+	vm->programStackExtra = PROGRAM_STACK_EXTRA;
+
+	// if rounding difference is larger than extra space we need then reuse it
+	if ( log2pad( dataLength, 1 ) - dataLength >= PROGRAM_STACK_EXTRA ) {
+#ifdef _DEBUG
+		// keep exact size for debug purposes
+#else
+		// reuse it all for release builds
+		vm->programStackExtra = log2pad( dataLength, 1 ) - dataLength;
+		// Com_DPrintf( S_COLOR_CYAN "%s: reuse %i bytes for pStack\n", vm->name, vm->programStackExtra );
+#endif
+	} else {
+		dataLength += vm->programStackExtra;
+	}
+
 	vm->dataLength = dataLength;
 
-	// round up to next power of 2 so all data operations can
-	// be mask protected
-	for ( i = 0 ; dataLength > ( 1 << i ) ; i++ )
-		;
-	dataLength = 1 << i;
+	// round up to next power of 2 so all data operations can be mask protected
+	dataLength = log2pad( dataLength, 1 );
 
 	// reserve some space for effective LOCAL+LOAD* checks
 	dataAlloc = dataLength + VM_DATA_GUARD_SIZE;
@@ -835,7 +838,7 @@ static vmHeader_t *VM_LoadQVM( vm_t *vm, qboolean alloc ) {
 					"VM_Restart()\n", filename );
 			return NULL;
 		}
-		Com_Memset( vm->dataBase, 0, vm->dataAlloc );
+		Com_Memset( vm->dataBase, 0x0, vm->dataAlloc );
 	}
 
 	// copy the intialized data
@@ -1549,7 +1552,7 @@ const char *VM_CheckInstructions( instruction_t *buf,
 	} else {
 __noJTS:
 		v = 0;
-		// instructions with opStack > 0 can't be jump labels so its safe to optimize/merge
+		// instructions with opStack > 0 can't be jump labels so it is safe to optimize/merge
 		for ( i = 0, ci = buf; i < instructionCount; i++, ci++ ) {
 			if ( ci->op == OP_ENTER ) {
 				v = ci->swtch;
@@ -1697,18 +1700,13 @@ Used to load a development dll instead of a virtual machine
 TTimo: added some verbosity in debug
 =================
 */
-static void * QDECL VM_LoadDll( const char *name, dllSyscall_t *entryPoint, dllSyscall_t systemcalls ) {
+static void * QDECL VM_LoadDll( const char *name, vmMainFunc_t *entryPoint, dllSyscall_t systemcalls ) {
 
-	const char	*gamedir = Cvar_VariableString( "fs_game" );
 	char		filename[ MAX_QPATH ];
 	void		*libHandle;
 	dllEntry_t	dllEntry;
 
-	if ( !*gamedir ) {
-		gamedir = Cvar_VariableString( "fs_basegame" );
-	}
-
-	Com_sprintf( filename, sizeof( filename ), "%s%c%s" ARCH_STRING DLL_EXT, gamedir, PATH_SEP, name );
+	Com_sprintf( filename, sizeof( filename ), "%s" ARCH_STRING DLL_EXT, name );
 
 	libHandle = FS_LoadLibrary( filename );
 
@@ -1815,7 +1813,7 @@ vm_t *VM_Create( vmIndex_t index, syscall_t systemCalls, dllSyscall_t dllSyscall
 
 	// the stack is implicitly at the end of the image
 	vm->programStack = vm->dataMask + 1;
-	vm->stackBottom = vm->programStack - PROGRAM_STACK_SIZE - PROGRAM_STACK_EXTRA;
+	vm->stackBottom = vm->programStack - PROGRAM_STACK_SIZE - vm->programStackExtra;
 
 	vm->compiled = qfalse;
 
@@ -1955,7 +1953,13 @@ intptr_t QDECL VM_Call( vm_t *vm, int nargs, int callnum, ... )
 	}
 #endif
 
+	// reset syscall counter for top-level calls to detect infinite loops
+	if ( vm->callLevel == 0 ) {
+		vm->syscallCount = 0;
+	}
+
 	++vm->callLevel;
+
 	// if we have a dll loaded, call it directly
 	if ( vm->entryPoint )
 	{
@@ -1964,9 +1968,9 @@ intptr_t QDECL VM_Call( vm_t *vm, int nargs, int callnum, ... )
 		va_list ap;
 		va_start( ap, callnum );
 		for ( i = 0; i < nargs; i++ ) {
-			args[i] = va_arg( ap, int );
+			args[i] = va_arg( ap, int32_t );
 		}
-		va_end(ap);
+		va_end( ap );
 
 		// add more arguments if you're changed MAX_VMMAIN_CALL_ARGS:
 		r = vm->entryPoint( callnum, args[0], args[1], args[2] );
@@ -1985,7 +1989,7 @@ intptr_t QDECL VM_Call( vm_t *vm, int nargs, int callnum, ... )
 		args[0] = callnum;
 		va_start( ap, callnum );
 		for ( i = 0; i < nargs; i++ ) {
-			args[i+1] = va_arg( ap, int );
+			args[i+1] = va_arg( ap, int32_t );
 		}
 		va_end(ap);
 #ifndef NO_VM_COMPILED
@@ -2107,7 +2111,7 @@ VM_VmInfo_f
 ==============
 */
 static void VM_VmInfo_f( void ) {
-	vm_t	*vm;
+	const vm_t	*vm;
 	int		i;
 
 	Com_Printf( "Registered virtual machines:\n" );
