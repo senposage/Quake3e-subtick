@@ -59,7 +59,6 @@ static svRateTrack_t sv_rateTrack[MAX_CLIENTS];
 // ---------------------------------------------------------------------------
 
 cvar_t *sv_antilag;
-cvar_t *sv_physicsScale;
 cvar_t *sv_antilagMaxMs;
 cvar_t *sv_antilagDebug;
 cvar_t *sv_antilagRateDebug;
@@ -87,20 +86,14 @@ static void SV_Antilag_ComputeConfig( void ) {
 
     if ( fps < 1 ) fps = 1;
 
-    // Shadow tick rate equals sv_fps — not sv_fps * sv_physicsScale.
+    // Shadow tick rate equals sv_fps.
     //
     // SV_Antilag_RecordPositions() is called exactly once per engine tick,
-    // so positions are captured at sv_fps Hz regardless of how many pmove
-    // sub-steps sv_physicsScale adds within that tick.  Clients also only
-    // receive snapshots at sv_fps Hz, meaning the finest position granularity
-    // a shooter ever saw is one sv_fps frame.
-    //
-    // Configuring sv_shadowTickMs as (1000 / (fps * physicsScale)) would
-    // make the interpolation logic assume entries are spaced closer together
-    // than they actually are, producing wrong rewind positions.  At sv_fps 60
-    // (16.7 ms/tick) or sv_fps 125 (8 ms/tick) the sampling is already fine
-    // enough that interpolation error is well under one frame — there is no
-    // tangible benefit to going finer.
+    // so positions are captured at sv_fps Hz.  Clients also only receive
+    // snapshots at sv_fps Hz, meaning the finest position granularity a
+    // shooter ever saw is one sv_fps frame.  At sv_fps 60 (16.7 ms/tick)
+    // or sv_fps 125 (8 ms/tick) the sampling is already fine enough that
+    // interpolation error is well under one frame.
     sv_shadowTickMs = 1000 / fps;
     if ( sv_shadowTickMs < 1 ) sv_shadowTickMs = 1;
 
@@ -242,13 +235,15 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
     for ( i = 0; i < sv.maxclients; i++ ) {
         cl = &svs.clients[i];
 
-        if ( i == shooterNum )                              continue;
-        if ( cl->state != CS_ACTIVE )                       continue;
-        // Bots have 0 effective latency — their current world position is
-        // already correct.  Rewinding them would move them to a stale
-        // shadow-history entry (possibly left by a previous human occupying
-        // the same client slot) and produce wrong hit detection.
-        if ( cl->netchan.remoteAddress.type == NA_BOT )     continue;
+        if ( i == shooterNum )          continue;
+        if ( cl->state != CS_ACTIVE )   continue;
+        // Bots are included in the rewind.  A human shooter with latency P
+        // sees every target — bot or human — at its position from P/2 ms ago
+        // (the last snapshot).  Excluding bots made traces run against their
+        // current (post-snapshot) position, forcing shooters to lead bots by
+        // their own half-ping.  Including bots here corrects that.
+        // Stale-history-from-previous-occupant is not a concern because
+        // SV_Antilag_ClearClient() zeroes the ring buffer on every disconnect.
 
         gent = SV_GentityNum( i );
         if ( !gent || !gent->r.linked ) continue;
@@ -328,8 +323,7 @@ void SV_Antilag_ClearClient( int clientNum ) {
 
 
 void SV_Antilag_Init( void ) {
-    sv_antilag = Cvar_Get( "sv_antilag", "0",   CVAR_SERVERINFO );
-    sv_physicsScale  = Cvar_Get( "sv_physicsScale",  "3",   CVAR_SERVERINFO );
+    sv_antilag       = Cvar_Get( "sv_antilag",       "0",   CVAR_SERVERINFO );
     sv_antilagMaxMs  = Cvar_Get( "sv_antilagMaxMs",  "200", CVAR_SERVERINFO );
     sv_antilagDebug      = Cvar_Get( "sv_antilagDebug",      "0", CVAR_TEMP );
     sv_antilagRateDebug  = Cvar_Get( "sv_antilagRateDebug",  "0", CVAR_TEMP );
@@ -371,7 +365,10 @@ void SV_Antilag_RecordPositions( void ) {
     for ( i = 0; i < sv.maxclients; i++ ) {
         client_t *cl = &svs.clients[i];
         if ( cl->state != CS_ACTIVE ) continue;
-        if ( cl->netchan.remoteAddress.type == NA_BOT ) continue;
+        // Record bots as well as humans.  Bots move at sv_gameHz rate so
+        // consecutive sv_fps recordings may be identical, but the interpolator
+        // needs a valid entry at every fire-time to avoid falling back to the
+        // current (non-rewound) position when a human shoots at a bot.
         SV_Antilag_RecordClient( i, sv.time );
     }
 }

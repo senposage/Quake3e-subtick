@@ -5,53 +5,13 @@ None of these are committed code fixes — awaiting go-ahead.
 
 ---
 
-## BUG-1 — `sv_physicsScale` is a dead/orphaned cvar
+## BUG-1 — `sv_physicsScale` is a dead/orphaned cvar — **RESOLVED (Option B)**
 
-**Severity:** Medium  
-**Files:** `code/server/sv_antilag.c`, `code/server/sv_antilag.h`, `code/server/sv_init.c`, `docs/project/SERVER.md`, `docs/project/SV_ANTIWARP.md`, `docs/Example_server.cfg`
-
-### What the code does
-
-`sv_physicsScale` is registered in `SV_Antilag_Init`:
-
-```c
-// sv_antilag.c:299
-sv_physicsScale = Cvar_Get( "sv_physicsScale", "3", CVAR_SERVERINFO );
-```
-
-Its `->modified` flag is cleared in `SV_Antilag_RecordPositions`:
-
-```c
-// sv_antilag.c:328-330
-if ( sv_physicsScale->modified || sv_antilagMaxMs->modified || fpsChanged ) {
-    SV_Antilag_ComputeConfig();
-    sv_physicsScale->modified = qfalse;
-```
-
-But `sv_physicsScale->integer` is **never read**. `SV_Antilag_ComputeConfig` only uses `sv_fps` and `sv_antilagMaxMs`:
-
-```c
-// sv_antilag.c:85-98 (ComputeConfig)
-int fps   = sv_fps ? sv_fps->integer : 40;
-int winMs = sv_antilagMaxMs ? sv_antilagMaxMs->integer : SV_ANTILAG_HISTORY_WINDOW_MS;
-sv_shadowTickMs = 1000 / fps;
-sv_shadowHistorySlots = ( fps * winMs ) / 1000 + 1;
-// sv_physicsScale->integer is NOT used here
-```
-
-There is no `physicsScale` loop in `sv_main.c:SV_Frame` either (it was removed in PR #35). Shadow history records at exactly `sv_fps` Hz.
-
-### Impact
-
-- Server admins set `sv_physicsScale 2` in their configs expecting 120 Hz shadow recording at 60 Hz server — they get 60 Hz. No error, no warning.
-- `docs/Example_server.cfg` documents `sv_physicsScale` as controlling shadow Hz, which is now false.
-- `docs/project/SERVER.md` and `docs/project/SV_ANTIWARP.md` contain accurate descriptions of the shadow system but do not flag this cvar as non-functional.
-
-### Fix options
-
-**Option A (recommended):** Restore the physicsScale multiplier in `ComputeConfig` and `RecordPositions`. Record `sv_fps × sv_physicsScale` shadow positions per second (using a sub-tick accumulator within the `sv_fps` loop, not a separate outer loop). This restores the intended higher-Hz shadow precision.
-
-**Option B:** Remove `sv_physicsScale` from `sv_antilag.c` and `sv_init.c`. Update docs and `Example_server.cfg` to remove all references. Shadow Hz = `sv_fps` Hz.
+**Resolution:** `sv_physicsScale` removed from `sv_antilag.c`, `sv_antilag.h`, and all
+documentation. Shadow recording runs at `sv_fps` Hz (one sample per engine tick).
+At sv_fps 60 or 125 the interpolation error is already sub-frame; a multiplier
+would produce wrong results by making the interpolator assume entries are spaced
+more closely than they are. See commit history for full rationale.
 
 ---
 
@@ -126,18 +86,10 @@ The existing guard `if ( awCl->awLastThinkTime == 0 ) continue;` in the antiwarp
 
 ---
 
-## BUG-3 — `sv_physicsScale` extern in `sv_antilag.h` is unused by callers
+## BUG-3 — `sv_physicsScale` extern in `sv_antilag.h` is unused by callers — **RESOLVED**
 
-**Severity:** Low  
-**Files:** `code/server/sv_antilag.h`
-
-`sv_antilag.h` exports `sv_physicsScale`:
-
-```c
-extern cvar_t *sv_physicsScale;
-```
-
-No file that includes `sv_antilag.h` (`sv_main.c`, `sv_game.c`, `sv_init.c`) reads `sv_physicsScale->integer`. The extern declaration is only useful if BUG-1 option A is implemented (restoring the sub-tick physicsScale multiplier). If option B is chosen (remove the cvar), this extern should also be removed.
+**Resolution:** `extern cvar_t *sv_physicsScale` removed from `sv_antilag.h` along with
+the cvar definition and registration (see BUG-1 resolution).
 
 ---
 
@@ -146,7 +98,3 @@ No file that includes `sv_antilag.h` (`sv_main.c`, `sv_game.c`, `sv_init.c`) rea
 ### `sv_antilag` default is `0` (disabled)
 
 By design — explicit opt-in. Server admins must set `sv_antilag 1` in their config. The `docs/Example_server.cfg` documents this. Not a bug, but new admins who don't read the docs will run with no engine antilag.
-
-### `sv_physicsScale` default is `3` (but has no effect)
-
-Interacts with BUG-1. The registered default of `3` is misleading since the value is not consumed.

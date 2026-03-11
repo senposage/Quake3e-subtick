@@ -26,15 +26,13 @@
   |  |  sv.time  += frameMsec                                 | |
   |  |                                                        | |
   |  |  +--------------------------------------------------+  | |
-  |  |  | ANTILAG SUB-TICK RECORDING                       |  | |
-  |  |  | for ( s = 0; s < sv_physicsScale; s++ )          |  | |
-  |  |  |   SV_Antilag_RecordPositions()                   |  | |
+  |  |  | ANTILAG RECORDING                                |  | |
+  |  |  | SV_Antilag_RecordPositions()                     |  | |
   |  |  |                                                  |  | |
   |  |  | Records each active player's position into       |  | |
-  |  |  | per-client ring buffer at sv_fps * scale Hz.     |  | |
-  |  |  | (e.g. 60 * 3 = 180Hz shadow history)             |  | |
-  |  |  | Bots excluded — their positions only change      |  | |
-  |  |  | at game frame rate.                              |  | |
+  |  |  | per-client ring buffer at sv_fps Hz.             |  | |
+  |  |  | Bots included — their positions are rewound      |  | |
+  |  |  | to the shooter's fire time just like humans.     |  | |
   |  |  +--------------------------------------------------+  | |
   |  |                                                        | |
   |  |  +--------------------------------------------------+  | |
@@ -258,20 +256,20 @@
 ## 6. Antilag System (sv_antilag.c)
 
 ```
-  RECORDING (per sv_fps tick, sv_physicsScale sub-ticks):
+  RECORDING (once per sv_fps tick):
 
   SV_Antilag_RecordPositions()
   |
-  for each active non-bot client:
+  for each active client (bots and humans):
     shadowHistory[client].slots[ head % historySlots ] = {
       origin (from entity state),
       mins/maxs (bounding box),
-      time (svs.time)
+      time (sv.time)
     }
     head++
 
-  History depth: sv_fps * sv_physicsScale * windowMs / 1000
-  (e.g. 60 * 3 * 800ms / 1000 = 144 slots, covering 800ms)
+  History depth: sv_fps * windowMs / 1000
+  (e.g. 60 * 300ms / 1000 = 18 slots per second, ~300ms covered)
 
   REWINDING (on weapon trace):
 
@@ -535,7 +533,7 @@
                                                      |
                                                      v
                                                Antilag records position
-                                               (sv_fps * physicsScale Hz)
+                                               (sv_fps Hz, all clients)
                                                      |
                                                      v
                                                SV_BuildCommonSnapshot()

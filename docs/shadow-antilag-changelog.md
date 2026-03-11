@@ -392,9 +392,13 @@ All items verified in the current codebase:
 - [x] `sv.time` is used consistently in all shadow antilag paths that
       compare against fire time or shadow history timestamps
 - [x] `svs.time` is **only** used in `NoteSnapshot` rate tracking (wall-clock)
-- [x] Bots are **excluded** from shadow history recording (`NA_BOT`
-      filter in `RecordPositions`) — FIFO handles bot targets. Bots are
-      also skipped as shooters (in `InterceptTrace`)
+- [x] Bots are **included** in shadow history recording and rewind.
+      A human shooter with latency P sees all targets (bot or human) at
+      their position from P/2 ms ago; excluding bots forced shooters to
+      lead bots by their own half-ping. Bots as *shooters* are still
+      excluded from `InterceptTrace` (they have 0 latency and need no
+      rewind). Stale-history-from-previous-occupant is prevented by
+      `SV_Antilag_ClearClient()` zeroing the ring buffer on disconnect.
 - [x] `ComputeConfig` slot count uses `sv_fps` Hz (not `fps × scale`)
       with `+1` to avoid off-by-one
 - [x] History is always flushed on any timing config change (not just
@@ -407,6 +411,8 @@ All items verified in the current codebase:
 - [x] The QVM contract is never violated: `level.time` is never touched,
       entities are restored before control returns to the VM
 - [x] Header `sv_antilag.h` externs match `sv_antilag.c` definitions
-      (`sv_antilagDebug`, `sv_antilagRateDebug`)
+      (`sv_antilag`, `sv_antilagMaxMs`, `sv_antilagDebug`,
+      `sv_antilagRateDebug`). `sv_physicsScale` removed — cvar was dead
+      (registered but never read; physicsScale loop removed in Fix 5).
 - [x] Enable cvar is `sv_antilag` (not `sv_antilagEnable`); default is `0`
       (disabled — set `sv_antilag 1` in server config to enable)
