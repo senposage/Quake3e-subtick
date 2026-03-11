@@ -15,12 +15,12 @@ server.h must be included before this header in each .c file.
 #define SV_ANTILAG_MAX_REWIND_MS        200
 
 extern cvar_t *sv_antilag;
-extern cvar_t *sv_physicsScale;
 extern cvar_t *sv_antilagMaxMs;
 extern cvar_t *sv_antilagDebug;
 extern cvar_t *sv_antilagRateDebug;
 
 void        SV_Antilag_Init( void );
+void        SV_Antilag_ClearClient( int clientNum );
 void        SV_Antilag_RecordPositions( void );
 void        SV_Antilag_NoteSnapshot( int clientNum );
 

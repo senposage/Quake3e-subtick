@@ -374,6 +374,17 @@ static void SV_MapRestart_f( void ) {
 			// to emulate original behavior which dropped pre-restart commands via serverid check
 			Com_Memset( &client->lastUsercmd, 0x0, sizeof( client->lastUsercmd ) );
 			client->lastUsercmd.serverTime = sv.time - 1;
+
+			// Reset antiwarp baseline to current game time.
+			// map_restart runs 4 × 100 ms warmup frames, advancing sv.gameTime by
+			// ~400 ms from the restart point.  Without this reset, awLastThinkTime
+			// still holds the pre-restart value, so awGap = sv.gameTime − old_value
+			// ≈ 400 ms >> awTol on the very first post-restart tick — antiwarp fires
+			// spuriously for every connected client before they can send a real
+			// usercmd.  Resetting to sv.gameTime makes awGap = 0 on that tick
+			// (client is treated as having just thought), so antiwarp will only
+			// engage if the client genuinely misses a frame after reconnecting.
+			client->awLastThinkTime = sv.gameTime;
 		}
 	}
 }

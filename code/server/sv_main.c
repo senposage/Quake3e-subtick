@@ -1315,6 +1315,21 @@ void SV_TrackCvarChanges( void )
 		}
 		sv_antiwarp->modified = qfalse;
 	}
+
+	// When sv_antilag is enabled, force QVM g_antilag off.
+	// The engine shadow system intercepts all G_TRACE/G_TRACECAPSULE syscalls and
+	// handles hit registration directly.  With g_antilag 1, the QVM FIFO antilag
+	// would rewind entities before calling trap_Trace, creating an unnecessary
+	// pre-setup step that the engine then overrides anyway.  Forcing g_antilag 0
+	// makes the execution path unambiguous: engine shadow rewind runs against the
+	// post-game-frame entity state, no FIFO intermediary.
+	if ( sv_antilag && sv_antilag->modified ) {
+		if ( sv_antilag->integer ) {
+			Cvar_Set( "g_antilag", "0" );
+			Com_Printf( "sv_antilag enabled — forcing g_antilag 0\n" );
+		}
+		sv_antilag->modified = qfalse;
+	}
 	if ( sv_antiwarpTol->modified )
 		sv_antiwarpTol->modified = qfalse;
 	if ( sv_antiwarpExtra->modified )
@@ -1504,13 +1519,10 @@ void SV_Frame( int msec ) {
 	// Snapshot dispatch is inside this loop so each engine tick at sv_fps rate produces
 	// its own snapshot send opportunity, preventing double-interval gaps.
 	while ( sv.timeResidual >= frameMsec ) {
+		qboolean _gameFrameRan = qfalse;
 		sv.timeResidual -= frameMsec;
 		svs.time += frameMsec;
 		sv.time += frameMsec;
-
-		// Record shadow positions for antilag (once per engine tick, before game frame)
-		if ( sv_antilag && sv_antilag->integer )
-			SV_Antilag_RecordPositions();
 
 		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
 		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
@@ -1529,6 +1541,7 @@ void SV_Frame( int msec ) {
 			while ( sv.gameTimeResidual >= _gameMsec ) {
 				sv.gameTimeResidual -= _gameMsec;
 				sv.gameTime += _gameMsec;
+				_gameFrameRan = qtrue;
 
 				// --- Engine-side antiwarp: inject blank commands for lagging clients ---
 				// Runs before GAME_RUN_FRAME so the QVM sees fresh ClientThink calls.
@@ -1599,12 +1612,32 @@ void SV_Frame( int msec ) {
 		}
 
 		// Record positions into smooth buffer when either feature is enabled.
-		// Ring buffer feeds both sv_bufferMs (position delay) and sv_velSmooth (velocity smoothing).
+		// Ring buffer feeds both sv_bufferMs (position delay) and sv_velSmooth
+		// (velocity smoothing).
+		//
+		// Runs unconditionally every sv_fps tick — NOT gated on _gameFrameRan.
+		// sv_bufferMs delays positions by N wall-clock ms (sv.time).  It needs
+		// one entry per sv_fps tick so that a "give me position from T-bufferMs"
+		// lookup always finds a tightly-bracketed pair.  When sv_gameHz > 0,
+		// entity positions do not change between game frames, but the timestamps
+		// still advance; recording duplicates is harmless and necessary for
+		// correct ms-accurate buffering.  Gating on _gameFrameRan would collapse
+		// the ring buffer to game-frame rate and break bufferMs accuracy.
 		if ( ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) )
 				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
 				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
 			SV_SmoothRecordAll();
 		}
+
+		// Record antilag shadow positions AFTER the game frame so that
+		// shadow[T] == snapshot[T] (both capture post-game-frame entity state).
+		// Guarded by _gameFrameRan: when sv_gameHz > 0 the inner loop may not fire
+		// every sv_fps tick (gameTimeResidual < gameMsec). Recording on a no-game-frame
+		// tick would add a duplicate shadow entry (stale positions, new sv.time tag)
+		// that does not correspond to any real entity state change. Only record when
+		// the game actually advanced this tick.
+		if ( sv_antilag && sv_antilag->integer && _gameFrameRan )
+			SV_Antilag_RecordPositions();
 
 		// Issue and dispatch snapshots once per sv_fps tick, not once per Com_Frame.
 		SV_IssueNewSnapshot();

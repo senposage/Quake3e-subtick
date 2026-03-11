@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // sv_client.c -- server code for dealing with clients
 
 #include "server.h"
+#include "sv_antilag.h"
 
 static void SV_CloseDownload( client_t *cl );
 
@@ -924,6 +925,10 @@ void SV_DropClient( client_t *drop, const char *reason ) {
 		drop->state = CS_ZOMBIE;		// become free in a few seconds
 	}
 
+	// Clear this client's shadow history so the next occupant of this slot
+	// (bot or new player) doesn't inherit stale antilag position entries.
+	SV_Antilag_ClearClient( drop - svs.clients );
+
 	if ( !reason ) {
 		return;
 	}
@@ -990,6 +995,10 @@ void SV_Auth_DropClient( client_t *drop, const char *reason, const char *message
 		Com_DPrintf( "Going to CS_ZOMBIE for %s\n", drop->name );
 		drop->state = CS_ZOMBIE;		// become free in a few seconds
 	}
+
+	// Clear this client's shadow history so the next occupant of this slot
+	// (bot or new player) doesn't inherit stale antilag position entries.
+	SV_Antilag_ClearClient( drop - svs.clients );
 
 	// if this was the last client on the server, send a heartbeat
 	// to the master so it is known the server is empty

@@ -26,18 +26,6 @@
   |  |  sv.time  += frameMsec                                 | |
   |  |                                                        | |
   |  |  +--------------------------------------------------+  | |
-  |  |  | ANTILAG SUB-TICK RECORDING                       |  | |
-  |  |  | for ( s = 0; s < sv_physicsScale; s++ )          |  | |
-  |  |  |   SV_Antilag_RecordPositions()                   |  | |
-  |  |  |                                                  |  | |
-  |  |  | Records each active player's position into       |  | |
-  |  |  | per-client ring buffer at sv_fps * scale Hz.     |  | |
-  |  |  | (e.g. 60 * 3 = 180Hz shadow history)             |  | |
-  |  |  | Bots excluded — their positions only change      |  | |
-  |  |  | at game frame rate.                              |  | |
-  |  |  +--------------------------------------------------+  | |
-  |  |                                                        | |
-  |  |  +--------------------------------------------------+  | |
   |  |  | GAME FRAME (sv_gameHz inner loop)                |  | |
   |  |  |                                                  |  | |
   |  |  | sv.gameTimeResidual += frameMsec                 |  | |
@@ -62,6 +50,21 @@
   |  |  |   SV_BotFrame( sv.gameTime )                     |  | |
   |  |  |   VM_Call( gvm, GAME_RUN_FRAME, sv.gameTime )    |  | |
   |  |  +--------------------------------------------------+  | |
+  |  |                                                        | |
+  |  |  +--------------------------------------------------+  | |
+  |  |  | ANTILAG RECORDING (after game frame)             |  | |
+  |  |  | SV_Antilag_RecordPositions()                     |  | |
+  |  |  |                                                  |  | |
+  |  |  | Records each active player's position into       |  | |
+  |  |  | per-client ring buffer at sv_fps Hz.             |  | |
+  |  |  | Runs AFTER the game frame so shadow[T] holds     |  | |
+  |  |  | post-game positions == what snapshot[T] shows.   |  | |
+  |  |  | Only runs if game frame executed this tick        |  | |
+  |  |  | (_gameFrameRan guard — prevents duplicate        |  | |
+  |  |  | entries when sv_gameHz > 0 skips a tick).        |  | |
+  |  |  | Human clients only — bots excluded (FIFO        |  | |
+  |  |  | antilag handles bot targets; including bots      |  | |
+  |  |  | creates a double-rewind conflict).               |  | |
   |  |                                                        | |
   |  |  +--------------------------------------------------+  | |
   |  |  | PER-TICK SNAPSHOT DISPATCH                       |  | |
@@ -258,20 +261,20 @@
 ## 6. Antilag System (sv_antilag.c)
 
 ```
-  RECORDING (per sv_fps tick, sv_physicsScale sub-ticks):
+  RECORDING (once per sv_fps tick):
 
   SV_Antilag_RecordPositions()
   |
-  for each active non-bot client:
+  for each active human client (bots excluded — FIFO antilag handles bot targets):
     shadowHistory[client].slots[ head % historySlots ] = {
       origin (from entity state),
       mins/maxs (bounding box),
-      time (svs.time)
+      time (sv.time)
     }
     head++
 
-  History depth: sv_fps * sv_physicsScale * windowMs / 1000
-  (e.g. 60 * 3 * 800ms / 1000 = 144 slots, covering 800ms)
+  History depth: sv_fps * windowMs / 1000
+  (e.g. 60 * 300ms / 1000 = 18 slots per second, ~300ms covered)
 
   REWINDING (on weapon trace):
 
@@ -535,7 +538,7 @@
                                                      |
                                                      v
                                                Antilag records position
-                                               (sv_fps * physicsScale Hz)
+                                               (sv_fps Hz, all clients)
                                                      |
                                                      v
                                                SV_BuildCommonSnapshot()

@@ -83,8 +83,7 @@ SV_Frame(msec):
       sv.timeResidual -= frameMsec
       sv.time += frameMsec
 
-      [ANTILAG] for i in range(sv_physicsScale):
-          SV_Antilag_RecordPositions()        ← shadow position snapshots
+      [ANTILAG] SV_Antilag_RecordPositions()        ← shadow position snapshots (all active clients)
 
       [GAME FRAME LOOP]
       sv.gameTimeResidual += frameMsec
@@ -500,19 +499,17 @@ typedef struct {
 } svShadowHistory_t;
 ```
 
-Up to 256 slots per client. At sv_fps 60, sv_physicsScale 3 → 180 Hz recording → 256/180 = ~1.4 seconds of history.
+Up to 256 slots per client. At sv_fps 60 → 60 Hz recording → 256/60 = ~4.3 seconds of history (capped by sv_antilagMaxMs).
 
 ### Public API
 
 #### void SV_Antilag_Init()
 
-Called from `SV_Init()`. Registers cvars: `sv_antilag`, `sv_physicsScale`, `sv_antilagMaxMs`, `sv_antilagDebug`, `sv_antilagRateDebug`. Calls `SV_Antilag_ComputeConfig()`.
+Called from `SV_Init()`. Registers cvars: `sv_antilag`, `sv_antilagMaxMs`, `sv_antilagDebug`, `sv_antilagRateDebug`. Calls `SV_Antilag_ComputeConfig()`.
 
 #### void SV_Antilag_RecordPositions()
 
-Called from `SV_Frame()` — `sv_physicsScale` times per engine tick. Records `gent->r.currentOrigin`, `absmin`, `absmax` for all active non-bot clients.
-
-**Why sv_physicsScale times per tick:** More recordings = finer temporal resolution for the rewind. Default physicsScale=3 at sv_fps=60 = 180Hz recording → ~5.5ms granularity.
+Called once per engine tick from `SV_Frame()`. Records `gent->r.currentOrigin`, `absmin`, `absmax` for all active clients — including bots. Bots are recorded so that human shooters get accurate lag compensation when targeting bots (the shooter sees the bot at a position from ~(ping + snapshotMsec) ms ago, same as for human targets). `sv_antilag 1` auto-forces `g_antilag 0`, so no QVM FIFO pre-setup interferes with the shadow rewind.
 
 #### void SV_Antilag_NoteSnapshot(int clientNum)
 
@@ -532,9 +529,8 @@ SV_Antilag_InterceptTrace:
         = svs.time - cl->ping, clamped to [svs.time - sv_antilagMaxMs, svs.time]
 
     rewound = SV_Antilag_RewindAll(passEntityNum, fireTime)
-        for each active non-bot non-shooter client:
-            ① sv_shadowSaved[i] = SV_Antilag_GetMostRecentPosition(i)
-               (overrides whatever the QVM's G_TimeShiftAllClients did)
+        for each active non-shooter client (humans and bots):
+            ① save gent->r.currentOrigin/absmin/absmax
             ② apply SV_Antilag_GetPositionAtTime(i, fireTime)
             ③ SV_LinkEntity(gent)
 
@@ -1042,7 +1038,6 @@ typedef struct client_s {
 | Cvar | Default | Notes |
 |------|---------|-------|
 | `sv_antilag` | 0 | Engine antilag on/off (default off, set 1 to enable) |
-| `sv_physicsScale` | 3 | Shadow recordings per engine tick |
 | `sv_antilagMaxMs` | 200 | Max rewind window (ms) |
 | `sv_antilagDebug` | 0 | Debug verbosity (0-2) |
 | `sv_antilagRateDebug` | 0 | Print per-client snap rate |
@@ -1060,10 +1055,6 @@ Com_Frame(msec)
     └── [tick loop: while timeResidual >= frameMsec]
         ├── sv.time++
         │
-        ├── [sv_physicsScale times]:
-        │   SV_Antilag_RecordPositions()
-        │     └── for each client: record origin/absmin/absmax to shadow history
-        │
         ├── [game frame loop: while gameTimeResidual >= gameMsec]
         │   ├── SV_BotFrame(sv.gameTime)
         │   └── VM_Call(gvm, GAME_RUN_FRAME, sv.gameTime)
@@ -1072,6 +1063,9 @@ Com_Frame(msec)
         │                   ├── SV_Antilag_RewindAll(shooter, fireTime)
         │                   ├── SV_Trace()  ← hit detection at rewound state
         │                   └── SV_Antilag_RestoreAll()
+        │
+        ├── SV_Antilag_RecordPositions()  ← AFTER game frame (shadow[T] == snapshot[T])
+        │     └── for each active human client (bots excluded — FIFO antilag handles bot targets): record origin/absmin/absmax to shadow history
         │
         ├── [if ring buffer active]:
         │   SV_SmoothRecordAll()

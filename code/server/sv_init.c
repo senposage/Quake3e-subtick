@@ -902,6 +902,18 @@ void SV_Init( void )
 	SV_TrackCvarChanges();
 
 	SV_Antilag_Init();
+	// sv_antilag is registered by SV_Antilag_Init; add it to CVG_SERVER here
+	// so that runtime changes via rcon trigger SV_TrackCvarChanges (which
+	// auto-forces g_antilag 0 when sv_antilag is enabled).
+	Cvar_SetGroup( sv_antilag, CVG_SERVER );
+	// Second pass: handle the case where sv_antilag was already set to 1 in the
+	// config file before SV_Init ran.  The first SV_TrackCvarChanges() call at
+	// line 902 ran before SV_Antilag_Init(), so sv_antilag was NULL and the
+	// modified check was skipped.  Cvar_SetGroup() sets the group but does NOT
+	// back-fill cvar_group[CVG_SERVER], so the group dirty-bit mechanism will
+	// not automatically re-fire the check.  An explicit call here ensures that
+	// sv_antilag->modified (set when the config command ran) is processed.
+	SV_TrackCvarChanges();
 
 	SV_InitChallenger();
 }

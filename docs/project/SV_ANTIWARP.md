@@ -12,11 +12,12 @@
 4. [Mode 1 — Constant](#mode-1--constant)
 5. [Mode 2 — Decay (Recommended)](#mode-2--decay-recommended)
 6. [Implementation in sv_main.c](#implementation-in-sv_mainc)
-7. [Cvars Reference](#cvars-reference)
-8. [Interaction with sv_pmoveMsec](#interaction-with-sv_pmovemsec)
-9. [Interaction with sv_antilag](#interaction-with-sv_antilag)
-10. [Configuration Profiles](#configuration-profiles)
-11. [Timing Diagram](#timing-diagram)
+7. [map_restart awLastThinkTime bug](#map_restart-awlastthinktimebug)
+8. [Cvars Reference](#cvars-reference)
+9. [Interaction with sv_pmoveMsec](#interaction-with-sv_pmovemsec)
+10. [Interaction with sv_antilag](#interaction-with-sv_antilag)
+11. [Configuration Profiles](#configuration-profiles)
+12. [Timing Diagram](#timing-diagram)
 
 ---
 
@@ -242,6 +243,9 @@ It is **zeroed** in `SV_ClientEnterWorld` (client joins / spawns) so the
 guard `awLastThinkTime == 0` correctly skips clients who haven't yet
 sent their first usercmd.
 
+It is **reset to `sv.gameTime`** in `SV_MapRestart_f` after the warmup
+frames — see [map_restart bug](#map_restart-awlastthinktimebug) below.
+
 **`SV_TrackCvarChanges` — auto-disable g_antiwarp:**
 
 ```c
@@ -258,7 +262,65 @@ This fires whenever `sv_antiwarp` is changed at runtime (e.g. via rcon).
 
 ---
 
-## Cvars Reference
+## map_restart `awLastThinkTime` bug
+
+### Symptom
+
+After `map_restart`, antiwarp fires spuriously for **every connected
+client** on the first few game frames, injecting a blank think before
+any real usercmd has arrived.
+
+### Root cause
+
+`SV_MapRestart_f` resets `sv.gameTime` to `sv.time` (line 310) then runs
+**4 × 100 ms warmup frames**, advancing both `sv.time` and `sv.gameTime`
+by 400 ms. `lastUsercmd` is correctly reset in the final cleanup loop.
+`awLastThinkTime` was **not** reset, leaving it at the pre-restart game
+time.
+
+On the first `SV_Frame` tick after restart:
+
+```
+sv.gameTime      = old_sv.time + 400 + frameMsec   (post-warmup + first tick)
+awLastThinkTime  = old_sv.time                      (stale, never reset)
+awGap            = 400 + frameMsec  >>  awTol       ← fires for every client
+```
+
+### Fix (`sv_ccmds.c` — `SV_MapRestart_f`)
+
+`awLastThinkTime` is reset alongside `lastUsercmd` in the final client
+loop (after the last warmup frame):
+
+```c
+// sv_ccmds.c — SV_MapRestart_f, final client loop
+for ( i = 0; i < sv.maxclients; i++ ) {
+    client = &svs.clients[i];
+    if ( client->state >= CS_PRIMED ) {
+        Com_Memset( &client->lastUsercmd, 0x0, sizeof( client->lastUsercmd ) );
+        client->lastUsercmd.serverTime = sv.time - 1;
+
+        // Reset antiwarp baseline to current game time.
+        // Without this, awGap ≈ 400 ms >> awTol on the first post-restart
+        // tick — antiwarp fires spuriously for every connected client.
+        client->awLastThinkTime = sv.gameTime;
+    }
+}
+```
+
+Setting `awLastThinkTime = sv.gameTime` makes `awGap = 0` on that first
+tick. Antiwarp will only engage if the client genuinely misses a frame
+after reconnecting.
+
+### Why `SV_SpawnServer` (full map change) is unaffected
+
+`SV_ClearServer()` calls `Com_Memset(&sv, 0, ...)` which zeros `sv.gameTime`
+(to 0 or the preserved `sv.time` depending on `sv_levelTimeReset`). Any
+connected client with a large `awLastThinkTime` will produce a **negative**
+`awGap` (`sv.gameTime − awLastThinkTime < 0`), which is always `< awTol`.
+Antiwarp never fires until the client sends a real usercmd and resets
+`awLastThinkTime` to the new (small) `sv.gameTime`.
+
+---
 
 | Cvar | Default | Flags | Description |
 |------|---------|-------|-------------|
