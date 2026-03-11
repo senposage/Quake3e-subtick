@@ -506,7 +506,7 @@ Up to 256 slots per client. At sv_fps 60, sv_physicsScale 3 → 180 Hz recording
 
 #### void SV_Antilag_Init()
 
-Called from `SV_Init()`. Registers cvars: `sv_antilagEnable`, `sv_physicsScale`, `sv_antilagMaxMs`, `sv_antilagDebug`, `sv_antilagRateDebug`. Calls `SV_Antilag_ComputeConfig()`.
+Called from `SV_Init()`. Registers cvars: `sv_antilag`, `sv_physicsScale`, `sv_antilagMaxMs`, `sv_antilagDebug`, `sv_antilagRateDebug`. Calls `SV_Antilag_ComputeConfig()`.
 
 #### void SV_Antilag_RecordPositions()
 
@@ -524,7 +524,7 @@ Called from `SV_SendClientMessages()` after each snapshot send. Tracks snapshot 
 
 ```
 SV_Antilag_InterceptTrace:
-    if !sv_antilagEnable: return qfalse  (caller uses normal SV_Trace)
+    if !sv_antilag: return qfalse  (caller uses normal SV_Trace)
 
     if passEntityNum is invalid or bot: return qfalse
 
@@ -683,7 +683,7 @@ Returns content flags at point. Checks both world geometry (`CM_PointContents`) 
 ## sv_ccmds.c — Server Console Commands [CUSTOM]
 
 **File:** `code/server/sv_ccmds.c`  
-**Size:** ~2652 lines
+**Size:** ~3200 lines
 
 ### SV_MapRestart_f() [CUSTOM FIX]
 
