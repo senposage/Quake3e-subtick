@@ -9,8 +9,7 @@ on:
       - 'docs/*'
   push:
     branches:
-      - master
-      - Quake3e-upstreammerge
+      - upstream-reimpl
     paths-ignore:
       - '**.md'
       - '*.txt'
@@ -121,7 +120,7 @@ jobs:
         retention-days: 5
 
   create-release:
-    if: (contains(fromJSON('["master", "Quake3e-upstreammerge"]'), github.ref_name) && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
+    if: (github.ref_name == 'upstream-reimpl' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
     needs: [linux, windows-mingw]
     runs-on: ubuntu-latest
     permissions:
