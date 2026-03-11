@@ -1836,8 +1836,18 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 	int	i;
 
 	if ( cl->netchan.remoteAddress.type == NA_BOT ) {
+		int snapHz = sv_fps->integer;
+		if ( sv_snapshotFps ) {
+			if ( sv_snapshotFps->integer == -1 )
+				snapHz = sv_fps->integer;
+			else if ( sv_snapshotFps->integer > 0 )
+				snapHz = sv_snapshotFps->integer;
+			// 0 or negative (other than -1): fall back to sv_fps for bots
+		}
+		if ( snapHz > sv_fps->integer ) snapHz = sv_fps->integer;
+		if ( snapHz < 1 ) snapHz = 1;
 		cl->lastSnapshotTime = svs.time - 9999; // generate a snapshot immediately
-		cl->snapshotMsec = 1000 / sv_fps->integer;
+		cl->snapshotMsec = 1000 / snapHz;
 		cl->rate = 0;
 		return;
 	}
@@ -1866,20 +1876,26 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 		}
 	}
 
-	// snaps command
-	val = Info_ValueForKey( cl->userinfo, "snaps" );
-	if ( val[0] && !NET_IsLocalAddress( &cl->netchan.remoteAddress ) )
-		i = atoi( val );
-	else
-		i = sv_fps->integer; // sync with server
-
-	// range check
-	if ( i < 1 )
-		i = 1;
-	else if ( i > sv_fps->integer )
-		i = sv_fps->integer;
-
-	i = 1000 / i; // from FPS to milliseconds
+	// Resolve effective snapshot rate:
+	//   sv_snapshotFps -1 = match sv_fps (live: recalculated whenever sv_fps changes)
+	//   sv_snapshotFps  0 = fall back to per-client 'snaps' userinfo (vanilla Q3)
+	//   sv_snapshotFps >0 = use that value, capped to sv_fps
+	{
+		int snapRate;
+		int snapsetting = sv_snapshotFps ? sv_snapshotFps->integer : -1;
+		if ( snapsetting == -1 ) {
+			snapRate = sv_fps->integer;
+		} else if ( snapsetting > 0 ) {
+			snapRate = snapsetting;
+			if ( snapRate > sv_fps->integer ) snapRate = sv_fps->integer;
+		} else {
+			const char *snapsVal = Info_ValueForKey( cl->userinfo, "snaps" );
+			snapRate = snapsVal[0] ? atoi( snapsVal ) : sv_fps->integer;
+			if ( snapRate > sv_fps->integer ) snapRate = sv_fps->integer;
+		}
+		if ( snapRate < 1 ) snapRate = 1;
+		i = 1000 / snapRate;
+	}
 
 	if ( i != cl->snapshotMsec )
 	{
