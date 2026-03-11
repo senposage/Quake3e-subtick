@@ -382,7 +382,13 @@ jobs:
         retention-days: 5
 
   create-testing:
-    if: github.ref == 'refs/heads/re-impl' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: >-
+      always() && !cancelled() &&
+      github.ref == 'refs/heads/re-impl' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (needs.windows-msys32.result == 'success' || needs.windows-msvc.result == 'success' ||
+       needs.ubuntu-x86.result == 'success' || needs.ubuntu-arm64.result == 'success' ||
+       needs.macos-x86.result == 'success')
     needs: [windows-msys32, windows-msvc, ubuntu-x86, ubuntu-arm64, macos-x86]
     runs-on: ubuntu-latest
     permissions:
@@ -393,18 +399,18 @@ jobs:
 
       - name: Create binary archives
         run: |
-          7z a -r quake3e-linux-x86.zip            ./linux-x86/*
-          7z a -r quake3e-linux-x86_64.zip         ./linux-x86_64/*
-          7z a -r quake3e-linux-arm64.zip          ./linux-arm64/*
-          7z a -r quake3e-windows-mingw-x86.zip    ./windows-mingw-x86/*
-          7z a -r quake3e-windows-mingw-x86_64.zip ./windows-mingw-x86_64/*
-          7z a -r quake3e-windows-msvc-arm64.zip   ./windows-msvc-arm64/*
-          7z a -r quake3e-macos-x86_64.zip         ./macos-x86_64/*
-          7z a -r quake3e-macos-aarch64.zip        ./macos-aarch64/*
-#         7z a -r quake3e-linux-aarch64.zip        ./linux-aarch64/*
-#         7z a -r quake3e-linux-armv7.zip          ./linux-armv7/*
-#         7z a -r quake3e-windows-msvc-x86.zip     ./windows-msvc-x86/*
-#         7z a -r quake3e-windows-msvc-x86_64.zip  ./windows-msvc-x86_64/*
+          [ -d ./linux-x86 ]            && 7z a -r quake3e-linux-x86.zip            ./linux-x86/*            || true
+          [ -d ./linux-x86_64 ]         && 7z a -r quake3e-linux-x86_64.zip         ./linux-x86_64/*         || true
+          [ -d ./linux-arm64 ]          && 7z a -r quake3e-linux-arm64.zip          ./linux-arm64/*          || true
+          [ -d ./windows-mingw-x86 ]    && 7z a -r quake3e-windows-mingw-x86.zip    ./windows-mingw-x86/*    || true
+          [ -d ./windows-mingw-x86_64 ] && 7z a -r quake3e-windows-mingw-x86_64.zip ./windows-mingw-x86_64/* || true
+          [ -d ./windows-msvc-arm64 ]   && 7z a -r quake3e-windows-msvc-arm64.zip   ./windows-msvc-arm64/*   || true
+          [ -d ./macos-x86_64 ]         && 7z a -r quake3e-macos-x86_64.zip         ./macos-x86_64/*         || true
+          [ -d ./macos-aarch64 ]        && 7z a -r quake3e-macos-aarch64.zip        ./macos-aarch64/*        || true
+#         [ -d ./linux-aarch64 ]        && 7z a -r quake3e-linux-aarch64.zip        ./linux-aarch64/*        || true
+#         [ -d ./linux-armv7 ]          && 7z a -r quake3e-linux-armv7.zip          ./linux-armv7/*          || true
+#         [ -d ./windows-msvc-x86 ]     && 7z a -r quake3e-windows-msvc-x86.zip     ./windows-msvc-x86/*     || true
+#         [ -d ./windows-msvc-x86_64 ]  && 7z a -r quake3e-windows-msvc-x86_64.zip  ./windows-msvc-x86_64/*  || true
 
       - name: Create latest build
         uses: czietz/action-automatic-releases@latest
@@ -417,13 +423,20 @@ jobs:
             *.zip
 
   update-release:
-    if: ${{ github.event_name == 'release' && github.event.release.target_commitish == 're-impl' }}
+    if: >-
+      always() && !cancelled() &&
+      github.event_name == 'release' &&
+      github.event.release.target_commitish == 're-impl' &&
+      (needs.windows-msys32.result == 'success' || needs.windows-msvc.result == 'success' ||
+       needs.ubuntu-x86.result == 'success' || needs.ubuntu-arm64.result == 'success' ||
+       needs.macos-x86.result == 'success')
     needs: [windows-msys32, windows-msvc, ubuntu-x86, ubuntu-arm64, macos-x86]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     strategy:
+      fail-fast: false
       matrix:
         include:
 #         - artifact_dir: linux-aarch64
@@ -461,9 +474,18 @@ jobs:
         uses: actions/download-artifact@v4
 
       - name: Create archive
-        run: 7z a -r ${{ matrix.artifact_name }} ./${{ matrix.artifact_dir }}/*
+        id: create_archive
+        run: |
+          if [ -d "./${{ matrix.artifact_dir }}" ]; then
+            7z a -r ${{ matrix.artifact_name }} ./${{ matrix.artifact_dir }}/*
+            echo "created=true" >> $GITHUB_OUTPUT
+          else
+            echo "Artifact directory ${{ matrix.artifact_dir }} not found, skipping"
+            echo "created=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Upload archive
+        if: steps.create_archive.outputs.created == 'true'
         uses: "svenstaro/upload-release-action@latest"
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
