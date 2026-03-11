@@ -902,6 +902,10 @@ void SV_Init( void )
 	SV_TrackCvarChanges();
 
 	SV_Antilag_Init();
+	// sv_antilag is registered by SV_Antilag_Init; add it to CVG_SERVER here
+	// so that runtime changes via rcon trigger SV_TrackCvarChanges (which
+	// auto-forces g_antilag 0 when sv_antilag is enabled).
+	Cvar_SetGroup( sv_antilag, CVG_SERVER );
 
 	SV_InitChallenger();
 }

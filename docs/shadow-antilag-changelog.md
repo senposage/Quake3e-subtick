@@ -716,7 +716,9 @@ via rcon), and prints a console notice:
 
 ```c
 // sv_main.c — SV_TrackCvarChanges
-if ( sv_antilag->modified ) {
+// NULL guard required: SV_TrackCvarChanges runs at SV_Init time,
+// before SV_Antilag_Init registers sv_antilag.
+if ( sv_antilag && sv_antilag->modified ) {
     if ( sv_antilag->integer ) {
         Cvar_Set( "g_antilag", "0" );
         Com_Printf( "sv_antilag enabled — forcing g_antilag 0\n" );
@@ -724,6 +726,21 @@ if ( sv_antilag->modified ) {
     sv_antilag->modified = qfalse;
 }
 ```
+
+`sv_antilag` is added to `CVG_SERVER` in `sv_init.c` immediately after
+`SV_Antilag_Init()` returns:
+
+```c
+// sv_init.c — SV_Init, after SV_Antilag_Init()
+SV_Antilag_Init();
+Cvar_SetGroup( sv_antilag, CVG_SERVER );
+```
+
+This is necessary because `SV_TrackCvarChanges` is only called when
+`Cvar_CheckGroup(CVG_SERVER)` returns non-zero (i.e. some `CVG_SERVER`
+cvar changed). Without `sv_antilag` being in `CVG_SERVER`, a runtime
+`rcon sv_antilag 1` would set `sv_antilag->modified` but never trigger
+the handler.
 
 `g_antilag 1` remains the recommended value in `Example_server.cfg` as
 the **fallback** used when `sv_antilag` is off (e.g. server temporarily

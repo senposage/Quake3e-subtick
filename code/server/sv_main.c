@@ -1323,7 +1323,7 @@ void SV_TrackCvarChanges( void )
 	// pre-setup step that the engine then overrides anyway.  Forcing g_antilag 0
 	// makes the execution path unambiguous: engine shadow rewind runs against the
 	// post-game-frame entity state, no FIFO intermediary.
-	if ( sv_antilag->modified ) {
+	if ( sv_antilag && sv_antilag->modified ) {
 		if ( sv_antilag->integer ) {
 			Cvar_Set( "g_antilag", "0" );
 			Com_Printf( "sv_antilag enabled — forcing g_antilag 0\n" );
