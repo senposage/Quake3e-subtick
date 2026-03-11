@@ -260,7 +260,7 @@
 
   SV_Antilag_RecordPositions()
   |
-  for each active client (bots and humans):
+  for each active human client (bots excluded — FIFO antilag handles bot targets):
     shadowHistory[client].slots[ head % historySlots ] = {
       origin (from entity state),
       mins/maxs (bounding box),

@@ -509,7 +509,7 @@ Called from `SV_Init()`. Registers cvars: `sv_antilag`, `sv_antilagMaxMs`, `sv_a
 
 #### void SV_Antilag_RecordPositions()
 
-Called once per engine tick from `SV_Frame()`. Records `gent->r.currentOrigin`, `absmin`, `absmax` for all active clients (bots and humans). Bots move at sv_gameHz rate so consecutive entries may be identical, but a valid entry at every sv_fps timestamp is needed so that human-vs-bot traces rewind correctly.
+Called once per engine tick from `SV_Frame()`. Records `gent->r.currentOrigin`, `absmin`, `absmax` for all active **human** clients. Bots are excluded — their current position is always correct at trace time (zero network lag), and recording them would create a double-rewind conflict with the QVM's FIFO antilag.
 
 #### void SV_Antilag_NoteSnapshot(int clientNum)
 

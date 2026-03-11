@@ -1,7 +1,8 @@
 # Shadow Antilag — Changelog & Review Notes
 
 Reference document for manual review of engine-side shadow antilag fixes
-applied in **PR #35** (merged), **PR #36** (merged), and **PR #37** (merged).
+applied in **PR #35** (merged), **PR #36** (merged), **PR #37** (merged),
+and **PR #38** (current).
 
 All changes are in `code/server/sv_antilag.c` unless noted otherwise.
 
@@ -13,8 +14,9 @@ All changes are in `code/server/sv_antilag.c` unless noted otherwise.
 2. [PR #35 — Fire time & shadow history config fixes](#pr-35--fire-time--shadow-history-config-fixes)
 3. [PR #36 — sv.time / svs.time domain fix](#pr-36--svtime--svstime-domain-fix)
 4. [PR #37 — Fire time formula revision (ping/2)](#pr-37--fire-time-formula-revision-ping2)
-5. [Combined before/after summary](#combined-beforeafter-summary)
-6. [Review checklist](#review-checklist)
+5. [PR #38 — Fire time corrected to full RTT; sv_physicsScale removed](#pr-38--fire-time-corrected-to-full-rtt-sv_physicsscale-removed)
+6. [Combined before/after summary](#combined-beforeafter-summary)
+7. [Review checklist](#review-checklist)
 
 ---
 
@@ -364,22 +366,93 @@ and wrong header names. Updated:
 
 ---
 
+## PR #38 — Fire time corrected to full RTT; sv_physicsScale removed
+
+**Files:** `sv_antilag.c`, `sv_antilag.h`, `docs/Example_server.cfg`, `docs/project/SERVER.md`, `docs/project/FLOWCHART.md`
+
+### Fix 7: Fire time under-compensation (ping/2 → ping)
+
+**Bug:** PR #37's formula `sv.time - cl->ping / 2` only compensated for
+one network hop (server→client), ignoring the return hop (client→server).
+
+**Timing proof:**
+
+```
+T0         position recorded in shadow history; snapshot built; sent
+           messageSent = Sys_Milliseconds() = T0_wall
+T0+RTT/2   client receives snapshot; sees target at sv.time = T0
+T0+RTT/2   client fires; sends usercmd
+T0+RTT     server receives usercmd
+           messageAcked = Sys_Milliseconds() = T0_wall + RTT
+           cl->ping = messageAcked - messageSent = RTT  (server-measured)
+           sv.time ≈ T0 + RTT  (advances at 1 ms per real-ms)
+```
+
+The target was at position `T0` when the client aimed. `sv.time` when the
+trace runs is `T0 + RTT`. Correct rewind = **full RTT = `cl->ping`**.
+
+`ping/2` only subtracts one hop, leaving the target `RTT/2 ≈ ping/2` ms
+too far forward — the shooter must visually lead the target by half their
+own ping. At 40 ms ping this is a 20 ms positional error (~128 units at
+320 ups), noticeable and physically wrong.
+
+```c
+// BEFORE (PR #37)
+fireTime = sv.time - cl->ping / 2;
+
+// AFTER (PR #38)
+fireTime = sv.time - cl->ping;
+```
+
+**Why not `lastUsercmd.serverTime`:**
+`cl->lastUsercmd.serverTime` is the client's reported render time. It
+already contains the RTT *plus* the client's interpolation buffer
+(`cl_autoNudge`, `CL_AdjustTimeDelta` — typically +30–50 ms), so it
+over-compensates to ~69–77 ms for a 45 ms ping player (confirmed by PR
+#37 measurement). The full-RTT formula `sv.time - ping` gives the exact
+snapshot time (45 ms for 45 ms ping) without including the client-side
+interpolation lag — which the shadow system already handles through linear
+interpolation between recorded entries.
+
+**Example (45 ms ping):**
+
+| Formula | Rewind | Assessment |
+|---------|--------|------------|
+| `svs.time - cl->ping` (original) | 45 ms — wrong domain | domain bug |
+| `cl->lastUsercmd.serverTime` (PR #35) | 69–77 ms | over-compensates (interp buffer) |
+| `sv.time - cl->ping / 2` (PR #37) | 22 ms | under-compensates (half RTT) |
+| `sv.time - cl->ping` (PR #38) | **45 ms** | **exact** |
+
+### Fix 8: sv_physicsScale cvar removed
+
+The `sv_physicsScale` cvar was registered and watched for `->modified`
+but its value was never read. The physicsScale loop in `SV_Frame` was
+removed in Fix 5 (PR #35), and `ComputeConfig` uses `sv_fps` Hz only.
+
+- Removed from `sv_antilag.c` (declaration, `Cvar_Get`, `->modified` watch)
+- Removed from `sv_antilag.h` (extern)
+- Removed from `docs/Example_server.cfg`, `docs/project/SERVER.md`,
+  `docs/project/FLOWCHART.md`
+
+---
+
 ## Combined before/after summary
 
-| Area | Original code | After PR #35 | After PR #36 | After PR #37 |
-|------|--------------|--------------|--------------|--------------|
-| **Fire time formula** | `svs.time - cl->ping` | `cl->lastUsercmd.serverTime` | *(unchanged)* | **`sv.time - cl->ping / 2`** |
-| **Fire time clamps** | vs `svs.time` | vs `svs.time` | vs **`sv.time`** | *(unchanged)* |
-| **Recording timestamp** | `svs.time` (bots excluded) | `svs.time` (bots ~~included~~ reverted) | **`sv.time`** (bots excluded) | *(unchanged)* |
-| **sv_fps detection** | `sv_fps->modified` (race) | Integer value tracking | *(unchanged)* | *(unchanged)* |
-| **History flush** | Only if slot count changed | Always on timing change | *(unchanged)* | *(unchanged)* |
-| **Recording loop** | `physicsScale×` per tick | 1× per tick | *(unchanged)* | *(unchanged)* |
-| **Slot calculation** | `fps × scale` Hz, off-by-one | `fps` Hz, +1 | *(unchanged)* | *(unchanged)* |
-| **Save/restore** | Via `GetMostRecentPosition` | Via `GetMostRecentPosition` | Direct `gent->r.currentOrigin` | *(unchanged)* |
-| **No-history fallback** | Force-write saved pos back | Force-write saved pos back | Leave entity at current pos | *(unchanged)* |
-| **Debug output time** | `svs.time` | `svs.time` | **`sv.time`** | *(unchanged)* |
-| **Header cvar names** | `sv_antilagTraceLog` | *(unchanged)* | *(unchanged)* | **`sv_antilagDebug`** |
-| **Enable cvar name** | — | `sv_antilagEnable` (docs only) | *(unchanged)* | **`sv_antilag`** (code + docs) |
+| Area | Original code | After PR #35 | After PR #36 | After PR #37 | After PR #38 |
+|------|--------------|--------------|--------------|--------------|--------------|
+| **Fire time formula** | `svs.time - cl->ping` | `cl->lastUsercmd.serverTime` | *(unchanged)* | `sv.time - cl->ping / 2` | **`sv.time - cl->ping`** |
+| **Fire time clamps** | vs `svs.time` | vs `svs.time` | vs **`sv.time`** | *(unchanged)* | *(unchanged)* |
+| **Recording timestamp** | `svs.time` (bots excluded) | `svs.time` (bots ~~included~~ reverted) | **`sv.time`** (bots excluded) | *(unchanged)* | *(unchanged)* |
+| **sv_fps detection** | `sv_fps->modified` (race) | Integer value tracking | *(unchanged)* | *(unchanged)* | *(unchanged)* |
+| **History flush** | Only if slot count changed | Always on timing change | *(unchanged)* | *(unchanged)* | *(unchanged)* |
+| **Recording loop** | `physicsScale×` per tick | 1× per tick | *(unchanged)* | *(unchanged)* | *(unchanged)* |
+| **Slot calculation** | `fps × scale` Hz, off-by-one | `fps` Hz, +1 | *(unchanged)* | *(unchanged)* | *(unchanged)* |
+| **sv_physicsScale cvar** | registered + watched | *(unchanged)* | *(unchanged)* | *(unchanged)* | **removed** |
+| **Save/restore** | Via `GetMostRecentPosition` | Via `GetMostRecentPosition` | Direct `gent->r.currentOrigin` | *(unchanged)* | *(unchanged)* |
+| **No-history fallback** | Force-write saved pos back | Force-write saved pos back | Leave entity at current pos | *(unchanged)* | *(unchanged)* |
+| **Debug output time** | `svs.time` | `svs.time` | **`sv.time`** | *(unchanged)* | *(unchanged)* |
+| **Header cvar names** | `sv_antilagTraceLog` | *(unchanged)* | *(unchanged)* | **`sv_antilagDebug`** | *(unchanged)* |
+| **Enable cvar name** | — | `sv_antilagEnable` (docs only) | *(unchanged)* | **`sv_antilag`** (code + docs) | *(unchanged)* |
 
 ---
 
@@ -387,18 +460,26 @@ and wrong header names. Updated:
 
 All items verified in the current codebase:
 
-- [x] Fire time uses `sv.time - cl->ping / 2` (half-RTT, not
-      `lastUsercmd.serverTime` which includes interpolation delay)
+- [x] Fire time uses `sv.time - cl->ping` (full RTT).
+      `cl->ping` is the server-measured round-trip time. The snapshot was
+      built at `sv.time = T0`, sent at wall-clock `T0_wall`, received by
+      the client at `T0_wall + RTT/2`, and the usercmd arrives back at
+      `T0_wall + RTT` when `sv.time ≈ T0 + RTT`. Rewind target =
+      `sv.time - ping = T0`. Using `ping/2` (PR #37) left targets `RTT/2`
+      ms too far forward; using `lastUsercmd.serverTime` (PR #35)
+      over-compensated by the client's interp buffer (~30–50 ms extra).
 - [x] `sv.time` is used consistently in all shadow antilag paths that
       compare against fire time or shadow history timestamps
 - [x] `svs.time` is **only** used in `NoteSnapshot` rate tracking (wall-clock)
-- [x] Bots are **included** in shadow history recording and rewind.
-      A human shooter with latency P sees all targets (bot or human) at
-      their position from P/2 ms ago; excluding bots forced shooters to
-      lead bots by their own half-ping. Bots as *shooters* are still
-      excluded from `InterceptTrace` (they have 0 latency and need no
-      rewind). Stale-history-from-previous-occupant is prevented by
-      `SV_Antilag_ClearClient()` zeroing the ring buffer on disconnect.
+- [x] Bots are **excluded** from shadow history recording and rewind
+      (`NA_BOT` filter in both `RecordPositions` and `RewindAll`). The
+      QVM's own FIFO antilag handles bot targets correctly (bots have zero
+      network lag — their current position is the correct trace target).
+      Including bots in the shadow rewind would create a double-rewind
+      conflict: FIFO moves the bot to position A, shadow overwrites with
+      position B from a different time formula; the trace runs against a
+      position neither system intended. Bots are also excluded as shooters
+      in `InterceptTrace` (they have zero latency and need no rewind).
 - [x] `ComputeConfig` slot count uses `sv_fps` Hz (not `fps × scale`)
       with `+1` to avoid off-by-one
 - [x] History is always flushed on any timing config change (not just

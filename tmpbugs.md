@@ -93,6 +93,29 @@ the cvar definition and registration (see BUG-1 resolution).
 
 ---
 
+## BUG-4 — Fire time under-compensation (`sv.time - ping/2` should be `sv.time - ping`) — **RESOLVED**
+
+**Resolution:** Changed `fireTime = sv.time - cl->ping / 2` to
+`fireTime = sv.time - cl->ping` in `SV_Antilag_GetClientFireTime`.
+
+**Root cause:** PR #37 introduced `ping/2` reasoning that "ping/2 approximates
+one-way latency (server→client)". This is true but incomplete: the usercmd also
+travels one-way back (client→server), so the total lag from when the snapshot
+was recorded to when the trace runs is the full RTT (`= cl->ping`), not half.
+
+**Timing proof:**
+- `T0`: position recorded; snapshot sent (`messageSent = Sys_Milliseconds()`)
+- `T0 + RTT/2`: client receives snapshot, aims at position `T0`
+- `T0 + RTT`: server receives usercmd (`sv.time ≈ T0 + RTT`)
+- Correct rewind: `sv.time - ping = T0` ✓
+- PR #37 formula: `sv.time - ping/2 = T0 + RTT/2` ✗ (target is `RTT/2` too far forward)
+
+**Impact at 40 ms ping:**
+- Old error: ~20 ms positional lead required (~128 units at 320 ups)
+- New error: ~0 ms (exact snapshot compensation)
+
+---
+
 ## NOTES (not bugs, design decisions)
 
 ### `sv_antilag` default is `0` (disabled)

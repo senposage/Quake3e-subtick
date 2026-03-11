@@ -214,7 +214,24 @@ static int SV_Antilag_GetClientFireTime( int shooterNum ) {
         return sv.time;
 
     cl = &svs.clients[shooterNum];
-    fireTime = sv.time - cl->ping / 2;
+
+    // Rewind by the full round-trip time, not half.
+    //
+    // Timing proof:
+    //   T0      — position recorded in shadow history (sv.time = T0)
+    //   T0      — snapshot built and sent (messageSent = Sys_Milliseconds())
+    //   T0+RTT/2 — client receives snapshot, sees target at sv.time T0
+    //   T0+RTT/2 — client fires, sends usercmd
+    //   T0+RTT  — server receives usercmd (messageAcked = Sys_Milliseconds())
+    //              cl->ping = messageAcked - messageSent = RTT  (server-measured)
+    //              sv.time ≈ T0 + RTT  (advances at 1 ms / real-ms)
+    //
+    // To rewind targets back to the position the client was aiming at (T0):
+    //   fireTime = sv.time - cl->ping = (T0 + RTT) - RTT = T0  ✓
+    //
+    // Using ping/2 only compensates one hop, leaving targets RTT/2 ms too
+    // far forward — the shooter must aim ahead of the visual position.
+    fireTime = sv.time - cl->ping;
 
     maxRewind = sv_antilagMaxMs ? sv_antilagMaxMs->integer : SV_ANTILAG_MAX_REWIND_MS;
     if ( sv.time - fireTime > maxRewind )
@@ -235,15 +252,16 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
     for ( i = 0; i < sv.maxclients; i++ ) {
         cl = &svs.clients[i];
 
-        if ( i == shooterNum )          continue;
-        if ( cl->state != CS_ACTIVE )   continue;
-        // Bots are included in the rewind.  A human shooter with latency P
-        // sees every target — bot or human — at its position from P/2 ms ago
-        // (the last snapshot).  Excluding bots made traces run against their
-        // current (post-snapshot) position, forcing shooters to lead bots by
-        // their own half-ping.  Including bots here corrects that.
-        // Stale-history-from-previous-occupant is not a concern because
-        // SV_Antilag_ClearClient() zeroes the ring buffer on every disconnect.
+        if ( i == shooterNum )                              continue;
+        if ( cl->state != CS_ACTIVE )                       continue;
+        // Bots are excluded from the shadow rewind.  The QVM's own FIFO
+        // antilag already handles bot targets (bots have zero network lag so
+        // their current position is always correct at trace time).  Including
+        // bots in the shadow rewind would create a double-rewind conflict:
+        // FIFO moves the bot to position A; shadow then overwrites with
+        // position B derived from a different time formula.  The trace would
+        // run against a position neither system intended.
+        if ( cl->netchan.remoteAddress.type == NA_BOT )     continue;
 
         gent = SV_GentityNum( i );
         if ( !gent || !gent->r.linked ) continue;
@@ -365,10 +383,10 @@ void SV_Antilag_RecordPositions( void ) {
     for ( i = 0; i < sv.maxclients; i++ ) {
         client_t *cl = &svs.clients[i];
         if ( cl->state != CS_ACTIVE ) continue;
-        // Record bots as well as humans.  Bots move at sv_gameHz rate so
-        // consecutive sv_fps recordings may be identical, but the interpolator
-        // needs a valid entry at every fire-time to avoid falling back to the
-        // current (non-rewound) position when a human shoots at a bot.
+        // Bots are excluded.  Their current position is always correct at
+        // trace time (zero network lag), and recording them would feed the
+        // double-rewind conflict described in SV_Antilag_RewindAll.
+        if ( cl->netchan.remoteAddress.type == NA_BOT ) continue;
         SV_Antilag_RecordClient( i, sv.time );
     }
 }
