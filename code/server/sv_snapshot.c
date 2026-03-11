@@ -122,6 +122,12 @@ static qboolean SV_SmoothGetPosition( int clientNum, int targetTime,
 			if ( !after || hist->slots[idx].serverTime < after->serverTime )
 				after = &hist->slots[idx];
 		}
+
+		// Early exit: iterating newest-first.  Once we have both brackets
+		// and have passed below before's timestamp, nothing further can
+		// improve either bracket.
+		if ( before && after && hist->slots[idx].serverTime < before->serverTime )
+			break;
 	}
 
 	if ( !before && !after )

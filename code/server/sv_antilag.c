@@ -70,7 +70,6 @@ cvar_t *sv_antilagRateDebug;
 static svShadowHistory_t    sv_shadowHistory[MAX_CLIENTS];
 static svShadowSaved_t      sv_shadowSaved[MAX_CLIENTS];
 
-static int                  sv_shadowAccumulator = 0;
 static int                  sv_shadowTickMs = 0;
 static int                  sv_shadowHistorySlots = 0;
 static int                  sv_antilag_lastFpsValue = 0;
@@ -168,6 +167,12 @@ static qboolean SV_Antilag_GetPositionAtTime(
             if ( !after || s->serverTime < after->serverTime )
                 after = s;
         }
+
+        // Early exit: we iterate newest-first (backward from head).
+        // Once we have both brackets and are now below before's
+        // timestamp, no further entry can improve either bracket.
+        if ( before && after && s->serverTime < before->serverTime )
+            break;
     }
 
     if ( !before )
@@ -360,7 +365,6 @@ void SV_Antilag_Init( void ) {
     Com_Memset( sv_shadowSaved,   0, sizeof( sv_shadowSaved ) );
     Com_Memset( sv_rateTrack,     0, sizeof( sv_rateTrack ) );
 
-    sv_shadowAccumulator = 0;
     sv_antilag_lastFpsValue = sv_fps ? sv_fps->integer : 40;
 
     SV_Antilag_ComputeConfig();
@@ -497,8 +501,9 @@ qboolean SV_Antilag_InterceptTrace(
 
     if ( sv_antilagDebug && sv_antilagDebug->integer >= 1 ) {
         client_t *shooter = &svs.clients[ passEntityNum ];
-        Com_Printf( "AL shot cl[%d] ping=%d rewind=%dms (sv.time=%d fireTime=%d)\n",
-            passEntityNum, shooter->ping, sv.time - fireTime, sv.time, fireTime );
+        Com_Printf( "AL shot cl[%d] ping=%d snapMsec=%d rewind=%dms (sv.time=%d fireTime=%d)\n",
+            passEntityNum, shooter->ping, shooter->snapshotMsec,
+            sv.time - fireTime, sv.time, fireTime );
     }
 
     rewound = SV_Antilag_RewindAll( passEntityNum, fireTime );

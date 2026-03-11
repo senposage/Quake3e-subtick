@@ -1597,7 +1597,17 @@ void SV_Frame( int msec ) {
 		}
 
 		// Record positions into smooth buffer when either feature is enabled.
-		// Ring buffer feeds both sv_bufferMs (position delay) and sv_velSmooth (velocity smoothing).
+		// Ring buffer feeds both sv_bufferMs (position delay) and sv_velSmooth
+		// (velocity smoothing).
+		//
+		// Runs unconditionally every sv_fps tick — NOT gated on _gameFrameRan.
+		// sv_bufferMs delays positions by N wall-clock ms (sv.time).  It needs
+		// one entry per sv_fps tick so that a "give me position from T-bufferMs"
+		// lookup always finds a tightly-bracketed pair.  When sv_gameHz > 0,
+		// entity positions do not change between game frames, but the timestamps
+		// still advance; recording duplicates is harmless and necessary for
+		// correct ms-accurate buffering.  Gating on _gameFrameRan would collapse
+		// the ring buffer to game-frame rate and break bufferMs accuracy.
 		if ( ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) )
 				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
 				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
