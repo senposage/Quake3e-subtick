@@ -9,8 +9,7 @@ on:
       - 'docs/*'
   push:
     branches:
-      - master
-      - Quake3e-upstreammerge
+      - upstream-reimpl
     paths-ignore:
       - '**.md'
       - '*.txt'
@@ -121,7 +120,7 @@ jobs:
         retention-days: 5
 
   create-release:
-    if: (contains(fromJSON('["master", "Quake3e-upstreammerge"]'), github.ref_name) && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
+    if: (github.ref_name == 'upstream-reimpl' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
     needs: [linux, windows-mingw]
     runs-on: ubuntu-latest
     permissions:
@@ -138,8 +137,8 @@ jobs:
             find "$dir" -type f -name '*quake3e.ded*' -exec cp {} "server/$dir/" \;
             find "$dir" -type f ! -name '*quake3e.ded*' -exec cp {} "client/$dir/" \;
           done
-          7z a -r quake3e-subtick-client-${{ github.ref_name }}.zip ./client/*
-          7z a -r quake3e-subtick-server-${{ github.ref_name }}.zip ./server/*
+          7z a -r quake3e-urt-client-${{ github.ref_name }}.zip ./client/*
+          7z a -r quake3e-urt-server-${{ github.ref_name }}.zip ./server/*
 
       - name: Create latest build
         uses: czietz/action-automatic-releases@latest
@@ -162,16 +161,16 @@ jobs:
       matrix:
         include:
           - artifact_dir: linux-x86
-            artifact_name: quake3e-subtick-linux-x86.zip
+            artifact_name: quake3e-urt-linux-x86.zip
 
           - artifact_dir: linux-x86_64
-            artifact_name: quake3e-subtick-linux-x86_64.zip
+            artifact_name: quake3e-urt-linux-x86_64.zip
 
           - artifact_dir: windows-mingw-x86
-            artifact_name: quake3e-subtick-windows-x86.zip
+            artifact_name: quake3e-urt-windows-x86.zip
 
           - artifact_dir: windows-mingw-x86_64
-            artifact_name: quake3e-subtick-windows-x86_64.zip
+            artifact_name: quake3e-urt-windows-x86_64.zip
 
     steps:
       - name: Download Artifacts
