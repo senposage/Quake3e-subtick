@@ -263,12 +263,16 @@ Computes `cl.serverTime` for the cgame. The most change-heavy function in the cl
 CL_SetCGameTime:
     if !cl.snap.valid: handle extrapolation
     
-    [CUSTOM: proportional clamp]
-    // Clamp serverTime so it can never get more than snapshotMsec ahead
-    // of the latest snapshot. Vanilla hardcoded 5ms which worked at 20Hz
-    // but caused overshooting at 60Hz.
-    if (cl.serverTime > cl.snap.serverTime + cl.snapshotMsec):
-        cl.serverTime = cl.snap.serverTime + cl.snapshotMsec
+    [CUSTOM: proportional safety cap]
+    // Prevent cl.serverTime from running at or ahead of snap.serverTime.
+    // If it does, outgoing usercmd serverTime values can exceed the server's
+    // commandTime → ping=999 → URT ping-kick → zombie-state flood loop.
+    // Cap margin = snapshotMsec/4, clamped to [2, 8] ms.
+    // Released after 2s of continuous drift (server stopped sending).
+    // Applied unconditionally regardless of cl_adaptiveTiming.
+    capMs = clamp(snapshotMsec / 4, 2, 8)
+    if (cl.serverTime >= cl.snap.serverTime AND drift < 2000):
+        cl.serverTime = cl.snap.serverTime - capMs
 
     [CUSTOM: proportional extrapolate threshold]
     // Vanilla: if serverTime >= snap.serverTime - 5ms: set extrapolatedSnapshot

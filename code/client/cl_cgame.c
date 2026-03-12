@@ -1243,17 +1243,24 @@ void CL_SetCGameTime( void ) {
 		if ( cl.serverTime - cl.oldServerTime < 0 ) {
 			cl.serverTime = cl.oldServerTime;
 		}
-		// Cap serverTime two millisecond below the latest received snapshot.
-		// Prevents cl.serverTime from running ahead of snap.serverTime, which
-		// would make usercmd p_serverTime exceed the server's commandTime and
-		// cause ping=999. Release after 1s of drift (server stopped sending).
-		// Applied unconditionally — this is a safety guarantee, not an
-		// adaptive-timing feature, so cl_adaptiveTiming=0 still benefits.
-		if ( cl.serverTime >= cl.snap.serverTime ) {
-			int drift = cl.serverTime - cl.snap.serverTime;
-			if ( drift < 2000 ) {
-				cl.serverTime = cl.snap.serverTime - 1;
-				SCR_NetMonitorAddCapHit();
+		// Cap serverTime below the latest received snapshot by a margin proportional
+		// to the snapshot interval. Prevents cl.serverTime from running ahead of
+		// snap.serverTime, which would make outgoing usercmd serverTime values
+		// exceed the server's commandTime, causing ping=999 and a URT ping-kick
+		// that feeds the zombie-state flood loop. Release after 2s of continuous
+		// drift (server stopped sending). Applied unconditionally — this is a
+		// safety guarantee, not an adaptive-timing feature, so cl_adaptiveTiming=0
+		// still benefits.
+		{
+			int capMs = cl.snapshotMsec / 4;
+			if ( capMs < 2 ) capMs = 2;
+			if ( capMs > 8 ) capMs = 8;
+			if ( cl.serverTime >= cl.snap.serverTime ) {
+				int drift = cl.serverTime - cl.snap.serverTime;
+				if ( drift < 2000 ) {
+					cl.serverTime = cl.snap.serverTime - capMs;
+					SCR_NetMonitorAddCapHit();
+				}
 			}
 		}
 		cl.oldServerTime = cl.serverTime;
