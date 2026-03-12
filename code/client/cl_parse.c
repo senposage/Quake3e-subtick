@@ -560,6 +560,13 @@ static void CL_ParseServerInfo( void )
 			}
 		}
 	}
+
+	// Detect vanilla server: absence of sv_snapshotFps means the server does not
+	// support our adaptive timing protocol — disable cl_adaptiveTiming on such servers.
+	{
+		const char *snapFpsStr = Info_ValueForKey( serverInfo, "sv_snapshotFps" );
+		cl.vanillaServer = ( snapFpsStr[0] == '\0' );
+	}
 }
 
 

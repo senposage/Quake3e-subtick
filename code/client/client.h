@@ -122,6 +122,7 @@ typedef struct {
 
 	int			snapshotMsec;		// EMA of snapshot intervals, clamped [8,100]
 	float		frameInterpolation;	// current interpolation fraction for cgame
+	qboolean	vanillaServer;		// true if server lacks sv_snapshotFps (no adaptive timing support)
 
 	gameState_t	gameState;			// configstrings
 	char		mapname[MAX_QPATH];	// extracted from CS_SERVERINFO
