@@ -821,8 +821,24 @@ static void SV_BuildCommonSnapshot( void )
 					}
 					if ( !usedBuffer ) {
 						if ( isBot ) {
-							VectorCopy( es->pos.trBase, origin );
-							VectorCopy( es->pos.trDelta, velocity );
+							// sv_gamehz > 0: extrapolate bot position forward from the last
+							// game frame using ps->velocity (not trDelta -- ps->velocity is
+							// the Pmove velocity at the game-frame boundary and is more
+							// accurate for straight-line bot movement between AI decisions).
+							// Gate: sv.time > sv.gameTime is only true when sv_gamehz creates
+							// a real gap.  At sv_gamehz 0 these are always equal so the else
+							// branch fires, preserving the existing trBase/trDelta path.
+							if ( sv.time > sv.gameTime ) {
+								playerState_t *ps = SV_GameClientNum( es->number );
+								float dt = (float)( sv.time - sv.gameTime ) * 0.001f;
+								origin[0] = es->pos.trBase[0] + ps->velocity[0] * dt;
+								origin[1] = es->pos.trBase[1] + ps->velocity[1] * dt;
+								origin[2] = es->pos.trBase[2] + ps->velocity[2] * dt;
+								VectorCopy( ps->velocity, velocity );
+							} else {
+								VectorCopy( es->pos.trBase, origin );
+								VectorCopy( es->pos.trDelta, velocity );
+							}
 						} else {
 							playerState_t *ps = SV_GameClientNum( es->number );
 							VectorCopy( ps->origin, origin );
@@ -831,9 +847,17 @@ static void SV_BuildCommonSnapshot( void )
 					}
 
 					// Phase 2: resolve trajectory type
-					// Bots excluded from velocity prediction to avoid sawtooth artifacts
 					if ( isBot ) {
-						// Leave bot entity state untouched
+						// Only update the snapshot trBase when sv_gamehz creates a gap
+						// between game frames.  Keeps TR_INTERPOLATE so the client
+						// interpolates between extrapolated positions -- avoids the
+						// visual/server mismatch that TR_LINEAR would cause when bots
+						// change direction at a game-frame boundary.
+						// At sv_gamehz 0: sv.time == sv.gameTime so the gate is false
+						// and trBase is already fresh every tick -- no change needed.
+						if ( sv.time > sv.gameTime ) {
+							VectorCopy( origin, es->pos.trBase );
+						}
 					} else if ( sv_smoothClients && sv_smoothClients->integer ) {
 						// TR_LINEAR mode
 						int velSmoothMs = ( sv_velSmooth && sv_velSmooth->integer > 0 ) ? sv_velSmooth->integer : 0;

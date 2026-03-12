@@ -409,18 +409,34 @@ for each entity (0 to sv.num_entities):
         usedBuffer = SV_SmoothGetPosition(es->number, targetTime, &origin, &vel)
     
     if !usedBuffer:
-        if bot:
-            origin = trBase + trDelta * (sv.time - sv.gameTime) * 0.001
+        if bot AND sv.time > sv.gameTime:     ← only when sv_gamehz creates a gap
+            // use ps->velocity (not trDelta) — reflects actual Pmove velocity
+            // at the game-frame boundary; accurate for straight-line bot motion
+            dt     = (sv.time - sv.gameTime) * 0.001
+            origin = trBase + ps->velocity * dt
+            vel    = ps->velocity
+        else:
+            origin = trBase          ← sv_gamehz 0: trBase is already fresh
             vel    = trDelta
-        else (real player):
-            origin = ps->origin
+
+        if real player:
+            origin = ps->origin      ← always fresh (Pmove runs every usercmd)
             vel    = ps->velocity
 
     [PHASE 2: apply trajectory]
 
+    if bot:
+        // Keep TR_INTERPOLATE — avoids visual/server mismatch when bots
+        // change direction at a game-frame boundary (TR_LINEAR would show
+        // stale-velocity extrapolation until the next game frame).
+        // Gate: only anchor when sv_gamehz creates a gap; at sv_gamehz 0
+        // trBase is already fresh every tick so no change is needed.
+        if sv.time > sv.gameTime:
+            VectorCopy(origin, es->pos.trBase)
+
     deadZone = DotProduct(vel, vel) > 100.0f  (speed > ~10 ups)
 
-    if sv_smoothClients:
+    else if sv_smoothClients:
         if deadZone:
             es->pos.trType  = TR_LINEAR
             es->pos.trBase  = origin
@@ -431,10 +447,8 @@ for each entity (0 to sv.num_entities):
     else if sv_extrapolate:
         if usedBuffer AND deadZone:
             VectorCopy(origin, es->pos.trBase)
-        else if bot:
-            VectorCopy(origin, es->pos.trBase)  // already extrapolated above
         else if real player AND deadZone:
-            VectorCopy(ps->origin, es->pos.trBase)  // use actual Pmove position
+            VectorCopy(ps->origin, es->pos.trBase)
 ```
 
 **Dead-zone explanation:** `DotProduct(vel, vel) > 100.0f` means `|vel| > 10 ups`. This filters Pmove ground-snap oscillations on stationary players. Without it, a player standing still would flutter between TR_LINEAR and TR_INTERPOLATE every few ticks, causing vibration.

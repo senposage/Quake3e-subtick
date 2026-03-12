@@ -51,9 +51,9 @@ When sv_gameHz 20 and sv_fps 60, `BG_PlayerStateToEntityState` (which stamps ent
 
 Corrects stale positions in `SV_BuildCommonSnapshot`:
 - **Real players:** reads actual `ps->origin` from playerState (updated every usercmd by Pmove — always fresh).
-- **Bots:** velocity extrapolation `trBase += ps->velocity * (sv.time - sv.gameTime) * 0.001`. Accurate because bot AI only changes direction at game frame boundaries.
+- **Bots:** velocity extrapolation `trBase += ps->velocity * (sv.time - sv.gameTime) * 0.001`. Uses `ps->velocity` (the Pmove velocity at the last game-frame boundary) rather than `es->pos.trDelta`, which is more accurate for straight-line bot movement between AI decisions. Gated behind `sv.time > sv.gameTime` so it is a true no-op when `sv_gamehz 0`. Trajectory type stays `TR_INTERPOLATE` — avoids the visual/server position mismatch that `TR_LINEAR` would introduce when bots change direction at game-frame boundaries.
 
-At sv_gameHz 0: no-op (positions are already fresh every tick).
+At sv_gameHz 0: no-op — `sv.time == sv.gameTime` always, so `dt == 0` and the gate never fires.
 
 ### sv_bufferMs (useful at sv_gameHz > 0)
 
