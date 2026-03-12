@@ -1028,40 +1028,51 @@ static void CL_AdjustTimeDelta( void ) {
 		SCR_NetMonitorAddFastAdjust();
 		SCR_LogTimingEvent( "FAST ", cl.serverTimeDelta, deltaDelta );
 	} else {
-		// slow drift adjust via fractional accumulator
-
 		// if any of the frames between this and the previous snapshot
 		// had to be extrapolated, nudge our sense of time back a little
 		if ( com_timescale->value == 0 || com_timescale->value == 1 ) {
-			if ( cl.extrapolatedSnapshot ) {
-				cl.extrapolatedSnapshot = qfalse;
-				slowFrac -= ( cl.snapshotMsec < 30 ) ? 2 : 4;
+			if ( cl.serverForbidsAdaptiveTiming ) {
+				// vanilla Q3: direct ms adjustment, no fractional accumulator
+				if ( cl.extrapolatedSnapshot ) {
+					cl.extrapolatedSnapshot = qfalse;
+					cl.serverTimeDelta -= 2;
+					SCR_NetMonitorAddSlowAdjust( -2 );
+				} else {
+					cl.serverTimeDelta++;
+					SCR_NetMonitorAddSlowAdjust( +1 );
+				}
 			} else {
-				slowFrac += 2;
-			}
-			// Commit a whole-ms adjustment once the accumulator reaches +/-1 ms.
-			// Mode 2 (proportional): scale commit to 25% of remaining error
-			// for faster convergence on mid-range disturbances.
-			if ( slowFrac >= 4 ) {
-				int step = 1;
-				if ( cl_adaptiveTiming->integer >= 2 && !cl.serverForbidsAdaptiveTiming && deltaDelta > cl.snapshotMsec ) {
-					step = deltaDelta / 4;
-					if ( step < 1 ) step = 1;
-					if ( step > deltaDelta / 2 ) step = deltaDelta / 2;
+				// adaptive timing: slow drift via fractional accumulator
+				if ( cl.extrapolatedSnapshot ) {
+					cl.extrapolatedSnapshot = qfalse;
+					slowFrac -= ( cl.snapshotMsec < 30 ) ? 2 : 4;
+				} else {
+					slowFrac += 2;
 				}
-				cl.serverTimeDelta += step;
-				slowFrac -= 4;
-				SCR_NetMonitorAddSlowAdjust( +step );
-			} else if ( slowFrac <= -4 ) {
-				int step = 1;
-				if ( cl_adaptiveTiming->integer >= 2 && !cl.serverForbidsAdaptiveTiming && deltaDelta > cl.snapshotMsec ) {
-					step = deltaDelta / 4;
-					if ( step < 1 ) step = 1;
-					if ( step > deltaDelta / 2 ) step = deltaDelta / 2;
+				// Commit a whole-ms adjustment once the accumulator reaches +/-1 ms.
+				// Mode 2 (proportional): scale commit to 25% of remaining error
+				// for faster convergence on mid-range disturbances.
+				if ( slowFrac >= 4 ) {
+					int step = 1;
+					if ( cl_adaptiveTiming->integer >= 2 && !cl.serverForbidsAdaptiveTiming && deltaDelta > cl.snapshotMsec ) {
+						step = deltaDelta / 4;
+						if ( step < 1 ) step = 1;
+						if ( step > deltaDelta / 2 ) step = deltaDelta / 2;
+					}
+					cl.serverTimeDelta += step;
+					slowFrac -= 4;
+					SCR_NetMonitorAddSlowAdjust( +step );
+				} else if ( slowFrac <= -4 ) {
+					int step = 1;
+					if ( cl_adaptiveTiming->integer >= 2 && !cl.serverForbidsAdaptiveTiming && deltaDelta > cl.snapshotMsec ) {
+						step = deltaDelta / 4;
+						if ( step < 1 ) step = 1;
+						if ( step > deltaDelta / 2 ) step = deltaDelta / 2;
+					}
+					cl.serverTimeDelta -= step;
+					slowFrac += 4;
+					SCR_NetMonitorAddSlowAdjust( -step );
 				}
-				cl.serverTimeDelta -= step;
-				slowFrac += 4;
-				SCR_NetMonitorAddSlowAdjust( -step );
 			}
 		}
 	}
@@ -1090,6 +1101,7 @@ static void CL_FirstSnapshot( void ) {
 	// set the timedelta so we are exactly on this first frame
 	cl.serverTimeDelta = cl.snap.serverTime - cls.realtime;
 	cl.oldServerTime = cl.snap.serverTime;
+	slowFrac = 0;
 
 	clc.timeDemoBaseTime = cl.snap.serverTime;
 
@@ -1231,18 +1243,17 @@ void CL_SetCGameTime( void ) {
 		if ( cl.serverTime - cl.oldServerTime < 0 ) {
 			cl.serverTime = cl.oldServerTime;
 		}
-		// Cap serverTime one millisecond below the latest received snapshot
-		// (adaptive timing only).  Release the cap when the uncapped time
-		// drifts several snapshot intervals past the last snapshot (server
-		// stopped sending).
-		if ( cl_adaptiveTiming->integer && !cl.serverForbidsAdaptiveTiming ) {
-			if ( cl.serverTime >= cl.snap.serverTime ) {
-				int drift = cl.serverTime - cl.snap.serverTime;
-				int capLimit = 1000;
-				if ( drift < capLimit ) {
-					cl.serverTime = cl.snap.serverTime - 1;
-					SCR_NetMonitorAddCapHit();
-				}
+		// Cap serverTime one millisecond below the latest received snapshot.
+		// Prevents cl.serverTime from running ahead of snap.serverTime, which
+		// would make usercmd p_serverTime exceed the server's commandTime and
+		// cause ping=999. Release after 1s of drift (server stopped sending).
+		// Applied unconditionally — this is a safety guarantee, not an
+		// adaptive-timing feature, so cl_adaptiveTiming=0 still benefits.
+		if ( cl.serverTime >= cl.snap.serverTime ) {
+			int drift = cl.serverTime - cl.snap.serverTime;
+			if ( drift < 1000 ) {
+				cl.serverTime = cl.snap.serverTime - 1;
+				SCR_NetMonitorAddCapHit();
 			}
 		}
 		cl.oldServerTime = cl.serverTime;
@@ -1276,8 +1287,9 @@ void CL_SetCGameTime( void ) {
 				SCR_NetMonitorAddExtrap();
 			}
 		} else {
-			// cl_adaptiveTiming 0: hardcoded 5ms threshold; include fractional accumulator
-			if ( ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime ) * 4 + slowFrac >= -20 ) {
+			// vanilla Q3: diff >= -5ms equivalent (when slowFrac=0, the full
+			// adaptive check "(diff * 4 + slowFrac) >= -20" reduces to "diff >= -5")
+			if ( cls.realtime + cl.serverTimeDelta - cl.snap.serverTime >= -5 ) {
 				cl.extrapolatedSnapshot = qtrue;
 			}
 		}

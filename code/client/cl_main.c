@@ -2988,6 +2988,16 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 		return qfalse;
 	}
 
+	// server-initiated disconnect (also sent by zombie-state servers)
+	if ( !Q_stricmp( c, "disconnect" ) ) {
+		if ( NET_CompareAdr( from, &clc.serverAddress ) ) {
+			if ( cls.state >= CA_CONNECTED ) {
+				Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
+			}
+		}
+		return qfalse;
+	}
+
 	// print string from server
 	if ( !Q_stricmp(c, "print") ) {
 		// NOTE: we may have to add exceptions for auth and update servers
