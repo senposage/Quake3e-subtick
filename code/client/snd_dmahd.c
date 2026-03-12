@@ -453,13 +453,18 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
     hp_last = sample;
     hp_lastsample = sample;
     //buffer[idx_hp++] = sample;
-    hp_a = 0.95f;
+    // Scale coefficients so cutoff frequencies stay constant regardless of dma.speed.
+    // Originals were calibrated for 44100 Hz: hp_a=0.95 (~360 Hz HP), lp_a=0.03 (~211 Hz LP).
+    {
+        float rate_scale = 44100.0f / (float)dma.speed;
+        hp_a = 1.0f - (1.0f - 0.95f) * rate_scale;
+        lp_a = 0.03f * rate_scale;
+    }
 
     // Set up Low pass filter.
     idx_lp = outcount;
     lp_last = bsample;
-    lp_a = 0.03f;
-    lp_inva = (1 - lp_a);
+    lp_inva = (1.0f - lp_a);
 
     // Now do actual high/low pass on actual data.
     for (;idx_hp < outcount; idx_hp++)

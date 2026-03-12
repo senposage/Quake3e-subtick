@@ -239,6 +239,9 @@ static DWORD WINAPI ThreadProc( HANDLE hInited )
 					n = samples;
 
 				Com_Memcpy( pData + dwOffset, dma.buffer + bufferPosition * bufferSampleSize, n * bufferSampleSize );
+				// Zero the consumed region so a wrap-around under a game-loop stall
+				// plays silence rather than repeating the previous cycle's audio.
+				Com_Memset( dma.buffer + bufferPosition * bufferSampleSize, 0, n * bufferSampleSize );
 
 				dwOffset += n * bufferSampleSize;
 				bufferPosition = ( bufferPosition + n ) & ( dma.fullsamples - 1 );

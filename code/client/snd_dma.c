@@ -937,13 +937,23 @@ static void S_Base_RawSamples( int samples, int rate, int width, int n_channels,
 		{
 			for (i=0 ; ; i++)
 			{
-				src = i*scale;
-				if (src >= samples)
+				float src_f = (float)i * scale;
+				int src0 = (int)src_f;
+				int src1 = src0 + 1;
+				float frac = src_f - (float)src0;
+				int s0L, s1L, s0R, s1R;
+				if (src0 >= samples)
 					break;
+				if (src1 >= samples)
+					src1 = src0;
+				s0L = ((short *)data)[src0*2];
+				s1L = ((short *)data)[src1*2];
+				s0R = ((short *)data)[src0*2+1];
+				s1R = ((short *)data)[src1*2+1];
 				dst = s_rawend&(MAX_RAW_SAMPLES-1);
 				s_rawend++;
-				s_rawsamples[dst].left = ((short *)data)[src*2] * intVolume;
-				s_rawsamples[dst].right = ((short *)data)[src*2+1] * intVolume;
+				s_rawsamples[dst].left  = (int)(s0L + (s1L - s0L) * frac) * intVolume;
+				s_rawsamples[dst].right = (int)(s0R + (s1R - s0R) * frac) * intVolume;
 			}
 		}
 	}
@@ -951,13 +961,22 @@ static void S_Base_RawSamples( int samples, int rate, int width, int n_channels,
 	{
 		for (i=0 ; ; i++)
 		{
-			src = i*scale;
-			if (src >= samples)
+			float src_f = (float)i * scale;
+			int src0 = (int)src_f;
+			int src1 = src0 + 1;
+			float frac = src_f - (float)src0;
+			int s0, s1;
+			if (src0 >= samples)
 				break;
+			if (src1 >= samples)
+				src1 = src0;
+			s0 = ((short *)data)[src0];
+			s1 = ((short *)data)[src1];
 			dst = s_rawend&(MAX_RAW_SAMPLES-1);
 			s_rawend++;
-			s_rawsamples[dst].left = ((short *)data)[src] * intVolume;
-			s_rawsamples[dst].right = ((short *)data)[src] * intVolume;
+			src = (int)(s0 + (s1 - s0) * frac);
+			s_rawsamples[dst].left  = src * intVolume;
+			s_rawsamples[dst].right = src * intVolume;
 		}
 	}
 	else if (n_channels == 2 && width == 1)
@@ -966,13 +985,23 @@ static void S_Base_RawSamples( int samples, int rate, int width, int n_channels,
 
 		for (i=0 ; ; i++)
 		{
-			src = i*scale;
-			if (src >= samples)
+			float src_f = (float)i * scale;
+			int src0 = (int)src_f;
+			int src1 = src0 + 1;
+			float frac = src_f - (float)src0;
+			int s0L, s1L, s0R, s1R;
+			if (src0 >= samples)
 				break;
+			if (src1 >= samples)
+				src1 = src0;
+			s0L = ((char *)data)[src0*2];
+			s1L = ((char *)data)[src1*2];
+			s0R = ((char *)data)[src0*2+1];
+			s1R = ((char *)data)[src1*2+1];
 			dst = s_rawend&(MAX_RAW_SAMPLES-1);
 			s_rawend++;
-			s_rawsamples[dst].left = ((char *)data)[src*2] * intVolume;
-			s_rawsamples[dst].right = ((char *)data)[src*2+1] * intVolume;
+			s_rawsamples[dst].left  = (int)(s0L + (s1L - s0L) * frac) * intVolume;
+			s_rawsamples[dst].right = (int)(s0R + (s1R - s0R) * frac) * intVolume;
 		}
 	}
 	else if (n_channels == 1 && width == 1)
@@ -981,13 +1010,22 @@ static void S_Base_RawSamples( int samples, int rate, int width, int n_channels,
 
 		for (i=0 ; ; i++)
 		{
-			src = i*scale;
-			if (src >= samples)
+			float src_f = (float)i * scale;
+			int src0 = (int)src_f;
+			int src1 = src0 + 1;
+			float frac = src_f - (float)src0;
+			int s0, s1;
+			if (src0 >= samples)
 				break;
+			if (src1 >= samples)
+				src1 = src0;
+			s0 = ((byte *)data)[src0] - 128;
+			s1 = ((byte *)data)[src1] - 128;
+			src = (int)(s0 + (s1 - s0) * frac);
 			dst = s_rawend&(MAX_RAW_SAMPLES-1);
 			s_rawend++;
-			s_rawsamples[dst].left = (((byte *)data)[src]-128) * intVolume;
-			s_rawsamples[dst].right = (((byte *)data)[src]-128) * intVolume;
+			s_rawsamples[dst].left  = src * intVolume;
+			s_rawsamples[dst].right = src * intVolume;
 		}
 	}
 
