@@ -834,6 +834,10 @@ void SV_Init( void )
 	sv_zombietime = Cvar_Get( "sv_zombietime", "2", CVAR_TEMP );
 	Cvar_CheckRange( sv_zombietime, "1", NULL, CV_INTEGER );
 	Cvar_SetDescription( sv_zombietime, "Seconds to sink messages after disconnect." );
+	sv_dropzombies = Cvar_Get( "sv_dropzombies", "1000", CVAR_ARCHIVE_ND );
+	Cvar_CheckRange( sv_dropzombies, "500", "10000", CV_INTEGER );
+	Cvar_SetDescription( sv_dropzombies, "Milliseconds of grace before the server stops sending snapshots to a disconnected (zombie) client (range 500-10000). "
+		"If the client sends any packet within this window (e.g. during a network blip or map change) the full sv_zombietime period is used." );
 	Cvar_Get ("nextmap", "", CVAR_TEMP );
 
 	sv_allowDownload = Cvar_Get ("sv_allowDownload", "1", CVAR_SERVERINFO);

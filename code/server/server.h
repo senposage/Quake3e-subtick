@@ -357,6 +357,7 @@ extern	cvar_t	*sv_velSmooth;
 extern	cvar_t	*sv_extrapolate;
 extern	cvar_t	*sv_timeout;
 extern	cvar_t	*sv_zombietime;
+extern	cvar_t	*sv_dropzombies;		// ms of grace before stopping snapshots to zombie clients
 extern	cvar_t	*sv_rconPassword;
 extern	cvar_t	*sv_privatePassword;
 extern	cvar_t	*sv_allowDownload;

@@ -22,15 +22,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "server.h"
 
-// How long (svs.time milliseconds) to keep sending snapshots to a CS_ZOMBIE
-// client that hasn't sent any packet back since disconnecting.  Covers brief
-// network interruptions (e.g. during map changes) while still stopping the
-// outbound stream well before the full sv_zombietime (default 2 s) expires,
-// avoiding a large packet backlog at high snapshot rates.  If the client sends
-// even a single packet inside this window we know it is still alive and keep
-// sending for the full sv_zombietime period.
-#define ZOMBIE_GRACE_TIME 1000
-
 
 /*
 =============================================================================
@@ -1081,17 +1072,16 @@ void SV_SendClientMessages( void )
 		if ( c->state == CS_FREE )
 			continue;		// not connected
 
-		// Zombie clients get a brief grace window to acknowledge final reliable
-		// messages and to recover from brief connection interruptions (e.g. a
-		// network blip during a map change).  If the client has sent at least one
-		// inbound packet since going zombie we know it is still alive and keep
-		// sending for the remainder of the zombie period.  Once the grace window
-		// expires with no inbound packet, flush outstanding outgoing buffers and
-		// stop sending snapshots entirely -- at high snapshot rates a gone client
-		// would otherwise keep the queue filling for the full sv_zombietime.
+		// Zombie clients get a brief grace window (sv_dropzombies ms) to acknowledge
+		// final reliable messages and to recover from brief connection interruptions
+		// (e.g. a network blip during a map change).  If the client sends any inbound
+		// packet within that window we keep sending for the full sv_zombietime period.
+		// Once the grace window expires with no packet back, flush outstanding buffers
+		// and stop sending -- at high snapshot rates a gone client would otherwise keep
+		// the queue filling until the full sv_zombietime expires.
 		if ( c->state == CS_ZOMBIE ) {
 			if ( c->netchan.incomingSequence <= c->zombieIncomingSeq &&
-			     svs.time - c->lastDisconnectTime > ZOMBIE_GRACE_TIME ) {
+			     svs.time - c->lastDisconnectTime > sv_dropzombies->integer ) {
 				SV_Netchan_FreeQueue( c );
 				continue;
 			}

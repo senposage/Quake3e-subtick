@@ -42,6 +42,7 @@ cvar_t	*sv_velSmooth;			// velocity smoothing window (ms, 0=off)
 cvar_t	*sv_extrapolate;		// legacy position prediction (0=off)
 cvar_t	*sv_timeout;			// seconds without any message
 cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
+cvar_t	*sv_dropzombies;		// milliseconds of grace before stopping snapshots to zombie clients
 cvar_t	*sv_rconPassword;		// password for remote server commands
 cvar_t	*sv_privatePassword;	// password for the privateClient slots
 cvar_t	*sv_allowDownload;
