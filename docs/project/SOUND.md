@@ -252,19 +252,22 @@ typedef struct sfx_s {
 ### win_snd.c Changes [URT]
 
 On Windows, when dmaHD is active:
-- WASAPI driver disabled (force DirectSound)
+- WASAPI is used by default (on Windows 7+), just like the base engine
 - Forces 44100 Hz sample rate
 - Forces stereo (2 channels)
 - Forces 16-bit sample depth
 
 ```c
-// win32/win_snd.c
+// win32/win_snd.c  — SNDDMA_InitWASAPI
 #ifndef NO_DMAHD
-if ( dmaHD_Enabled() ) {
-    // disable WASAPI, use DirectSound
-    // force 44100/stereo/16-bit
+if ( dmaHD_Enabled() )
+{
+    // dmaHD requires 44 KHz, Stereo, 16-bit
+    dma.speed = 44100;
 }
+else
 #endif
+switch ( s_khz->integer ) { ... }
 ```
 
 ### Build System
@@ -432,7 +435,7 @@ typedef struct {
 When dmaHD is active (`NO_DMAHD` not set):
 - `s_khz` default changes to **44** (required for HRTF processing)
 - `s_doppler` enables HRTF Doppler simulation
-- WASAPI is disabled on Windows (forced DirectSound at 44100 Hz)
+- On Windows, WASAPI is used by default (Win7+), forced to 44100 Hz / stereo / 16-bit
 - Sound loading goes through `dmaHD_LoadSound` for HRTF pre-processing
 
 Build flag: compile with `NO_DMAHD=1` to disable dmaHD and use the standard DMA backend.

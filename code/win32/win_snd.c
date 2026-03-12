@@ -25,6 +25,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 extern cvar_t *s_khz;
 
+#ifndef NO_DMAHD
+extern qboolean dmaHD_Enabled( void );
+#endif
+
 static qboolean	dsound_init;
 static qboolean SNDDMA_InitDS( void );
 
@@ -429,6 +433,14 @@ static qboolean SNDDMA_InitWASAPI( void )
 	dma.channels = 2;
 	dma.samplebits = 16;
 
+#ifndef NO_DMAHD
+	if ( dmaHD_Enabled() )
+	{
+		// dmaHD requires 44 KHz, Stereo, 16-bit
+		dma.speed = 44100;
+	}
+	else
+#endif
 	switch ( s_khz->integer ) {
 		case 48: dma.speed = 48000; break;
 		case 44: dma.speed = 44100; break;
@@ -765,10 +777,6 @@ void SNDDMA_Shutdown( void ) {
 }
 
 
-#ifndef NO_DMAHD
-qboolean dmaHD_Enabled(void);
-#endif
-
 /*
 ==================
 SNDDMA_Init
@@ -783,11 +791,7 @@ qboolean SNDDMA_Init( void ) {
 	const char *defdrv;
 	cvar_t *s_driver;
 
-#ifndef NO_DMAHD
-	if ( IsWindows7OrGreater() && !dmaHD_Enabled() )
-#else
 	if ( IsWindows7OrGreater() )
-#endif
 		defdrv = "wasapi";
 	else
 		defdrv = "dsound";
@@ -795,14 +799,9 @@ qboolean SNDDMA_Init( void ) {
 	s_driver = Cvar_Get( "s_driver", defdrv, CVAR_LATCH | CVAR_ARCHIVE_ND );
 
 	Cvar_SetDescription( s_driver, "Specify sound subsystem in win32 environment:\n"
-		" dsound - DirectSound (forced with dmaHD_enable 1)\n"
-		" wasapi - WASAPI (cannot be used with dmaHD_enable 1)\n" );
+		" dsound - DirectSound\n"
+		" wasapi - WASAPI\n" );
 
-#ifndef NO_DMAHD
-	if ( dmaHD_Enabled() ) {
-		Cvar_Set( "s_driver", "dsound" );
-	}
-#endif
 #endif
 
 	memset( &dma, 0, sizeof( dma ) );
