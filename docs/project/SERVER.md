@@ -376,7 +376,9 @@ Walks ring buffer backward from `head`, finds two entries bracketing `targetTime
 
 #### SV_SmoothGetAverageVelocity(clientNum, windowMs, outVelocity) [CUSTOM]
 
-Averages all velocity entries within last `windowMs` milliseconds. Used by `sv_velSmooth` to smooth rapid direction changes.
+Exponential weighted average of velocity entries within the last `windowMs` milliseconds. The most-recent sample carries weight 1.0; each older step is multiplied by 0.5 (half-life = 1 sample). At `sv_velSmooth=64` / `sv_fps=60` this yields ~4 samples with weights ≈ 53 % / 26 % / 13 % / 7 %, so the latest velocity dominates while enough history is present to suppress per-tick physics noise.
+
+**Why exponential instead of uniform:** a uniform sliding window gives every sample equal weight. As the window slides by one tick the dropped oldest sample and the newly added current sample can differ substantially (e.g. opposite directions during a turn), flipping `trDelta` noticeably between consecutive snapshots. The exponential weighting makes each new snapshot's `trDelta` a smooth continuation of the previous one, eliminating the trajectory kink at every snapshot boundary that manifests as blur/micro-stutter for fast-moving players.
 
 ### Snapshot System
 
@@ -1024,7 +1026,7 @@ typedef struct client_s {
 | `sv_extrapolate` | 1 | Engine-side position extrapolation |
 | `sv_smoothClients` | 1 | TR_LINEAR trajectory mode |
 | `sv_bufferMs` | 0 | Ring buffer delay (0=off, -1=auto, 1-100=manual ms) |
-| `sv_velSmooth` | 32 | Velocity smoothing window (ms) |
+| `sv_velSmooth` | 64 | Velocity smoothing window (ms); EWA alpha=0.5/step |
 | `sv_busyWait` | 0 | Spin-wait last N ms per frame |
 | `sv_antiwarp` | 0 | Engine antiwarp (0=off, 1=constant, 2=decay) |
 | `sv_antiwarpTol` | 0 | Antiwarp tolerance ms (0=auto=gameMsec) |

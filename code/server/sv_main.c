@@ -1462,6 +1462,15 @@ void SV_Frame( int msec ) {
 
 	sv.timeResidual += msec;
 
+	// Safety cap: allow at most 2 ticks of catch-up per Com_Frame so normal OS
+	// scheduling jitter is absorbed gracefully (one late frame → double-tick to
+	// recover). sv_fps change burst protection is handled precisely in
+	// SV_TrackCvarChanges; this is a backstop for extreme lag (debugger pause,
+	// system suspend, map load, etc.) that would otherwise fire dozens of ticks
+	// at once, flooding the reliable command buffer before clients can ack any.
+	if ( sv.timeResidual > frameMsec * 2 )
+		sv.timeResidual = frameMsec * 2;
+
 	if ( !com_dedicated->integer )
 		SV_BotFrame( sv.time + sv.timeResidual );
 

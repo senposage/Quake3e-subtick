@@ -168,8 +168,10 @@ static qboolean SV_SmoothGetPosition( int clientNum, int targetTime,
 static qboolean SV_SmoothGetAverageVelocity( int clientNum, int windowMs,
 		vec3_t outVelocity ) {
 	svSmoothHistory_t *hist;
-	int i, idx, n;
+	int i, idx;
 	int cutoff;
+	float weight, totalWeight;
+	vec3_t weightedSum;
 
 	if ( clientNum < 0 || clientNum >= sv.maxclients )
 		return qfalse;
@@ -178,9 +180,15 @@ static qboolean SV_SmoothGetAverageVelocity( int clientNum, int windowMs,
 	if ( hist->count == 0 )
 		return qfalse;
 
+	// Exponential weighted average: each step back in time halves the weight.
+	// This keeps the most-recent velocity dominant so that consecutive snapshots
+	// produce very similar trDelta values (no per-tick 50/50 flip as the uniform
+	// sliding window would cause), eliminating the trajectory kink at every
+	// snapshot boundary that manifests as blur/micro-stutter for fast-moving players.
 	cutoff = sv.time - windowMs;
-	VectorClear( outVelocity );
-	n = 0;
+	VectorClear( weightedSum );
+	totalWeight = 0.0f;
+	weight = 1.0f;
 
 	for ( i = 0; i < hist->count; i++ ) {
 		idx = ( ( hist->head - 1 - i ) % SV_SMOOTH_MAX_SLOTS + SV_SMOOTH_MAX_SLOTS ) % SV_SMOOTH_MAX_SLOTS;
@@ -190,18 +198,19 @@ static qboolean SV_SmoothGetAverageVelocity( int clientNum, int windowMs,
 		if ( hist->slots[idx].serverTime < cutoff )
 			break;
 
-		outVelocity[0] += hist->slots[idx].velocity[0];
-		outVelocity[1] += hist->slots[idx].velocity[1];
-		outVelocity[2] += hist->slots[idx].velocity[2];
-		n++;
+		weightedSum[0] += hist->slots[idx].velocity[0] * weight;
+		weightedSum[1] += hist->slots[idx].velocity[1] * weight;
+		weightedSum[2] += hist->slots[idx].velocity[2] * weight;
+		totalWeight += weight;
+		weight *= 0.5f;
 	}
 
-	if ( n == 0 )
+	if ( totalWeight < 1e-6f )
 		return qfalse;
 
-	outVelocity[0] /= n;
-	outVelocity[1] /= n;
-	outVelocity[2] /= n;
+	outVelocity[0] = weightedSum[0] / totalWeight;
+	outVelocity[1] = weightedSum[1] / totalWeight;
+	outVelocity[2] = weightedSum[2] / totalWeight;
 
 	return qtrue;
 }
