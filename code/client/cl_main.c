@@ -4157,7 +4157,7 @@ void CL_Init( void ) {
 	cl_showTimeDelta = Cvar_Get ("cl_showTimeDelta", "0", CVAR_TEMP );
 	Cvar_SetDescription( cl_showTimeDelta, "Prints the time delta of each packet to the console (the time delta between server updates)." );
 	cl_adaptiveTiming = Cvar_Get ("cl_adaptiveTiming", "1", CVAR_ARCHIVE );
-	Cvar_SetDescription( cl_adaptiveTiming, "Scale time sync thresholds with snapshotMsec. 0=vanilla, 1=scaled (default). On vanilla servers the serverTime cap is automatically disabled; scaled thresholds and extrapolation window still apply." );
+	Cvar_SetDescription( cl_adaptiveTiming, "Scale time sync thresholds with snapshotMsec. 0=vanilla, 1=scaled (default). Automatically disabled on vanilla servers. Can also be overridden by the server via sv_allowClientAdaptiveTiming." );
 	rcon_client_password = Cvar_Get ("rconPassword", "", CVAR_TEMP );
 	Cvar_SetDescription( rcon_client_password, "Sets a remote console password so clients may change server settings without direct access to the server console." );
 	cl_activeAction = Cvar_Get( "activeAction", "", CVAR_TEMP );

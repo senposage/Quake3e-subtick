@@ -379,6 +379,7 @@ extern	cvar_t	*sv_gametype;
 extern	cvar_t	*sv_pure;
 extern	cvar_t	*sv_floodProtect;
 extern	cvar_t	*sv_lanForceRate;
+extern	cvar_t	*sv_allowClientAdaptiveTiming;
 
 extern	cvar_t *sv_levelTimeReset;
 extern	cvar_t *sv_filter;

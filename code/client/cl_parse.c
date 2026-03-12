@@ -568,6 +568,15 @@ static void CL_ParseServerInfo( void )
 		const char *snapFpsStr = Info_ValueForKey( serverInfo, "sv_snapshotFps" );
 		cl.vanillaServer = ( snapFpsStr[0] == '\0' );
 	}
+
+	// Disable all adaptive timing when:
+	//   - the server is vanilla (lacks sv_snapshotFps, so our protocol is unsupported), or
+	//   - the server admin has explicitly set sv_allowClientAdaptiveTiming 0.
+	{
+		const char *allowAtStr = Info_ValueForKey( serverInfo, "sv_allowClientAdaptiveTiming" );
+		cl.serverForbidsAdaptiveTiming = cl.vanillaServer ||
+			( allowAtStr[0] != '\0' && atoi( allowAtStr ) == 0 );
+	}
 }
 
 

@@ -840,6 +840,10 @@ void SV_Init( void )
 	Cvar_SetDescription( sv_allowDownload, "Toggle the ability for clients to download files maps etc. from server." );
 	Cvar_Get ("sv_dlURL", "", CVAR_SERVERINFO | CVAR_ARCHIVE);
 
+	sv_allowClientAdaptiveTiming = Cvar_Get ("sv_allowClientAdaptiveTiming", "1", CVAR_SERVERINFO | CVAR_ARCHIVE);
+	Cvar_CheckRange( sv_allowClientAdaptiveTiming, "0", "1", CV_INTEGER );
+	Cvar_SetDescription( sv_allowClientAdaptiveTiming, "Allow clients to use cl_adaptiveTiming. Set to 0 to force all clients to use vanilla timing regardless of their cl_adaptiveTiming setting." );
+
 	// moved to Com_Init()
 	//sv_master[0] = Cvar_Get( "sv_master1", MASTER_SERVER_NAME, CVAR_INIT | CVAR_ARCHIVE_ND );
 	//sv_master[1] = Cvar_Get( "sv_master2", "master.ioquake3.org", CVAR_INIT | CVAR_ARCHIVE_ND );
