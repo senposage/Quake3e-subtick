@@ -524,8 +524,11 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 	inplay = 0;
 	for ( i = 0; i < MAX_CHANNELS; i++, ch++ ) {
 		if ( ch->entnum == entityNum && ch->thesfx == sfx ) {
-			if ( startTime - ch->allocTime < 20 ) {
-				Com_DPrintf(S_COLOR_YELLOW "S_StartSound: Double start (%d ms < 20 ms) for %s\n", startTime - ch->allocTime, sfx->soundName);
+			// dma.speed is in sample-pairs/sec; convert 20 ms to samples.
+			// dma.speed is always > 0 here because s_soundStarted is verified above.
+			if ( startTime - ch->allocTime < dma.speed * 20 / 1000 ) {
+				Com_DPrintf(S_COLOR_YELLOW "S_StartSound: Double start (%d ms < 20 ms) for %s (ent %d)\n",
+					(startTime - ch->allocTime) * 1000 / dma.speed, sfx->soundName, entityNum);
 				return;
 			}
 			inplay++;
@@ -534,7 +537,8 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 
 	// too much duplicated sounds, ignore
 	if ( inplay > allowed ) {
-		Com_DPrintf(S_COLOR_YELLOW "S_StartSound: %s hit the concurrent channels limit (%d)\n", sfx->soundName, allowed);
+		Com_DPrintf(S_COLOR_YELLOW "S_StartSound: %s hit the concurrent channels limit (%d/%d, ent %d)\n",
+			sfx->soundName, inplay, allowed, entityNum);
 		return;
 	}
 
@@ -578,7 +582,8 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 		}
 		ch = &s_channels[chosen];
 		ch->allocTime = sfx->lastTimeUsed;
-		Com_DPrintf(S_COLOR_YELLOW "S_StartSound: No more channels free for %s, dropping earliest sound: %s\n", sfx->soundName, ch->thesfx->soundName);
+		Com_DPrintf(S_COLOR_YELLOW "S_StartSound: No more channels free for %s (ent %d), stealing channel playing %s (ent %d)\n",
+			sfx->soundName, entityNum, ch->thesfx ? ch->thesfx->soundName : "<none>", ch->entnum);
 	}
 
 	if ( origin ) {

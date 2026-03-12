@@ -156,6 +156,7 @@ cvar_t							*dmaHD_Enable = NULL;
 cvar_t							*dmaHD_Interpolation;
 cvar_t							*dmaHD_Mixer;
 cvar_t							*dmaEX_StereoSeparation;
+cvar_t							*dmaHD_debugLevel;
 
 
 extern loopSound_t				loopSounds[];
@@ -730,6 +731,8 @@ void dmaHD_TransferPaintBuffer(int endtime)
     float*   float_out;
     int*     int32_out;
     unsigned long *pbuf = (unsigned long *)dma.buffer;
+    int      clipped = 0;     // count of samples that hit the clamp limit
+    int      totalSamples = 0; // total scalar samples written (accumulates snd_linear_count)
 
     snd_p = (int*)dmaHD_paintbuffer;
     ls_paintedtime = s_paintedtime;
@@ -744,6 +747,7 @@ void dmaHD_TransferPaintBuffer(int endtime)
             snd_linear_count = endtime - ls_paintedtime;
 
         snd_linear_count <<= 1;
+        totalSamples += snd_linear_count;
 
         if ( dma.isfloat && dma.samplebits == 32 )
         {
@@ -753,8 +757,8 @@ void dmaHD_TransferPaintBuffer(int endtime)
             for (i = 0; i < snd_linear_count; ++i)
             {
                 val = *snd_p++;
-                if (val > DMAHD_FLOAT_MAX) val = DMAHD_FLOAT_MAX;
-                else if (val < DMAHD_FLOAT_MIN) val = DMAHD_FLOAT_MIN;
+                if (val > DMAHD_FLOAT_MAX) { val = DMAHD_FLOAT_MAX; clipped++; }
+                else if (val < DMAHD_FLOAT_MIN) { val = DMAHD_FLOAT_MIN; clipped++; }
                 *float_out++ = (float)(val + 128) * DMAHD_FLOAT_RDIV;
             }
             // AVI capture expects 16-bit PCM; skip for float output path.
@@ -769,8 +773,8 @@ void dmaHD_TransferPaintBuffer(int endtime)
             for (i = 0; i < snd_linear_count; ++i)
             {
                 val = *snd_p++;
-                if (val > DMAHD_INT24_MAX) val = DMAHD_INT24_MAX;
-                else if (val < DMAHD_INT24_MIN) val = DMAHD_INT24_MIN;
+                if (val > DMAHD_INT24_MAX) { val = DMAHD_INT24_MAX; clipped++; }
+                else if (val < DMAHD_INT24_MIN) { val = DMAHD_INT24_MIN; clipped++; }
                 *int32_out++ = val << 8;
             }
             // AVI capture expects 16-bit PCM; skip for 32-bit int output path.
@@ -778,10 +782,14 @@ void dmaHD_TransferPaintBuffer(int endtime)
         else
         {
             // 16-bit PCM output (DirectSound / 16-bit WASAPI fallback).
+            // The 24.8 accumulator is shifted right by 8 here; the result can still
+            // exceed [-32768, 32767] when many loud channels are active, so we detect
+            // the overload here (after >>8, before SMPCLAMP) to count true clip events.
             snd_out = (short *)pbuf + (lpos << 1);
             for (snd_outtmp = snd_out, i = 0; i < snd_linear_count; ++i)
             {
                 val = *snd_p++ >> 8;
+                if (val < -32768 || val > 32767) clipped++;
                 *snd_outtmp++ = SMPCLAMP(val);
             }
 
@@ -790,6 +798,12 @@ void dmaHD_TransferPaintBuffer(int endtime)
         }
 
         ls_paintedtime += (snd_linear_count>>1);
+    }
+
+    if (clipped > 0 && dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
+    {
+        Com_DPrintf(S_COLOR_YELLOW "dmaHD: paint buffer clipped %d/%d samples (mix overload — may cause distortion)\n",
+            clipped, totalSamples);
     }
 }
 
@@ -801,6 +815,7 @@ void dmaHD_PaintChannels( int endtime )
     sfx_t	*sc;
     int		ltime, count;
     int		sampleOffset;
+    int		activeCh;   // for debug: count of channels being mixed
 #ifdef MAX_RAW_STREAMS
     int		stream;
 #endif
@@ -867,6 +882,7 @@ s_volume->value*256;
 #endif
 
         // paint in the channels.
+        activeCh = 0;
         ch = s_channels;
         for ( i = 0; i < MAX_CHANNELS ; i++, ch++ )
         {
@@ -875,9 +891,18 @@ s_volume->value*256;
             ltime = s_paintedtime;
             sc = ch->thesfx;
             sampleOffset = ltime - ch->startSample;
+
+            // Unexpected negative sampleOffset means the channel's startSample is
+            // ahead of the current paint time — log it so we can investigate.
+            if (sampleOffset < 0 && dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
+            {
+                Com_DPrintf(S_COLOR_YELLOW "dmaHD: ch[%d] negative sampleOffset %d for %s (startSample %d paintedtime %d)\n",
+                    i, sampleOffset, sc->soundName, ch->startSample, s_paintedtime);
+            }
+
             count = end - ltime;
             if (sampleOffset + count >= sc->soundLength) count = sc->soundLength - sampleOffset;
-            if (count > 0) dmaHD_PaintChannelFrom16(ch, sc, count, sampleOffset, 0);
+            if (count > 0) { dmaHD_PaintChannelFrom16(ch, sc, count, sampleOffset, 0); activeCh++; }
         }
 
         // paint in the looped channels.
@@ -900,8 +925,15 @@ s_volume->value*256;
                 {
                     dmaHD_PaintChannelFrom16(ch, sc, count, sampleOffset, ltime - s_paintedtime);
                     ltime += count;
+                    activeCh++;
                 }
             } while (ltime < end);
+        }
+
+        if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1 && activeCh > (MAX_CHANNELS / 2))
+        {
+            Com_DPrintf(S_COLOR_CYAN "dmaHD: mixing %d active channels (loop: %d) — high channel load\n",
+                activeCh, numLoopChannels);
         }
 
         // transfer out according to DMA format
@@ -1361,6 +1393,14 @@ void dmaHD_Update_Mix(void)
 
     if (mixahead < op) mixahead = op;
 
+    // Log when the mixer needs to catch up by more than 100 ms — indicates stall/hitch
+    // that may produce audible artifacts (pops, silence gaps).
+    if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1 && sane > 100)
+    {
+        Com_DPrintf(S_COLOR_YELLOW "dmaHD: mix stall — %d ms since last mix (op %d samples, mixahead %d samples)\n",
+            sane, op, mixahead);
+    }
+
     // mix ahead of current position
     endtime = s_soundtime + mixahead;
 
@@ -1505,6 +1545,13 @@ qboolean dmaHD_Init(soundInterface_t *si)
     }
 
     dmaHD_InitTables();
+
+    dmaHD_debugLevel = Cvar_Get("dmaHD_debugLevel", "0", CVAR_TEMP);
+    Cvar_SetDescription(dmaHD_debugLevel,
+        "dmaHD diagnostic logging level. "
+        "0 = off (default). "
+        "1 = log mix-overload clipping, mix stalls (>100 ms), high channel load, and unexpected channel states. "
+        "All output is routed through Com_DPrintf (requires developer 1).");
 
     // Override function pointers to dmaHD version, the rest keep base.
     si->SoundInfo = dmaHD_SoundInfo;
