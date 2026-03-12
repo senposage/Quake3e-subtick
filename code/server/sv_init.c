@@ -1019,6 +1019,7 @@ void SV_Shutdown( const char *finalmsg ) {
 	}
 	Com_Memset( &svs, 0, sizeof( svs ) );
 	sv.time = 0;
+	sv.gameTime = 0;
 
 	Cvar_Set( "sv_running", "0" );
 
