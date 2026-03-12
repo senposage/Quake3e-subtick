@@ -923,6 +923,7 @@ void SV_DropClient( client_t *drop, const char *reason ) {
 		Q_strncpyz( drop->name, name, sizeof( name ) );
 		SV_PrintClientStateChange( drop, CS_ZOMBIE );
 		drop->state = CS_ZOMBIE;		// become free in a few seconds
+		drop->zombieIncomingSeq = drop->netchan.incomingSequence;
 	}
 
 	// Clear this client's shadow history so the next occupant of this slot
@@ -994,6 +995,7 @@ void SV_Auth_DropClient( client_t *drop, const char *reason, const char *message
 	} else {
 		Com_DPrintf( "Going to CS_ZOMBIE for %s\n", drop->name );
 		drop->state = CS_ZOMBIE;		// become free in a few seconds
+		drop->zombieIncomingSeq = drop->netchan.incomingSequence;
 	}
 
 	// Clear this client's shadow history so the next occupant of this slot
