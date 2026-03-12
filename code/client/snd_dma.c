@@ -60,6 +60,11 @@ byte			*dma_buffer2;
 #define		MASTER_VOL			127
 #define		SPHERE_VOL			90
 
+// Maximum channels the world entity (ENTITYNUM_WORLD) may occupy at once.
+// In multiplayer, all bullet impacts/casings share ent 1022; without a cap they
+// can exhaust the entire 96-channel pool during sustained automatic fire.
+#define		WORLD_ENTITY_MAX_CHANNELS	(MAX_CHANNELS / 6)
+
 channel_t   s_channels[MAX_CHANNELS];
 channel_t   loop_channels[MAX_CHANNELS];
 int			numLoopChannels;
@@ -462,7 +467,7 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 	channel_t	*ch;
 	sfx_t		*sfx;
 	int i, oldest, chosen, startTime;
-	int	inplay, allowed;
+	int	inplay, allowed, worldTotal;
 
 	if ( !s_soundStarted || s_soundMuted ) {
 		return;
@@ -517,6 +522,8 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 	// try to limit sound duplication
 	if ( entityNum == listener_number )
 		allowed = 16;
+	else if ( entityNum == ENTITYNUM_WORLD )
+		allowed = 3;	// world impact/surface sounds don't need 8 concurrent instances; 3 is perceptually sufficient
 	else
 		allowed = 8;
 
@@ -540,6 +547,24 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 		Com_DPrintf(S_COLOR_YELLOW "S_StartSound: %s hit the concurrent channels limit (%d/%d, ent %d)\n",
 			sfx->soundName, inplay, allowed, entityNum);
 		return;
+	}
+
+	// In multiplayer all bullet impacts/casings share ENTITYNUM_WORLD, so many different
+	// impact sounds (ric1, ric2, concrete1, brass1, …) can each hold up to `allowed`
+	// channels simultaneously, exhausting the 96-channel pool.  Enforce a hard cap on
+	// the *total* channels owned by the world entity (≈ 1/6 of the pool).
+	if ( entityNum == ENTITYNUM_WORLD ) {
+		worldTotal = 0;
+		ch = s_channels;
+		for ( i = 0; i < MAX_CHANNELS; i++, ch++ ) {
+			if ( ch->thesfx && ch->entnum == ENTITYNUM_WORLD )
+				worldTotal++;
+		}
+		if ( worldTotal >= WORLD_ENTITY_MAX_CHANNELS ) {
+			Com_DPrintf(S_COLOR_YELLOW "S_StartSound: world-entity channel cap (%d/%d) reached for %s\n",
+				worldTotal, WORLD_ENTITY_MAX_CHANNELS, sfx->soundName);
+			return;
+		}
 	}
 
 	sfx->lastTimeUsed = startTime;

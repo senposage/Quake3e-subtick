@@ -141,6 +141,20 @@ typedef struct {
 } channel_t;
 ```
 
+#### Channel budget policy
+
+`S_Base_StartSound` enforces two independent guards before allocating a channel:
+
+| Entity | Per-sound concurrent limit (`allowed`) | Rationale |
+|--------|----------------------------------------|-----------|
+| `listener_number` (local player) | 16 | Many distinct weapon/movement sounds |
+| `ENTITYNUM_WORLD` (1022) | **3** | Impact/surface/casing sounds; 3 concurrent instances per clip is perceptually indistinguishable from more |
+| Any other entity | 8 | Default |
+
+Additionally, `ENTITYNUM_WORLD` is subject to a **total channel cap** of `WORLD_ENTITY_MAX_CHANNELS` (`MAX_CHANNELS / 6` = 16 out of 96). In multiplayer, all bullet impacts, ricochets, and brass casings share the world entity number. Without this cap, multiple players firing automatic weapons simultaneously can fill the entire 96-channel pool with impact sounds, forcing channel stealing for weapon and footstep sounds.
+
+If either guard triggers, the sound is silently dropped (logged via `Com_DPrintf`).
+
 ### S_Base_StartSound(origin, entityNum, entchannel, sfxHandle)
 
 1. Load sound if not in memory: `S_memoryLoad(sfx)`
