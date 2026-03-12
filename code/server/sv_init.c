@@ -395,6 +395,18 @@ static void SV_ClearServer( void ) {
 		i = sv.time;
 		Com_Memset( &sv, 0, sizeof( sv ) );
 		sv.time = i;
+		// Re-sync sv.gameTime to sv.time so that the QVM's commandTime
+		// (driven by sv.gameTime) stays aligned with client usercmd serverTime
+		// (driven by sv.time).  Without this, the gap between sv.time and the
+		// zeroed sv.gameTime equals the entire prior session's duration, causing
+		// SV_ClientThink's sv_pmoveMsec multi-step loop to fire thousands of
+		// GAME_CLIENT_THINK calls on the first usercmd after every map change,
+		// freezing the server, overflowing the reliable-command buffer, and
+		// producing ping 999 / unable-to-move symptoms.  The desync grew with
+		// every map change (sv.time accumulates; sv.gameTime always resets to 0)
+		// which is why only a full server reboot cleared the problem.
+		sv.gameTime = i;
+		// sv.gameTimeResidual stays 0 from the memset above
 	} else {
 		Com_Memset( &sv, 0, sizeof( sv ) );
 	}
