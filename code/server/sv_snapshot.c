@@ -841,7 +841,32 @@ static void SV_BuildCommonSnapshot( void )
 							}
 						} else {
 							playerState_t *ps = SV_GameClientNum( es->number );
-							VectorCopy( ps->origin, origin );
+							// sv_gamehz > 0: ps->origin is only updated when a usercmd is
+							// processed (GAME_CLIENT_THINK) or at the game-frame boundary
+							// (G_RunClient inside GAME_RUN_FRAME).  Between game frames, if
+							// the observed player's packets haven't arrived this tick,
+							// ps->origin lags sv.time by up to one packet interval.
+							// This causes sv_smoothClients to stamp identical trBase into
+							// 2-3 consecutive snapshots -- the observer sees freeze-then-jump.
+							//
+							// Fix: extrapolate ps->origin forward from the last Pmove time
+							// (ps->commandTime) to sv.time using ps->velocity.  The maximum
+							// dt is capped to the game-frame gap (sv.time - sv.gameTime) so
+							// we never extrapolate beyond what the game frame itself would.
+							//
+							// Gate: sv.time > sv.gameTime is only true when sv_gamehz creates
+							// a gap.  At sv_gamehz 0, G_RunClient keeps ps->commandTime ==
+							// sv.time every tick, so dt == 0 and this is a no-op.
+							if ( sv.time > sv.gameTime && ps->commandTime < sv.time ) {
+								float dt = (float)( sv.time - ps->commandTime ) * 0.001f;
+								float maxDt = (float)( sv.time - sv.gameTime ) * 0.001f;
+								if ( dt > maxDt ) dt = maxDt;
+								origin[0] = ps->origin[0] + ps->velocity[0] * dt;
+								origin[1] = ps->origin[1] + ps->velocity[1] * dt;
+								origin[2] = ps->origin[2] + ps->velocity[2] * dt;
+							} else {
+								VectorCopy( ps->origin, origin );
+							}
 							VectorCopy( ps->velocity, velocity );
 						}
 					}

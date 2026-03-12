@@ -410,18 +410,29 @@ for each entity (0 to sv.num_entities):
     
     if !usedBuffer:
         if bot AND sv.time > sv.gameTime:     ← only when sv_gamehz creates a gap
-            // use ps->velocity (not trDelta) — reflects actual Pmove velocity
-            // at the game-frame boundary; accurate for straight-line bot motion
+            // extrapolate from last game-frame boundary using ps->velocity
             dt     = (sv.time - sv.gameTime) * 0.001
             origin = trBase + ps->velocity * dt
             vel    = ps->velocity
-        else:
-            origin = trBase          ← sv_gamehz 0: trBase is already fresh
+        else (bot, sv_gamehz 0):
+            origin = trBase          ← already fresh every tick
             vel    = trDelta
 
         if real player:
-            origin = ps->origin      ← always fresh (Pmove runs every usercmd)
-            vel    = ps->velocity
+            // ps->origin only advances when a usercmd is processed (GAME_CLIENT_THINK)
+            // or when G_RunClient fires (at sv_gamehz rate).  Between game frames,
+            // the observed player's ps->origin can lag sv.time by up to one packet
+            // interval → identical trBase in 2-3 consecutive snapshots → stutter.
+            // Fix: extrapolate from last Pmove time (ps->commandTime) to sv.time.
+            // Cap dt to the game-frame gap (sv.time - sv.gameTime) to avoid
+            // over-extrapolation.  At sv_gamehz 0, G_RunClient keeps
+            // ps->commandTime == sv.time every tick → dt == 0 → no-op.
+            if sv.time > sv.gameTime AND ps->commandTime < sv.time:
+                dt = min(sv.time - ps->commandTime, sv.time - sv.gameTime) * 0.001
+                origin = ps->origin + ps->velocity * dt
+            else:
+                origin = ps->origin  ← fresh (sv_gamehz 0 or usercmd this tick)
+            vel = ps->velocity
 
     [PHASE 2: apply trajectory]
 

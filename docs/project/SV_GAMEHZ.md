@@ -45,15 +45,50 @@ Engine `sv_antiwarp` eliminates this constraint by using `gameMsec` (actual fram
 
 ## Position Correction at sv_gameHz 20
 
-When sv_gameHz 20 and sv_fps 60, `BG_PlayerStateToEntityState` (which stamps entity positions into snapshots) only runs at 20Hz inside `ClientEndFrame`. Three consecutive 60Hz snapshots carry identical positions for **all** players → visible stutter.
+When sv_gameHz 20 and sv_fps 60, `BG_PlayerStateToEntityState` (which stamps entity positions into snapshots) only runs at 20Hz inside `ClientEndFrame`. Three consecutive 60Hz snapshots carry identical positions for **all** players → visible stutter for any observer.
 
-### sv_extrapolate (essential at sv_gameHz > 0)
+### Root cause: two distinct staleness problems
 
-Corrects stale positions in `SV_BuildCommonSnapshot`:
-- **Real players:** reads actual `ps->origin` from playerState (updated every usercmd by Pmove — always fresh).
-- **Bots:** velocity extrapolation `trBase += ps->velocity * (sv.time - sv.gameTime) * 0.001`. Uses `ps->velocity` (the Pmove velocity at the last game-frame boundary) rather than `es->pos.trDelta`, which is more accurate for straight-line bot movement between AI decisions. Gated behind `sv.time > sv.gameTime` so it is a true no-op when `sv_gamehz 0`. Trajectory type stays `TR_INTERPOLATE` — avoids the visual/server position mismatch that `TR_LINEAR` would introduce when bots change direction at game-frame boundaries.
+**Real players:** `ps->origin` (used by `sv_smoothClients` as the snapshot `trBase`) is only updated when:
+1. A usercmd arrives and `GAME_CLIENT_THINK` fires (Pmove runs at client packet rate)
+2. `GAME_RUN_FRAME` fires and `G_RunClient` advances `commandTime` to `level.time` (20Hz)
 
-At sv_gameHz 0: no-op — `sv.time == sv.gameTime` always, so `dt == 0` and the gate never fires.
+At `sv_gamehz 0`, path (2) fires at 60Hz, keeping `ps->origin` always fresh. At `sv_gamehz 20`, path (2) fires at 20Hz only. Between game frames, if the observed player's packets haven't arrived this tick, `ps->origin` lags `sv.time`. `sv_smoothClients` stamps that stale origin into 2–3 consecutive snapshots → the observer sees freeze-then-jump.
+
+**Bots:** No usercmds at all — `ps->origin` (via `BG_PlayerStateToEntityState`) only updates at 20Hz inside `ClientEndFrame`.
+
+### Fix: per-entity position extrapolation in SV_BuildCommonSnapshot
+
+Both fixes are gated by `sv.time > sv.gameTime` — false at `sv_gamehz 0` where `sv.time == sv.gameTime` always, making both strictly no-ops.
+
+**Real players** (`!usedBuffer`, `!isBot` path):
+```c
+// ps->commandTime = time of last Pmove (usercmd or G_RunClient)
+if ( sv.time > sv.gameTime && ps->commandTime < sv.time ) {
+    float dt = min( sv.time - ps->commandTime, sv.time - sv.gameTime ) * 0.001f;
+    origin = ps->origin + ps->velocity * dt;   // extrapolate from last Pmove
+} else {
+    origin = ps->origin;   // already fresh (sv_gamehz 0 or usercmd this tick)
+}
+```
+
+Uses `ps->commandTime` (not `sv.gameTime`) as the base — more accurate because real players' last Pmove aligns with their usercmd arrival, not necessarily the game-frame boundary.
+
+**Bots** (`!usedBuffer`, `isBot` path):
+```c
+if ( sv.time > sv.gameTime ) {
+    float dt = (sv.time - sv.gameTime) * 0.001f;
+    origin = trBase + ps->velocity * dt;   // ps->velocity from last game-frame Pmove
+}
+```
+
+Uses `sv.gameTime` as the base (bots have no usercmds; their last Pmove was exactly at the game-frame boundary). Keeps `TR_INTERPOLATE` to avoid visual/server mismatch when bots change direction at game-frame boundaries.
+
+### sv_extrapolate (legacy; sv_smoothClients supersedes it)
+
+The engine position corrections above are applied whenever `sv_smoothClients || sv_extrapolate`. `sv_extrapolate` alone (without `sv_smoothClients`) anchors the `TR_INTERPOLATE` trBase but does not provide the `TR_LINEAR` trajectory that allows continuous client-side evaluation. `sv_smoothClients` is required for smooth visuals at any `sv_fps > 20`.
+
+At sv_gameHz 0: both are no-ops for position correction — positions are already fresh every tick.
 
 ### sv_bufferMs (useful at sv_gameHz > 0)
 
@@ -70,9 +105,11 @@ Per-client ring buffer provides position delay for smoothing between 20Hz update
 
 At sv_gameHz 0: not useful (adds latency for no benefit — positions already fresh).
 
-### sv_smoothClients (valuable at any sv_gameHz)
+### sv_smoothClients (required at sv_fps > 20)
 
-Changes trajectory type from TR_INTERPOLATE to TR_LINEAR. At sv_gameHz > 0, this helps cgame evaluate position continuously between stale snapshots. At sv_gameHz 0, the trajectory type change itself is the value — not the position correction.
+Changes trajectory type from `TR_INTERPOLATE` to `TR_LINEAR`. **Required for smooth visuals at any `sv_fps > 20`** — without it, the client can only lerp between two snapshot positions (instead of evaluating a forward trajectory), and any stale position produces visible freeze-then-jump.
+
+At sv_gamehz > 0: the position extrapolation above ensures the `trBase` in each TR_LINEAR snapshot is a distinct advancing position even between game frames.
 
 ---
 
@@ -80,8 +117,9 @@ Changes trajectory type from TR_INTERPOLATE to TR_LINEAR. At sv_gameHz > 0, this
 
 | Feature | sv_gameHz 20 | sv_gameHz 0 |
 |---------|-------------|-------------|
-| sv_extrapolate ps->origin | **Essential** — fixes 20Hz stale positions | No-op — positions update every tick |
-| sv_smoothClients TR_LINEAR | Valuable — continuous eval between 20Hz frames | Valuable — trajectory type for cgame |
+| sv_smoothClients TR_LINEAR | **Required** — continuous eval; extrapolation fills inter-frame gap | **Required** at sv_fps > 20 — trajectory type for cgame |
+| Real-player `ps->origin` extrapolation | **Active** — extrapolates from `ps->commandTime` to `sv.time` | No-op — `ps->commandTime == sv.time` always |
+| Bot `trBase` extrapolation | **Active** — extrapolates from `sv.gameTime` to `sv.time` | No-op — `sv.time == sv.gameTime` always |
 | sv_bufferMs ring buffer | Useful — smooths 20Hz position gaps | Adds latency for no benefit |
 | sv_velSmooth velocity avg | Useful with sv_smoothClients 1 | Marginal — positions already fresh |
 | sv_antiwarp (engine) | Works at any sv_gameHz | Works — the whole point |
