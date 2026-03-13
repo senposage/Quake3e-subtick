@@ -68,14 +68,15 @@ jobs:
         make install ARCH=${{ matrix.arch }} DESTDIR=bin USE_SDL=0 USE_RENDERER_DLOPEN=0 RENDERER_DEFAULT=opengl ${{ matrix.build_server }}
 
     - name: Download soft_oal.dll
-      shell: bash
+      shell: powershell
       run: |
-        ver=1.25.1
-        zip="openal-soft-${ver}-bin.zip"
-        curl -fsSL -o "${zip}" "https://github.com/kcat/openal-soft/releases/download/${ver}/${zip}"
-        win_arch=$( [ "${{ matrix.arch }}" = "x86" ] && echo "Win32" || echo "Win64" )
-        7z e "${zip}" "openal-soft-${ver}-bin/bin/${win_arch}/soft_oal.dll" -obin/ -y
-        rm "${zip}"
+        $ver = "1.25.1"
+        $zip = "openal-soft-${ver}-bin.zip"
+        Invoke-WebRequest -Uri "https://github.com/kcat/openal-soft/releases/download/${ver}/${zip}" -OutFile $zip -UseBasicParsing
+        $winArch = if ("${{ matrix.arch }}" -eq "x86") { "Win32" } else { "Win64" }
+        Expand-Archive -Path $zip -DestinationPath "openal_tmp"
+        Copy-Item "openal_tmp/openal-soft-${ver}-bin/bin/${winArch}/soft_oal.dll" "bin/"
+        Remove-Item -Recurse -Force "openal_tmp", $zip
 
     - uses: actions/upload-artifact@v4
       with:
