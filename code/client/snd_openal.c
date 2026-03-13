@@ -311,6 +311,7 @@ static cvar_t *s_alMaxDist;
 static cvar_t *s_alReverb;       /* master EFX reverb toggle (0/1) */
 static cvar_t *s_alReverbGain;   /* wet-signal slot gain [0..1] */
 static cvar_t *s_alReverbDecay;  /* reverb decay time in seconds (LATCH) */
+static cvar_t *s_alOcclusion;    /* 0 = off, 1 = gain+direction correction */
 
 /* =========================================================================
  * Section 5 — Library loading helpers
@@ -677,25 +678,90 @@ static int S_AL_GetFreeSource( void )
     return -1;
 }
 
-/* Trace a ray from the listener to the source through solid BSP geometry.
- * Returns a gain multiplier: 1.0 = line-of-sight, 0.1 = fully occluded.
- * We include CONTENTS_PLAYERCLIP so that player-solid geometry (stairs,
- * clip brushes) also attenuates sound realistically. */
-static float S_AL_ComputeOcclusion( const vec3_t srcOrigin )
+/* Compute occlusion gain and find the best apparent source position for HRTF
+ * directional accuracy when the direct path is blocked.
+ *
+ * Algorithm (first-order diffraction approximation):
+ *   1. Cast one direct ray (listener → srcOrigin).
+ *      Clear LOS  → acousticPos = srcOrigin, return 1.0.
+ *   2. Blocked → build an orthonormal tangent frame perpendicular to the
+ *      listener→source axis and cast up to 8 probe rays displaced
+ *      ±SEARCH_RADIUS in that plane (cardinal + diagonal directions).
+ *      Pick the probe with the highest fraction (nearest audible gap).
+ *      Use that probe position as acousticPos so HRTF places the sound
+ *      from the gap direction rather than through the wall.
+ *   3. Fall back to srcOrigin if no better probe is found.
+ *
+ * Total traces: 1 (direct) + up to 8 (probes, early-break on clear path).
+ * Called every 4 frames per playing non-local source.
+ *
+ * Returns gain [0.1..1.0].  acousticPos receives the virtual AL_POSITION. */
+static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acousticPos )
 {
     trace_t tr;
-    vec3_t  listenerOrg;
+    float   directFrac;
 
-    VectorCopy(s_al_listener_origin, listenerOrg);
-    CM_BoxTrace(&tr, listenerOrg, srcOrigin,
+    VectorCopy(srcOrigin, acousticPos);
+
+    CM_BoxTrace(&tr, s_al_listener_origin, srcOrigin,
                 vec3_origin, vec3_origin,
                 0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
 
-    if (tr.fraction >= 1.0f)
-        return 1.0f;           /* clear line of sight */
+    directFrac = tr.fraction;
+    if (directFrac >= 1.0f)
+        return 1.0f;   /* clear LOS — use the real position as-is */
 
-    /* Linear blend: solid wall = 0.1 (muffled but audible), partial = blend */
-    return 0.1f + 0.9f * tr.fraction;
+    /* Occluded: search for the nearest gap in 8 tangent-plane directions. */
+    {
+        /* (right-scale, up-scale) pairs — cardinal then diagonal */
+        static const float dirs[8][2] = {
+            { 1.f,  0.f}, {-1.f,  0.f}, { 0.f,  1.f}, { 0.f, -1.f},
+            { 1.f,  1.f}, { 1.f, -1.f}, {-1.f,  1.f}, {-1.f, -1.f}
+        };
+        /* ~half a doorway width; large enough to reach around thin walls,
+         * small enough not to sample through unrelated geometry */
+        static const float SEARCH_RADIUS = 80.0f;
+
+        vec3_t fwd, right, upv;
+        float  bestFrac = directFrac;
+        int    k;
+
+        /* Orthonormal frame: fwd = listener→source, right/up = tangent plane */
+        VectorSubtract(srcOrigin, s_al_listener_origin, fwd);
+        VectorNormalize(fwd);
+
+        if (fabsf(fwd[2]) < 0.9f) {
+            vec3_t worldUp = {0.f, 0.f, 1.f};
+            CrossProduct(fwd, worldUp, right);
+        } else {
+            vec3_t worldFwd = {1.f, 0.f, 0.f};
+            CrossProduct(fwd, worldFwd, right);
+        }
+        VectorNormalize(right);
+        CrossProduct(right, fwd, upv);
+        VectorNormalize(upv);
+
+        for (k = 0; k < 8; k++) {
+            trace_t pr;
+            vec3_t  probe;
+
+            VectorMA(srcOrigin, dirs[k][0] * SEARCH_RADIUS, right, probe);
+            VectorMA(probe,     dirs[k][1] * SEARCH_RADIUS, upv,   probe);
+
+            CM_BoxTrace(&pr, s_al_listener_origin, probe,
+                        vec3_origin, vec3_origin,
+                        0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
+
+            if (pr.fraction > bestFrac) {
+                bestFrac = pr.fraction;
+                VectorCopy(probe, acousticPos);
+                if (bestFrac >= 1.0f)
+                    break;   /* clear path found — stop searching */
+            }
+        }
+    }
+
+    return 0.1f + 0.9f * bestFrac;
 }
 
 /* Configure a source for 3D or local playback. */
@@ -1440,23 +1506,51 @@ static void S_AL_Update( int msec )
             s_al_src[i].isPlaying = qfalse;
             continue;
         }
-        /* Occlusion: update every 4 frames to amortise CM_BoxTrace cost */
+        /* Occlusion + direction correction: update every 4 frames to amortise
+         * CM_BoxTrace cost.  When s_alOcclusion is enabled, AL_POSITION is
+         * set to the acoustic virtual position (nearest gap in the obstruction)
+         * so that HRTF places the sound from the correct direction.  When
+         * disabled the source stays at its real origin without any filtering. */
         if (!s_al_src[i].isLocal) {
             if ((s_al_loopFrame - s_al_src[i].occlusionTick) >= 4) {
-                float occ = S_AL_ComputeOcclusion(s_al_src[i].origin);
-                s_al_src[i].occlusionGain = occ;
                 s_al_src[i].occlusionTick = s_al_loopFrame;
 
-                if (s_al_efx.available) {
-                    qalFilterf(s_al_efx.occlusionFilter[i],
-                               AL_LOWPASS_GAIN,   0.25f + 0.75f * occ);
-                    qalFilterf(s_al_efx.occlusionFilter[i],
-                               AL_LOWPASS_GAINHF, occ * occ);
-                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
-                               (ALint)s_al_efx.occlusionFilter[i]);
+                if (s_alOcclusion && s_alOcclusion->integer) {
+                    vec3_t acousticPos;
+                    float  occ = S_AL_ComputeAcousticPosition(
+                                     s_al_src[i].origin, acousticPos);
+                    s_al_src[i].occlusionGain = occ;
+
+                    /* Push the virtual position so HRTF aims from the gap */
+                    qalSource3f(s_al_src[i].source, AL_POSITION,
+                                acousticPos[0], acousticPos[1], acousticPos[2]);
+
+                    if (s_al_efx.available) {
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAIN,   0.25f + 0.75f * occ);
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAINHF, occ * occ);
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)s_al_efx.occlusionFilter[i]);
+                    } else {
+                        qalSourcef(s_al_src[i].source, AL_GAIN,
+                            (s_al_src[i].master_vol / 255.0f) * occ * masterGain);
+                    }
                 } else {
-                    qalSourcef(s_al_src[i].source, AL_GAIN,
-                        (s_al_src[i].master_vol / 255.0f) * occ * masterGain);
+                    /* Occlusion off — restore pass-through filter and real position */
+                    s_al_src[i].occlusionGain = 1.0f;
+                    qalSource3f(s_al_src[i].source, AL_POSITION,
+                                s_al_src[i].origin[0],
+                                s_al_src[i].origin[1],
+                                s_al_src[i].origin[2]);
+                    if (s_al_efx.available) {
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAIN,   1.0f);
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAINHF, 1.0f);
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)s_al_efx.occlusionFilter[i]);
+                    }
                 }
             }
         }
@@ -1530,12 +1624,26 @@ static void S_AL_SoundInfo( void )
         s_al_efx.available ? "enabled" : "not available",
         s_al_efx.hasEAXReverb ? "EAX" : "standard");
 
+    Com_Printf("  Mix CVars:\n");
+    Com_Printf("    s_alReverb      %d  (EFX reverb %s)\n",
+        s_alReverb     ? s_alReverb->integer       : 1,
+        (s_alReverb && s_alReverb->integer) ? "on" : "off");
+    Com_Printf("    s_alReverbGain  %.2f  (wet slot gain)\n",
+        s_alReverbGain  ? s_alReverbGain->value  : 0.20f);
+    Com_Printf("    s_alReverbDecay %.2f  (decay seconds, LATCH)\n",
+        s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
+    Com_Printf("    s_alOcclusion   %d  (occlusion+direction %s)\n",
+        s_alOcclusion   ? s_alOcclusion->integer : 1,
+        (s_alOcclusion && s_alOcclusion->integer) ? "on" : "off");
+    Com_Printf("    s_alMaxDist     %.0f  (attenuation distance)\n",
+        s_alMaxDist     ? s_alMaxDist->value     : 1024.f);
+
     {
         ALCint ambiOrder = 0;
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode"))
             qalcGetIntegerv(s_al_device, ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &ambiOrder);
         if (ambiOrder > 0)
-            Com_Printf("  Ambisonics: max order %d supported\n", ambiOrder);
+            Com_Printf("  Ambisonics: max order %d supported (not used)\n", ambiOrder);
     }
 }
 
@@ -1584,6 +1692,18 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alMaxDist = Cvar_Get("s_alMaxDist", "1024", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alMaxDist, "128", "4096", CV_FLOAT);
     Cvar_SetDescription(s_alMaxDist, "Maximum attenuation distance for OpenAL sound sources.");
+    s_alReverb = Cvar_Get("s_alReverb", "1", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alReverb, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alReverb, "Enable EFX environmental reverb (requires ALC_EXT_EFX). Set 0 to disable reverb entirely.");
+    s_alReverbGain = Cvar_Get("s_alReverbGain", "0.20", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alReverbGain, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alReverbGain, "EFX reverb auxiliary slot gain (wet level). Lower values reduce environmental echo relative to direct sound.");
+    s_alReverbDecay = Cvar_Get("s_alReverbDecay", "1.49", CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alReverbDecay, "0.1", "10.0", CV_FLOAT);
+    Cvar_SetDescription(s_alReverbDecay, "EFX reverb decay time in seconds. Requires map reload (LATCH).");
+    s_alOcclusion = Cvar_Get("s_alOcclusion", "1", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOcclusion, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alOcclusion, "Enable per-source occlusion tracing. When enabled, sounds behind walls are gain-attenuated and their apparent direction is corrected toward the nearest audible gap for accurate HRTF positioning.");
 
     /* Load library */
     if (!S_AL_LoadLibrary())
