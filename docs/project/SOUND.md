@@ -104,22 +104,106 @@ Library names tried (in order):
 | Linux    | `libopenal.so.1`, `libopenal.so` |
 | macOS    | `/System/Library/Frameworks/OpenAL.framework/OpenAL`, `libopenal.dylib` |
 
-### HRTF Activation
+### HRTF Activation — Three Layers
 
-When the device supports `ALC_SOFT_HRTF` (OpenAL Soft extension):
+HRTF is forced programmatically in three layers so users never need to run `alsoft-config.exe`:
 
+**Layer 1 — `ALC_SOFT_output_mode` (OpenAL Soft 1.20+, most forceful):**
 ```c
-ALCint attribs[] = { ALC_HRTF_SOFT, ALC_TRUE, 0 };
-context = alcCreateContext(device, attribs);
+ctxAttribs[] = { ALC_OUTPUT_MODE_SOFT, ALC_STEREO_HRTF_SOFT, ... }
+```
+`ALC_STEREO_HRTF_SOFT` tells OpenAL Soft to render to stereo headphones via HRTF regardless of device type.
+
+**Layer 2 — `ALC_SOFT_HRTF` (all OpenAL Soft versions):**
+```c
+ctxAttribs[] = { ..., ALC_HRTF_SOFT, ALC_TRUE, ... }
 ```
 
-HRTF status is printed at startup (`s_info` command shows `HRTF: enabled/disabled`).
+**Layer 3 — `alcResetDeviceSoft` (belt-and-suspenders):**
+If HRTF reports disabled after context creation, calls `alcResetDeviceSoft(device, {ALC_HRTF_SOFT, ALC_TRUE, 0})` to re-request it.
+
+Status reported at startup: `s_info` shows `HRTF: enabled (built-in dataset)` or the specific dataset name from `alcGetStringiSOFT`.
 
 Controlled by the `s_alHRTF` cvar (default `1`).
 
+### Distance Model — Q3/dmaHD-Matching Linear Attenuation
+
+Uses `AL_LINEAR_DISTANCE_CLAMPED` with parameters derived from Q3/dmaHD constants:
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| `AL_REFERENCE_DISTANCE` | 80 | `SOUND_FULLVOLUME` from snd_dma.c/snd_dmahd.c |
+| `AL_MAX_DISTANCE` | 1330 | `80 + 1/SOUND_ATTENUATE(0.0008)` |
+| `AL_ROLLOFF_FACTOR` | 1.0 | matches Q3 linear slope |
+
+Formula: `gain = 1 - 1.0 * (dist - 80) / (1330 - 80)` — identical to Q3 base.
+
+### Occlusion — `CM_BoxTrace` + EFX Low-Pass Filter
+
+Every 4 frames, for each playing 3D source, a ray is traced from the listener through solid BSP geometry (`CONTENTS_SOLID | CONTENTS_PLAYERCLIP`):
+
+```c
+CM_BoxTrace(&tr, listenerOrigin, srcOrigin, vec3_origin, vec3_origin,
+            0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
+occlusion = 0.1 + 0.9 * tr.fraction;  // 1.0 = clear, 0.1 = fully blocked
+```
+
+**With EFX** (`ALC_EXT_EFX`): Applied as a per-source `AL_DIRECT_FILTER` low-pass filter:
+- `AL_LOWPASS_GAIN = 0.25 + 0.75 * occlusion` — overall attenuation
+- `AL_LOWPASS_GAINHF = occlusion²` — quadratic high-frequency roll-off
+
+This makes occluded sounds lose treble energy (muffled through walls) rather than just becoming quieter — matching real-world acoustics.
+
+**Without EFX**: Simple `AL_GAIN` scale applied directly to the source.
+
+### EFX Environmental Effects (`ALC_EXT_EFX`)
+
+All EFX entry points are loaded via `alcGetProcAddress(device, ...)` at runtime — no link-time EFX dependency.
+
+**Two auxiliary effect slots** are created:
+
+| Slot | Effect | Used when |
+|------|--------|-----------|
+| Reverb slot | EAX reverb (or plain AL_EFFECT_REVERB fallback) | always — medium indoor room preset |
+| Underwater slot | EAX reverb, heavy HF cut (GAINHF=0.1) | listener inside water volume |
+
+**Indoor reverb preset** (EAX parameters, tuned for URT urban maps):
+- Density 0.5, Diffusion 0.85, Gain 0.32, Decay 1.49s, HF ratio 0.83
+- Reflections delay 7ms, Late reverb delay 11ms, Air absorption 0.994
+
+**Per-source occlusion filters**: One `AL_FILTER_LOWPASS` is allocated per source slot at init. The filter is updated by the occlusion trace and attached via `AL_DIRECT_FILTER`.
+
+**Underwater mode**: When `S_AL_Respatialize` reports `inwater != 0`, all active 3D sources are switched from the reverb slot to the underwater slot in the next `S_AL_Update` tick.
+
+**EFX source wiring** (set in `S_AL_SrcSetup` for non-local sources):
+```c
+alSource3i(src, AL_AUXILIARY_SEND_FILTER, reverbSlot, 0, AL_FILTER_NULL);
+alSourcei(src,  AL_DIRECT_FILTER, occlusionFilter[idx]);
+alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAIN_AUTO,   AL_TRUE);
+alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO, AL_TRUE);
+alSourcei(src,  AL_DIRECT_FILTER_GAINHF_AUTO,         AL_FALSE);
+```
+
+### Ambisonic Panning
+
+Two aspects of Ambisonic integration:
+
+**Internal HRTF rendering order** — At context creation, the engine queries `ALC_MAX_AMBISONIC_ORDER_SOFT` and requests the highest order ≤ 3:
+```c
+ctxAttribs[] = { ..., ALC_AMBISONIC_ORDER_SOFT, maxOrder, ... }
+```
+OpenAL Soft uses this order for its internal Ambisonic encoder when mixing 3D sources before applying HRTF — higher order gives better spatial resolution (order 3 = 16 B-format coefficients).
+
+**B-format source loading** — 4-channel audio files are detected and loaded with the correct B-format enum so OpenAL Soft decodes them as first-order Ambisonics:
+```c
+if (info.channels == 4)
+    fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
+```
+This allows map ambient sounds encoded as WXYZ B-format to provide full 360° HRTF audio with no extra engine code.
+
 ### Source Pool
 
-Up to `MAX_CHANNELS` (96) OpenAL sources are pre-allocated at init.  Source stealing (oldest non-looping source) handles overflow gracefully.
+Up to `MAX_CHANNELS` (96) OpenAL sources are pre-allocated at init. Source stealing (oldest non-looping source) handles overflow gracefully.
 
 ### Music Streaming
 
@@ -134,8 +218,8 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | Cvar | Default | Notes |
 |------|---------|-------|
 | `s_alDevice` | `""` | OpenAL output device name; empty = system default |
-| `s_alHRTF` | `1` | Enable HRTF via `ALC_SOFT_HRTF` |
-| `s_alMaxDist` | `1024` | Maximum attenuation distance (game units) |
+| `s_alHRTF` | `1` | Enable HRTF + Ambisonic HRTF rendering (all three layers) |
+| `s_alMaxDist` | `1024` | Override max attenuation distance (never less than 1330) |
 
 ### snd_openal.h — Public API
 
@@ -726,12 +810,15 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | Cvar | Default | Notes |
 |---|---|---|
 | `s_alDevice` | `""` | OpenAL output device name; empty = OS default |
-| `s_alHRTF` | `1` | Enable HRTF via `ALC_SOFT_HRTF` (OpenAL Soft only) |
-| `s_alMaxDist` | `1024` | Maximum distance for source attenuation (game units) |
+| `s_alHRTF` | `1` | Enable three-layer HRTF + higher-order Ambisonic rendering |
+| `s_alMaxDist` | `1024` | Override max attenuation distance (floor: 1330 Q3 units) |
 
 - OpenAL Soft selects the native device rate automatically (no `s_khz` needed).
 - `s_doppler` controls `AL_DOPPLER_FACTOR` (1.0 = enabled, 0.0 = disabled).
 - HRTF uses OpenAL Soft's built-in CIPIC / MIT KEMAR datasets — no custom DSP code.
+- EFX (`ALC_EXT_EFX`) is detected and enabled automatically; no cvar needed.
+- Occlusion traced via `CM_BoxTrace` every 4 frames per source; applied as EFX low-pass filter if available, else gain scale.
+- Ambisonic order for HRTF rendering auto-detected from `ALC_MAX_AMBISONIC_ORDER_SOFT` (capped at 3rd order).
 
 Build flags:
 - `USE_OPENAL=0` — disable OpenAL, force dmaHD / base DMA.
