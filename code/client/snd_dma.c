@@ -61,9 +61,12 @@ byte			*dma_buffer2;
 #define		SPHERE_VOL			90
 
 // Maximum channels the world entity (ENTITYNUM_WORLD) may occupy at once.
-// In multiplayer, all bullet impacts/casings share ent 1022; without a cap they
-// can exhaust the entire 96-channel pool during sustained automatic fire.
-#define		WORLD_ENTITY_MAX_CHANNELS	(MAX_CHANNELS / 6)
+// In multiplayer all bullet impacts/casings share ent 1022.  Without a cap they
+// can exhaust the entire 96-channel pool during sustained fire.  The budget is
+// intentionally tight (1/8 of the pool) because at high sv_fps (60+) the server
+// submits sound events proportionally faster; a larger budget keeps the pool
+// saturated and causes both dropped player sounds and paint-buffer clipping.
+#define		WORLD_ENTITY_MAX_CHANNELS	(MAX_CHANNELS / 8)
 
 channel_t   s_channels[MAX_CHANNELS];
 channel_t   loop_channels[MAX_CHANNELS];
@@ -523,23 +526,41 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 	if ( entityNum == listener_number )
 		allowed = 16;
 	else if ( entityNum == ENTITYNUM_WORLD )
-		allowed = 3;	// world impact/surface sounds don't need 8 concurrent instances; 3 is perceptually sufficient
+		allowed = 2;	// world impact/surface sounds: 2 concurrent instances is perceptually sufficient
 	else
 		allowed = 8;
+
+	// Per-sound deduplication window.
+	// ENTITYNUM_WORLD uses a wider window (100 ms) to throttle the rate at which
+	// impact/casing sounds accumulate.  The server emits these events proportionally
+	// to sv_fps, so without a longer window:
+	//   sv_fps 60: same sfx re-triggers every ~2 frames (33 ms) → pool saturates fast
+	//   sv_fps 20: same sfx triggers every frame (50 ms) → pool fills steadily
+	// 100 ms forces at least 2 frames between re-triggers at sv_fps 20, and at
+	// least 6 frames at sv_fps 60, significantly reducing accumulation at both rates.
+	// Perceptual impact is minimal — automatic weapons fire at ~10 rounds/sec
+	// (100 ms between shots), so every round's impact is still audible.
+	{
+	int dedup_samples = (entityNum == ENTITYNUM_WORLD) ?
+		(dma.speed * 100 / 1000) :	// 100 ms for world-entity sounds
+		(dma.speed * 20 / 1000);	// 20 ms for all other entities
 
 	ch = s_channels;
 	inplay = 0;
 	for ( i = 0; i < MAX_CHANNELS; i++, ch++ ) {
 		if ( ch->entnum == entityNum && ch->thesfx == sfx ) {
-			// dma.speed is in sample-pairs/sec; convert 20 ms to samples.
+			// dma.speed is in sample-pairs/sec; dedup_samples is already in samples.
 			// dma.speed is always > 0 here because s_soundStarted is verified above.
-			if ( startTime - ch->allocTime < dma.speed * 20 / 1000 ) {
-				Com_DPrintf(S_COLOR_YELLOW "S_StartSound: Double start (%d ms < 20 ms) for %s (ent %d)\n",
-					(startTime - ch->allocTime) * 1000 / dma.speed, sfx->soundName, entityNum);
+			if ( startTime - ch->allocTime < dedup_samples ) {
+				Com_DPrintf(S_COLOR_YELLOW "S_StartSound: Double start (%d ms < %d ms) for %s (ent %d)\n",
+					(startTime - ch->allocTime) * 1000 / dma.speed,
+					dedup_samples * 1000 / dma.speed,
+					sfx->soundName, entityNum);
 				return;
 			}
 			inplay++;
 		}
+	}
 	}
 
 	// too much duplicated sounds, ignore
@@ -549,10 +570,10 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 		return;
 	}
 
-	// In multiplayer all bullet impacts/casings share ENTITYNUM_WORLD, so many different
-	// impact sounds (ric1, ric2, concrete1, brass1, …) can each hold up to `allowed`
-	// channels simultaneously, exhausting the 96-channel pool.  Enforce a hard cap on
-	// the *total* channels owned by the world entity (≈ 1/6 of the pool).
+	// In multiplayer all bullet impacts/casings share ENTITYNUM_WORLD, so many
+	// different impact sounds (ric1, ric2, concrete1, brass1, …) can each hold up
+	// to `allowed` channels simultaneously, exhausting the pool.  Enforce a hard
+	// cap on the *total* channels owned by the world entity (1/8 of the pool).
 	if ( entityNum == ENTITYNUM_WORLD ) {
 		worldTotal = 0;
 		ch = s_channels;

@@ -173,6 +173,12 @@ extern portable_samplepair_t	s_rawsamples[];
 static portable_samplepair_t	dmaHD_paintbuffer[DMAHD_PAINTBUFFER_SIZE];
 static int						dmaHD_snd_vol;
 
+// Peak limiter state: tracks the current gain reduction (1.0 = unity, <1.0 = attenuation).
+// Fast attack (immediate gain reduction when mix would clip), slow release (15 % recovery
+// per paint chunk, ~100-200 ms to full unity at 60 fps) prevents both hard clipping and
+// audible gain pumping.
+static float					s_dmaHD_limiterGain = 1.0f;
+
 // Normalisation divisor for converting the 24.8 fixed-point paint accumulator
 // to a [-1.0, 1.0] float sample, matching S_TransferPaintBuffer in snd_mix.c.
 #define DMAHD_FLOAT_RDIV   (1.0f / (32768.0f * 256.0f - 128.0f))
@@ -936,6 +942,47 @@ s_volume->value*256;
                 activeCh, numLoopChannels);
         }
 
+        // Peak limiter — prevents paint-buffer clipping / mix distortion when many
+        // channels are simultaneously active (e.g. sustained automatic fire at high
+        // sv_fps).  Algorithm: fast attack (gain snaps immediately to the level needed
+        // to keep the peak within the output range), slow release (15 % per paint chunk
+        // ≈ 100-200 ms to unity at 60 fps) to avoid abrupt volume jumps between chunks.
+        {
+            int numSamples = (end - s_paintedtime) * 2; // stereo: 2 ints per sample pair
+            int *p = (int *)dmaHD_paintbuffer;
+            int peak = 0;
+            int i2;
+
+            for (i2 = 0; i2 < numSamples; i2++) {
+                int v = p[i2];
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+            }
+
+            // Fast attack: immediately drop gain if this chunk would otherwise clip.
+            if (peak > DMAHD_FLOAT_MAX) {
+                float needed = (float)DMAHD_FLOAT_MAX / (float)peak;
+                if (needed < s_dmaHD_limiterGain)
+                    s_dmaHD_limiterGain = needed;
+            }
+
+            // Apply gain and begin slow release toward unity.
+            if (s_dmaHD_limiterGain < 1.0f) {
+                int scale256 = (int)(s_dmaHD_limiterGain * 256.0f);
+                for (i2 = 0; i2 < numSamples; i2++)
+                    p[i2] = (p[i2] * scale256) >> 8;
+
+                if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
+                    Com_DPrintf(S_COLOR_CYAN "dmaHD: peak limiter active — gain %.3f (peak %d, %d active ch)\n",
+                        (double)s_dmaHD_limiterGain, peak, activeCh);
+
+                // Release: ease back 15 % of the remaining distance to 1.0 each chunk.
+                s_dmaHD_limiterGain += (1.0f - s_dmaHD_limiterGain) * 0.15f;
+                if (s_dmaHD_limiterGain > 1.0f)
+                    s_dmaHD_limiterGain = 1.0f;
+            }
+        }
+
         // transfer out according to DMA format
         dmaHD_TransferPaintBuffer(end);
         s_paintedtime = end;
@@ -1550,7 +1597,8 @@ qboolean dmaHD_Init(soundInterface_t *si)
     Cvar_SetDescription(dmaHD_debugLevel,
         "dmaHD diagnostic logging level. "
         "0 = off (default). "
-        "1 = log mix-overload clipping, mix stalls (>100 ms), high channel load, and unexpected channel states. "
+        "1 = log mix-overload clipping, peak limiter activations, mix stalls (>100 ms), "
+        "high channel load (>48 active channels), and unexpected channel states. "
         "All output is routed through Com_DPrintf (requires developer 1).");
 
     // Override function pointers to dmaHD version, the rest keep base.

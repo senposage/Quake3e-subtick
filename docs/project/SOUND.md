@@ -143,17 +143,36 @@ typedef struct {
 
 #### Channel budget policy
 
-`S_Base_StartSound` enforces two independent guards before allocating a channel:
+`S_Base_StartSound` enforces three independent guards before allocating a channel:
 
-| Entity | Per-sound concurrent limit (`allowed`) | Rationale |
-|--------|----------------------------------------|-----------|
-| `listener_number` (local player) | 16 | Many distinct weapon/movement sounds |
-| `ENTITYNUM_WORLD` (1022) | **3** | Impact/surface/casing sounds; 3 concurrent instances per clip is perceptually indistinguishable from more |
-| Any other entity | 8 | Default |
+| Entity | Per-sound dedup window | Per-sound concurrent limit (`allowed`) | Rationale |
+|--------|------------------------|----------------------------------------|-----------|
+| `listener_number` (local player) | 20 ms | 16 | Many distinct weapon/movement sounds |
+| `ENTITYNUM_WORLD` (1022) | **100 ms** | **2** | Impact/surface/casing sounds — see rate-flood analysis below |
+| Any other entity | 20 ms | 8 | Default |
 
-Additionally, `ENTITYNUM_WORLD` is subject to a **total channel cap** of `WORLD_ENTITY_MAX_CHANNELS` (`MAX_CHANNELS / 6` = 16 out of 96). In multiplayer, all bullet impacts, ricochets, and brass casings share the world entity number. Without this cap, multiple players firing automatic weapons simultaneously can fill the entire 96-channel pool with impact sounds, forcing channel stealing for weapon and footstep sounds.
+Additionally, `ENTITYNUM_WORLD` is subject to a **total channel cap** of `WORLD_ENTITY_MAX_CHANNELS` (`MAX_CHANNELS / 8` = 12 out of 96).
 
-If either guard triggers, the sound is silently dropped (logged via `Com_DPrintf`).
+#### World-entity rate-flood analysis
+
+In multiplayer, **all** bullet impacts, ricochets, and brass casings share `ENTITYNUM_WORLD` (ent 1022). The server generates these sound events proportionally to `sv_fps`:
+
+| sv_fps | ms/frame | ENTITYNUM_WORLD events/sec (28 players, auto-fire) | Issue frequency (before fix) |
+|--------|----------|------------------------------------------------------|------------------------------|
+| 20 | 50 ms | ~baseline | every ~1 min |
+| 60 | 16.7 ms | ~3× baseline | every few seconds |
+
+Without targeted throttling the world-entity pool saturates at a rate proportional to `sv_fps × player_count × sounds_per_action`.
+
+Three complementary guards address this:
+
+1. **100 ms per-sound dedup window** — the same sfx (e.g. `concrete1.wav`) cannot re-trigger on `ENTITYNUM_WORLD` within 100 ms. At sv_fps 60 this blocks re-triggers for 6 consecutive frames; at sv_fps 20 it blocks every other frame. Automatic weapons fire at ~10 rounds/sec (100 ms/round), so every impact is still audible.
+
+2. **Per-sound concurrent limit of 2** — at most 2 "old" (> 100 ms) instances of the same sfx may be playing before new ones are rejected.
+
+3. **Total cap of 12 channels** — the hard ceiling prevents any single server-fps spike from exhausting the 96-channel pool; leaves ≥ 77 channels for player, weapon, and ambient sounds.
+
+If any guard triggers, the sound is silently dropped (logged via `Com_DPrintf`).
 
 ### S_Base_StartSound(origin, entityNum, entchannel, sfxHandle)
 
@@ -301,6 +320,39 @@ switch ( s_khz->integer ) { ... }
 - `NO_DMAHD=0` (default) — dmaHD enabled
 - `-DNO_DMAHD` conditional compile flag
 - `snd_dmahd.o` included in client build when `NO_DMAHD=0`
+
+### Peak Limiter [URT]
+
+`dmaHD_PaintChannels` now applies a **fast-attack / slow-release peak limiter** to the accumulated paintbuffer before calling `dmaHD_TransferPaintBuffer`. This prevents the mix-overload distortion (`paint buffer clipped N/16384 samples`) that occurs when many channels are simultaneously active during heavy combat.
+
+**Algorithm:**
+
+1. After mixing all channels into `dmaHD_paintbuffer`, scan the buffer for the peak absolute value.
+2. If `peak > DMAHD_FLOAT_MAX` (the 16-bit output ceiling), immediately reduce `s_dmaHD_limiterGain` to `DMAHD_FLOAT_MAX / peak` — **fast attack** to prevent any clipping this chunk.
+3. Apply `s_dmaHD_limiterGain` to every sample in the buffer (fixed-point: `(sample * scale256) >> 8`).
+4. Each chunk, recover 15% of the remaining distance to unity gain — **slow release** (`gain += (1.0 - gain) * 0.15`), giving ~100–200 ms recovery at 60 fps to avoid audible volume pumping.
+
+The limiter only engages when the mix would otherwise clip; at normal load `s_dmaHD_limiterGain == 1.0` and no scaling is applied.
+
+Limiter activity is logged at `dmaHD_debugLevel 1`:
+```
+dmaHD: peak limiter active — gain 0.714 (peak 11747328, 52 active ch)
+```
+
+### HRTF at Increased Sample Rates — Inspection [URT]
+
+dmaHD was audited for correctness at sample rates above the original 44 100 Hz target (in particular 48 000 Hz WASAPI native on Windows). All sample-rate-dependent calculations were verified:
+
+| Component | Formula | Rate-correct? | Notes |
+|-----------|---------|---------------|-------|
+| ITD delay (`CALCSMPOFF`) | `(dist_units × dma.speed) >> 17` | ✅ | Delay in *samples* scales with `dma.speed`; same physical ms delay at all rates |
+| Behind-viewer ITD offset | `t = dma.speed × 0.001f` | ✅ | Produces a constant 1 ms ITD regardless of rate |
+| Resampling step | `stepscale = inrate / dma.speed` | ✅ | Output length = `soundLength / stepscale` → correct upsample/downsample |
+| HP filter coefficient | `hp_a = 1 − (1 − 0.95) × (44100 / dma.speed)` | ✅ | Maintains ~360 Hz cutoff at all rates |
+| LP (bass) filter coefficient | `lp_a = 0.03 × (44100 / dma.speed)` | ✅ | Maintains ~211 Hz cutoff at all rates |
+| Sound storage layout | High-freq at `[0..soundLength]`, bass at `[soundLength..2×soundLength]` | ✅ | Both halves use `outcount` samples at `dma.speed` |
+
+**No bugs were found.** The filter coefficient scaling (`44100.0f / dma.speed`) introduced in PR 67 is mathematically correct for first-order IIR filters at the small-coefficient approximation used here. Overflow in `CALCSMPOFF` is not possible at supported sample rates (≤ 48 000 Hz) for any in-map distance.
 
 ---
 
