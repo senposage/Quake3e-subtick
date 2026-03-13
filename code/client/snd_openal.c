@@ -231,9 +231,25 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_WEAPON_SOUND_PREFIX        "sound/weapons/"
 #define S_AL_WEAPON_SOUND_PREFIX_LEN    14  /* strlen("sound/weapons/") */
 
-/* No fixed preemption guard constants needed: see S_AL_ContentSamples() and
- * S_AL_StartSound() for the content-based adaptive approach that replaced all
- * channel-specific guards. */
+/* Preemption guard cap for CHAN_WEAPON.  Prevents a long fire sound (e.g.
+ * de_out.wav with ~2.5 s of audible content) from blocking rapid-fire events
+ * for its full content duration.  150 ms covers the initial crack/transient
+ * of every URT weapon while allowing the next shot and cycle sounds through
+ * at any realistic fire cadence. */
+#define WEAPON_GUARD_CAP_MS         150
+
+/* Weapon-fire loop inactivity timeout.  While the trigger is held, the game
+ * re-fires EV_FIRE_WEAPON at the weapon's fire rate and each event refreshes
+ * lastFireMs.  When no event arrives within this window (trigger released or
+ * burst ended), AL_LOOPING is cleared so the current buffer iteration plays
+ * out to its natural end rather than being hard-stopped. */
+#define WEAPON_FIRE_LOOP_TIMEOUT_MS 250
+
+/* Gain fade-in duration (ms) for newly-started sources that preempted an
+ * existing sound on the same channel.  Masks the hard cut on the predecessor
+ * and makes the preemption transition perceptibly smooth without requiring a
+ * full crossfade (which would need two concurrent sources per channel). */
+#define SRC_FADE_IN_MS              15
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
@@ -280,6 +296,9 @@ typedef struct {
     alSrcCat_t      category;       /* volume group for s_alVolSelf/Other/Env */
     qboolean        isPlaying;
     qboolean        isLocal;        /* non-spatialized */
+    int             fadeStartMs;    /* >0: gain fade-in active; Com_Milliseconds() at start */
+    qboolean        weaponLoop;     /* source is an active AL_LOOPING weapon-fire loop */
+    int             lastFireMs;     /* Com_Milliseconds() of last EV_FIRE_WEAPON event */
     float           occlusionGain;      /* smoothed [0..1] — 1.0 = unoccluded, applied every frame */
     float           occlusionTarget;    /* raw trace result [0..1] — occlusionGain blends towards this */
     int             occlusionTick;      /* s_al_loopFrame when last traced */
@@ -1100,6 +1119,9 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->loopSound    = qfalse;
     src->allocTime    = Com_Milliseconds();
     src->isPlaying    = qtrue;
+    src->fadeStartMs  = 0;
+    src->weaponLoop   = qfalse;
+    src->lastFireMs   = 0;
     src->occlusionGain   = 1.0f;
     src->occlusionTarget = 1.0f;
     src->occlusionTick   = 0;
@@ -1247,9 +1269,13 @@ static void S_AL_StopSource( int idx )
     }
 
     qalSourceStop(s_al_src[idx].source);
+    qalSourcei(s_al_src[idx].source, AL_LOOPING, AL_FALSE);
     qalSourcei(s_al_src[idx].source, AL_BUFFER, 0);
     s_al_src[idx].isPlaying  = qfalse;
     s_al_src[idx].loopSound  = qfalse;
+    s_al_src[idx].weaponLoop = qfalse;
+    s_al_src[idx].lastFireMs = 0;
+    s_al_src[idx].fadeStartMs = 0;
 }
 
 /* =========================================================================
@@ -1583,46 +1609,62 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     if (entchannel != CHAN_AUTO) {
         srcIdx = S_AL_FindSourceByChannel(entnum, entchannel);
         if (srcIdx >= 0) {
-            /* Adaptive content-based preemption guard (all channels).
+            /* Weapon-fire loop: same sfx re-submitted on the same named
+             * channel while still playing.  This is the game driving a
+             * continuous fire sound (automatic fire or rapid semi-auto).
+             * Switch the source to AL_LOOPING so the buffer repeats
+             * seamlessly with no gap at the loop boundary; just refresh
+             * the inactivity timestamp and return — no new source needed.
+             * S_AL_Update clears AL_LOOPING once events stop arriving
+             * (trigger released / burst ended), letting the current buffer
+             * iteration play out to its natural end. */
+            if (s_al_src[srcIdx].sfx == sfx &&
+                    (Com_Milliseconds() - s_al_src[srcIdx].allocTime)
+                    <= WEAPON_FIRE_LOOP_TIMEOUT_MS) {
+                if (!s_al_src[srcIdx].weaponLoop) {
+                    qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
+                    s_al_src[srcIdx].weaponLoop = qtrue;
+                }
+                s_al_src[srcIdx].lastFireMs = Com_Milliseconds();
+                return;
+            }
+
+            /* Preemption guard — protects the initial attack transient of
+             * the current sound from being immediately cut by a new one.
              *
-             * Before stopping the current source, query how many frames it
-             * has played and compare against the last non-silent frame of
-             * the sound (contentSamples, computed from PCM at load time).
-             * If audible content is still playing, drop the incoming request
-             * rather than cutting the sound short.
+             * For CHAN_WEAPON the guard is capped at WEAPON_GUARD_CAP_MS
+             * (150 ms) so that a long fire sound (e.g. de_out.wav with
+             * ~2.5 s of audible content) cannot silence rapid-fire events
+             * for its full content duration.  The cap covers the crack /
+             * transient of every URT weapon while allowing the next shot
+             * and cycle sounds through at any fire cadence.
              *
-             * This handles every case uniformly:
-             *   • Long fire sounds (de_out.wav, 2.5 s content) are never
-             *     cut by short animation events (cock.wav) on CHAN_WEAPON.
-             *   • Full-auto fire sounds authored with content ≈ fire interval
-             *     (MAC-11: 150 ms crack in 858 ms file) expire their guard
-             *     right at the fire cadence, so rapid-fire restarts go
-             *     through naturally.
-             *   • Inside/outside weapon variants switch cleanly once the
-             *     current sound's audible content is consumed.
-             *   • Ambient/environment sounds (trucks, city noise) play to
-             *     their audible end before the map can retrigger them.
-             *   • Impact sounds play their full crack before being replaced.
+             * For all other channels the full contentSamples is used so
+             * that ambient loops, impact sounds, etc. play to their audible
+             * end before being replaced.
              *
-             * Falls through immediately when contentSamples == 0 (all-
-             * silent or unknown file) so those are always preemptable. */
+             * AL_SOURCE_STATE is checked first: an AL_STOPPED source has
+             * its AL_SAMPLE_OFFSET reset to 0 which would falsely hold the
+             * guard open — skip the guard entirely when the source is done. */
             {
                 int curSfx = s_al_src[srcIdx].sfx;
-                if ( curSfx >= 0 && curSfx < s_al_numSfx ) {
+                if (curSfx >= 0 && curSfx < s_al_numSfx) {
                     int content = s_al_sfx[curSfx].contentSamples;
-                    if ( content > 0 ) {
-                        /* Only apply the guard when the source is actually
-                         * playing.  If the source has reached AL_STOPPED
-                         * (sound finished but isPlaying not yet cleared by
-                         * S_AL_Update), AL_SAMPLE_OFFSET resets to 0 and
-                         * would falsely satisfy offset < content, silencing
-                         * rapid-fire and back-to-back sounds. */
+                    if (content > 0) {
                         ALint state = AL_STOPPED;
-                        qalGetSourcei(s_al_src[srcIdx].source, AL_SOURCE_STATE, &state);
-                        if ( state == AL_PLAYING ) {
+                        if (entchannel == CHAN_WEAPON) {
+                            int cap = (int)((long long)WEAPON_GUARD_CAP_MS *
+                                            s_al_sfx[curSfx].fileRate / 1000);
+                            if (cap > 0 && content > cap)
+                                content = cap;
+                        }
+                        qalGetSourcei(s_al_src[srcIdx].source,
+                                      AL_SOURCE_STATE, &state);
+                        if (state == AL_PLAYING) {
                             ALint offset = 0;
-                            qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
-                            if ( offset < content )
+                            qalGetSourcei(s_al_src[srcIdx].source,
+                                          AL_SAMPLE_OFFSET, &offset);
+                            if (offset < content)
                                 return;
                         }
                     }
@@ -1698,6 +1740,16 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                   qfalse /* one-shot entity sound, not ambient */);
 
     r->lastTimeUsed = Com_Milliseconds();
+
+    /* Fade-in: start at silence and ramp to full gain over SRC_FADE_IN_MS
+     * to smooth the preemption transition for local (own-player) sounds.
+     * Non-local sources have their gain managed every frame by the occlusion
+     * updater, so the fade is applied only to the isLocal path here. */
+    if (s_al_src[srcIdx].isLocal) {
+        qalSourcef(s_al_src[srcIdx].source, AL_GAIN, 0.0f);
+        s_al_src[srcIdx].fadeStartMs = Com_Milliseconds();
+    }
+
     qalSourcePlay(s_al_src[srcIdx].source);
 }
 
@@ -2648,7 +2700,7 @@ static void S_AL_ReverbReset_f( void )
 
 static void S_AL_Update( int msec )
 {
-    int   i;
+    int   i, now;
     ALint state;
     float masterGain, musicGain;
 
@@ -2741,9 +2793,40 @@ static void S_AL_Update( int msec )
         }
     }
 
-    /* Reap stopped sources */
+    /* Reap stopped sources; also drive weapon-fire loop timeouts and
+     * per-source gain fade-ins. */
+    now = Com_Milliseconds();
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
+
+        /* Weapon-fire loop: clear AL_LOOPING when the trigger has been
+         * released (no new EV_FIRE_WEAPON event for WEAPON_FIRE_LOOP_-
+         * TIMEOUT_MS).  Setting AL_LOOPING = AL_FALSE on a playing source
+         * causes OpenAL to finish the current buffer iteration and then
+         * stop — the "plays out naturally on trigger release" behaviour. */
+        if (s_al_src[i].weaponLoop &&
+                (now - s_al_src[i].lastFireMs) > WEAPON_FIRE_LOOP_TIMEOUT_MS) {
+            qalSourcei(s_al_src[i].source, AL_LOOPING, AL_FALSE);
+            s_al_src[i].weaponLoop = qfalse;
+        }
+
+        /* Gain fade-in for local (own-player) sources: ramp from 0 to
+         * the base gain over SRC_FADE_IN_MS to smooth the hard cut of a
+         * preempted predecessor.  Non-local source gain is written every
+         * frame by the occlusion updater, so no separate ramp is needed. */
+        if (s_al_src[i].fadeStartMs > 0 && s_al_src[i].isLocal) {
+            int   elapsed = now - s_al_src[i].fadeStartMs;
+            float catVol  = S_AL_GetCategoryVol(s_al_src[i].category);
+            float target  = (s_al_src[i].master_vol / 255.0f) * catVol;
+            if (elapsed >= SRC_FADE_IN_MS) {
+                qalSourcef(s_al_src[i].source, AL_GAIN, target);
+                s_al_src[i].fadeStartMs = 0;
+            } else {
+                float t = (float)elapsed / SRC_FADE_IN_MS;
+                qalSourcef(s_al_src[i].source, AL_GAIN, t * target);
+            }
+        }
+
         qalGetSourcei(s_al_src[i].source, AL_SOURCE_STATE, &state);
         if (state == AL_STOPPED) {
             /* Level 2: log every natural completion so we can confirm the full
