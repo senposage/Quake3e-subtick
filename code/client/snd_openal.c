@@ -797,15 +797,16 @@ static void S_AL_FreeSfx( void )
  * =========================================================================
  */
 
+/* Full-scale value for master_vol: source gain = (master_vol/255)*catVol,
+ * listener gain = s_volume.  Combined: s_volume * catVol (no double-apply). */
+#define S_AL_MASTER_VOL_FULL 255.0f
+
 /* Find an existing source for (entnum, entchannel), or -1. */
 static float S_AL_GetMasterVol( void )
 {
-    /* Return a fixed full-scale value (255).  The listener gain set every
-     * frame in S_AL_Update already applies s_volume as the master volume
-     * control.  Including s_volume here as well would cause it to be applied
-     * twice (source gain × listener gain = s_volume²), making all sounds
-     * significantly quieter than the equivalent dmaHD output. */
-    return 255.0f;
+    /* Return full-scale so that source gain = catVol (the listener AL_GAIN
+     * is set to s_volume every frame — applying it here too would double it). */
+    return S_AL_MASTER_VOL_FULL;
 }
 
 /* Return the per-category volume scalar for a source, clamped to its
@@ -2506,39 +2507,6 @@ static void S_AL_Update( int msec )
         /* Dynamic acoustic environment: updates EFX params + slot gain */
         S_AL_UpdateDynamicReverb();
 
-        /* Live-update per-category volume when s_alVolSelf/Other/Env/UI change.
-         * master_vol is stored pre-category so we can always recompute cleanly. */
-        {
-            static float lastVolSelf  = -1.f;
-            static float lastVolOther = -1.f;
-            static float lastVolEnv   = -1.f;
-            static float lastVolUI    = -1.f;
-            float vSelf  = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
-            float vOther = S_AL_GetCategoryVol(SRC_CAT_WORLD);
-            float vEnv   = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
-            float vUI    = S_AL_GetCategoryVol(SRC_CAT_UI);
-
-            if (vSelf != lastVolSelf || vOther != lastVolOther ||
-                vEnv  != lastVolEnv  || vUI    != lastVolUI) {
-                int j;
-                for (j = 0; j < s_al_numSrc; j++) {
-                    float catGain;
-                    if (!s_al_src[j].isPlaying) continue;
-                    catGain = S_AL_GetCategoryVol(s_al_src[j].category);
-                    /* Re-apply per-sample normalisation for ambient sources */
-                    if (s_al_src[j].category == SRC_CAT_AMBIENT &&
-                            s_al_src[j].sfx >= 0 && s_al_src[j].sfx < s_al_numSfx)
-                        catGain *= s_al_sfx[s_al_src[j].sfx].normGain;
-                    qalSourcef(s_al_src[j].source, AL_GAIN,
-                        (s_al_src[j].master_vol / 255.f) * catGain);
-                }
-                lastVolSelf  = vSelf;
-                lastVolOther = vOther;
-                lastVolEnv   = vEnv;
-                lastVolUI    = vUI;
-            }
-        }
-
         /* Switch all non-local sources between normal reverb and underwater effect */
         if (s_al_inwater != lastInwater) {
             int j;
@@ -2551,6 +2519,44 @@ static void S_AL_Update( int msec )
                             (ALint)slot, 0, (ALint)AL_FILTER_NULL);
             }
             lastInwater = s_al_inwater;
+        }
+    }
+
+    /* Live-update per-category volume when s_alVolSelf/Other/Env/UI change.
+     * Runs regardless of EFX availability so that own-player (local) source
+     * gains respond to vol cvar changes even when s_alEFX=0.  When EFX is
+     * off, Phase 3 of the occlusion block already writes gain every frame for
+     * non-local sources, but local sources (isLocal=true) skip Phase 3 and
+     * only get their gain set once in SrcSetup — without this block, changing
+     * s_alVolSelf at runtime would have no effect on local sources. */
+    {
+        static float lastVolSelf  = -1.f;
+        static float lastVolOther = -1.f;
+        static float lastVolEnv   = -1.f;
+        static float lastVolUI    = -1.f;
+        float vSelf  = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
+        float vOther = S_AL_GetCategoryVol(SRC_CAT_WORLD);
+        float vEnv   = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
+        float vUI    = S_AL_GetCategoryVol(SRC_CAT_UI);
+
+        if (vSelf != lastVolSelf || vOther != lastVolOther ||
+            vEnv  != lastVolEnv  || vUI    != lastVolUI) {
+            int j;
+            for (j = 0; j < s_al_numSrc; j++) {
+                float catGain;
+                if (!s_al_src[j].isPlaying) continue;
+                catGain = S_AL_GetCategoryVol(s_al_src[j].category);
+                /* Re-apply per-sample normalisation for ambient sources */
+                if (s_al_src[j].category == SRC_CAT_AMBIENT &&
+                        s_al_src[j].sfx >= 0 && s_al_src[j].sfx < s_al_numSfx)
+                    catGain *= s_al_sfx[s_al_src[j].sfx].normGain;
+                qalSourcef(s_al_src[j].source, AL_GAIN,
+                    (s_al_src[j].master_vol / 255.f) * catGain);
+            }
+            lastVolSelf  = vSelf;
+            lastVolOther = vOther;
+            lastVolEnv   = vEnv;
+            lastVolUI    = vUI;
         }
     }
 
@@ -2840,52 +2846,98 @@ static void S_AL_ListDevicesCmd( void )
 static void S_AL_SoundInfo( void )
 {
     ALCint hrtfStatus = 0;
-    const ALchar *vendor  = qalGetString(AL_VENDOR);
-    const ALchar *version = qalGetString(AL_VERSION);
+    const ALchar *vendor   = qalGetString(AL_VENDOR);
+    const ALchar *version  = qalGetString(AL_VERSION);
     const ALchar *renderer = qalGetString(AL_RENDERER);
+
+    /* Determine actual live HRTF state */
+    if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF"))
+        qalcGetIntegerv(s_al_device, ALC_HRTF_STATUS_SOFT, 1, &hrtfStatus);
 
     Com_Printf("\n");
     Com_Printf("OpenAL sound backend\n");
-    Com_Printf("  Vendor:   %s\n", vendor  ? vendor  : "unknown");
-    Com_Printf("  Version:  %s\n", version ? version : "unknown");
+    Com_Printf("  Vendor:   %s\n", vendor   ? vendor   : "unknown");
+    Com_Printf("  Version:  %s\n", version  ? version  : "unknown");
     Com_Printf("  Renderer: %s\n", renderer ? renderer : "unknown");
+    Com_Printf("  Sources:  %d / %d active  |  Sfx: %d loaded\n",
+        s_al_numSrc, S_AL_MAX_SRC, s_al_numSfx);
+    Com_Printf("\n");
 
+    /* -----------------------------------------------------------------------
+     * Processing feature status — use this to isolate which feature is
+     * causing audio issues.  Each line shows whether the feature is truly
+     * active or bypassed at this moment.  Restart (vid_restart) is required
+     * after changing any LATCH cvar before re-testing.
+     * ----------------------------------------------------------------------- */
+    Com_Printf("  Processing features (ON = active, OFF = bypassed):\n");
+
+    /* HRTF — reports actual hardware/driver state, not just the cvar */
     if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
-        qalcGetIntegerv(s_al_device, ALC_HRTF_STATUS_SOFT, 1, &hrtfStatus);
-        Com_Printf("  HRTF:     %s\n",
-            (hrtfStatus == ALC_HRTF_ENABLED_SOFT) ? "enabled" : "disabled");
+        qboolean hrtfOn = (hrtfStatus == ALC_HRTF_ENABLED_SOFT);
+        Com_Printf("    HRTF              %s  (s_alHRTF %d, LATCH)%s\n",
+            hrtfOn ? S_COLOR_RED "ON " S_COLOR_WHITE
+                   : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
+            s_alHRTF ? s_alHRTF->integer : 0,
+            hrtfOn && !(s_alHRTF && s_alHRTF->integer)
+                ? S_COLOR_YELLOW " WARNING: on despite cvar=0" S_COLOR_WHITE : "");
     } else {
-        Com_Printf("  HRTF:     not available (ALC_SOFT_HRTF extension absent)\n");
+        Com_Printf("    HRTF              " S_COLOR_GREEN "OFF" S_COLOR_WHITE
+                   "  (ALC_SOFT_HRTF not available)\n");
     }
 
-    Com_Printf("  Sources:  %d / %d active\n", s_al_numSrc, S_AL_MAX_SRC);
-    Com_Printf("  Sfx:      %d loaded\n", s_al_numSfx);
+    /* EFX — reports whether filter objects / reverb slots were created */
+    Com_Printf("    EFX subsystem     %s  (s_alEFX %d, LATCH  — %s reverb)\n",
+        s_al_efx.available ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
+                           : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
+        s_alEFX ? s_alEFX->integer : 1,
+        s_al_efx.hasEAXReverb ? "EAX" : "standard");
 
-    Com_Printf("  EFX:      %s (%s reverb)  [s_alEFX %d]\n",
-        s_al_efx.available ? "enabled" : "not available",
-        s_al_efx.hasEAXReverb ? "EAX" : "standard",
-        s_alEFX ? s_alEFX->integer : 1);
+    /* Reverb — only meaningful when EFX is on */
+    Com_Printf("    EFX reverb        %s  (s_alReverb %d)\n",
+        (s_al_efx.available && s_alReverb && s_alReverb->integer)
+            ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
+            : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
+        s_alReverb ? s_alReverb->integer : 0);
 
-    Com_Printf("  Mix CVars:\n");
-    Com_Printf("    s_alReverb        %d  (EFX reverb %s)\n",
-        s_alReverb     ? s_alReverb->integer       : 0,
-        (s_alReverb && s_alReverb->integer) ? "on" : "off");
-    Com_Printf("    s_alReverbGain    %.2f  (wet slot gain)\n",
-        s_alReverbGain  ? s_alReverbGain->value  : 0.20f);
-    Com_Printf("    s_alReverbDecay   %.2f  (decay s, LATCH)\n",
-        s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
-    Com_Printf("    s_alDynamicReverb %d  (ray-traced env %s)\n",
-        s_alDynamicReverb ? s_alDynamicReverb->integer : 0,
-        (s_alDynamicReverb && s_alDynamicReverb->integer) ? "on" : "off");
-    Com_Printf("    s_alDebugReverb   %d  (debug output: 0=off 1=params 2=verbose)\n",
-        s_alDebugReverb ? s_alDebugReverb->integer : 0);
-    Com_Printf("    s_alOcclusion     %d  (occlusion+direction %s)\n",
-        s_alOcclusion   ? s_alOcclusion->integer : 1,
-        (s_alOcclusion && s_alOcclusion->integer) ? "on" : "off");
-    Com_Printf("    s_alMaxDist       %.0f  (attenuation distance)\n",
-        s_alMaxDist     ? s_alMaxDist->value     : 1330.f);
+    /* Dynamic reverb */
+    Com_Printf("    Dynamic reverb    %s  (s_alDynamicReverb %d)\n",
+        (s_al_efx.available && s_alReverb && s_alReverb->integer &&
+         s_alDynamicReverb && s_alDynamicReverb->integer)
+            ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
+            : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
+        s_alDynamicReverb ? s_alDynamicReverb->integer : 0);
 
-    Com_Printf("  Volume groups (defaults balance well across most maps):\n");
+    /* Occlusion — traces + lowpass filter or gain reduction per source */
+    Com_Printf("    Occlusion         %s  (s_alOcclusion %d)\n",
+        (s_alOcclusion && s_alOcclusion->integer)
+            ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
+            : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
+        s_alOcclusion ? s_alOcclusion->integer : 0);
+
+    /* AL_DIRECT_CHANNELS_SOFT — bypasses HRTF on local sources (good) */
+    Com_Printf("    DirectChannels    %s  (AL_SOFT_direct_channels%s)\n",
+        s_al_directChannels ? S_COLOR_GREEN "ON " S_COLOR_WHITE
+                            : S_COLOR_YELLOW "OFF" S_COLOR_WHITE,
+        s_al_directChannels ? " available" : " not available");
+
+    Com_Printf("\n");
+
+    /* Quick passthrough verdict */
+    {
+        qboolean hrtfOn  = (hrtfStatus == ALC_HRTF_ENABLED_SOFT);
+        qboolean passthrough =
+            !hrtfOn &&
+            !s_al_efx.available &&
+            !(s_alOcclusion && s_alOcclusion->integer);
+        Com_Printf("  Passthrough check: %s\n",
+            passthrough
+                ? S_COLOR_GREEN "PASS — HRTF off, EFX off, occlusion off.  "
+                  "Signal path is: PCM → distance model → stereo pan → output." S_COLOR_WHITE
+                : S_COLOR_YELLOW "PARTIAL — one or more features still active (see above)" S_COLOR_WHITE);
+    }
+
+    Com_Printf("\n");
+    Com_Printf("  Volume groups:\n");
     Com_Printf("    s_alVolSelf   %.2f  (own player/weapon/breath, max 1.5)\n",
         s_alVolSelf  ? s_alVolSelf->value  : 1.0f);
     Com_Printf("    s_alVolOther  %.2f  (other players/ents,       max 1.0)\n",
@@ -2896,6 +2948,12 @@ static void S_AL_SoundInfo( void )
         s_alVolUI    ? s_alVolUI->value    : 0.8f);
     Com_Printf("    s_musicVolume %.2f  (map background music)\n",
         s_musicVolume ? s_musicVolume->value : 0.25f);
+    Com_Printf("    s_alReverbGain    %.2f  (reverb wet level)\n",
+        s_alReverbGain  ? s_alReverbGain->value  : 0.20f);
+    Com_Printf("    s_alReverbDecay   %.2f s  (decay, LATCH)\n",
+        s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
+    Com_Printf("    s_alMaxDist       %.0f  (attenuation distance)\n",
+        s_alMaxDist ? s_alMaxDist->value : 1330.f);
 
     {
         ALCint ambiOrder = 0;
@@ -2954,10 +3012,8 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alEFX = Cvar_Get("s_alEFX", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alEFX, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alEFX, "Enable ALC_EXT_EFX (occlusion filters, reverb slots). "
-        "Set to 0 to skip EFX initialisation entirely — disables all filter objects and "
-        "auxiliary sends so the source signal path is completely unprocessed. "
-        "Use for isolating whether EFX is contributing to audio quality issues. "
-        "Requires vid_restart (LATCH). Default 1.");
+        "0 = skip EFX init entirely; no filter objects or aux sends on any source. "
+        "Use to isolate EFX as a cause of audio issues. Requires vid_restart (LATCH).");
     /* s_alMaxDist: default matches the vanilla dma max-audible distance.
      * Values below 1330 are clamped to 1330 by the distance-model setup. */
     s_alMaxDist = Cvar_Get("s_alMaxDist", "1330", CVAR_ARCHIVE_ND);
@@ -3162,10 +3218,9 @@ qboolean S_AL_Init( soundInterface_t *si )
         qalcGetIntegerv(s_al_device, ALC_HRTF_STATUS_SOFT, 1, &hrtfStatus);
         s_al_hrtf = (hrtfStatus == ALC_HRTF_ENABLED_SOFT);
 
-        /* Layer 3: alcResetDeviceSoft — if HRTF wasn't granted at creation
+        /* Layer 3 enable: if HRTF wasn't granted at context creation
          * (e.g. OpenAL Soft auto-disabled it for a non-headphone device),
-         * re-request it explicitly.  This mirrors what alsoft-config.exe does
-         * when "Enable HRTF" is checked. */
+         * re-request it explicitly when the user wants HRTF on. */
         if (!s_al_hrtf && s_alHRTF->integer && qalcResetDeviceSoft) {
             ALCint resetAttribs[] = {
                 ALC_HRTF_SOFT, ALC_TRUE,
@@ -3177,6 +3232,28 @@ qboolean S_AL_Init( soundInterface_t *si )
                 if (s_al_hrtf)
                     Com_DPrintf("S_AL: HRTF enabled via alcResetDeviceSoft\n");
             }
+        }
+
+        /* Layer 3 disable: if HRTF is still active despite s_alHRTF=0 and the
+         * explicit ALC_HRTF_SOFT=ALC_FALSE context attr (e.g. a system-wide
+         * alsoft.conf override), force it off via alcResetDeviceSoft.
+         * Without this, the user has no way to guarantee HRTF is truly off
+         * short of editing alsoft.conf manually. */
+        if (s_al_hrtf && !s_alHRTF->integer && qalcResetDeviceSoft) {
+            ALCint resetAttribs[] = {
+                ALC_HRTF_SOFT, ALC_FALSE,
+                0
+            };
+            if (qalcResetDeviceSoft(s_al_device, resetAttribs)) {
+                qalcGetIntegerv(s_al_device, ALC_HRTF_STATUS_SOFT, 1, &hrtfStatus);
+                s_al_hrtf = (hrtfStatus == ALC_HRTF_ENABLED_SOFT);
+            }
+            if (s_al_hrtf)
+                Com_Printf(S_COLOR_YELLOW
+                    "S_AL: WARNING: HRTF still active despite s_alHRTF 0 — "
+                    "check alsoft.conf or driver settings\n");
+            else
+                Com_DPrintf("S_AL: HRTF forced off via alcResetDeviceSoft\n");
         }
     }
 
