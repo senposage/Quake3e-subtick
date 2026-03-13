@@ -193,10 +193,10 @@ static float					s_dmaHD_limiterGain = 1.0f;
 
 // Minimum output samples to fade to zero at the end of a resampled buffer.
 // The actual fade length is computed adaptively from the step scale (see
-// dmaHD_ResampleSfx) so that it always covers the Hermite lookahead
-// contamination regardless of the output rate WASAPI reports.  This constant
-// acts as a floor: even at the lowest supported upsampling ratio the fade is
-// at least 16 samples long.
+// dmaHD_ResampleSfx) so that it always covers the boundary-wraparound
+// contamination from ALL interpolation modes regardless of the output rate
+// WASAPI reports.  This constant acts as a floor: even at the lowest
+// supported upsampling ratio the fade is at least 16 samples long.
 #define DMAHD_ENDPAD_MIN   16
 
 // Tracks the last s_soundtime value processed by dmaHD_Update_Mix so that
@@ -422,6 +422,12 @@ static int dmaHD_GetNoInterpolationSample(float t, int samples, byte *data,
     // Get points
     x = (int)t;
 
+    // Round to nearest: if the fractional part is > 0.5, advance to the next
+    // sample.  At the last valid position (t ≈ samples - stepscale), this
+    // round-up makes x = samples, which dmaHD_GetSampleRaw wraps to 0 (the
+    // start of the sound).  This is the same modulo-wraparound that affects
+    // the Hermite/cubic/linear paths — setting dmaHD_interpolation 0 does
+    // NOT avoid it.  The end-of-buffer fade in dmaHD_ResampleSfx is the fix.
     if (FLOAT_DECIMAL_PART(t) > 0.5) x++;
 
     return dmaHD_GetSampleRaw(x, samples, data);
@@ -507,36 +513,54 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
     }
 
     /* --- End-of-buffer boundary fix -------------------------------------------
-     * The 4-point Hermite interpolator reads x+1 and x+2 beyond the last
-     * valid input sample; dmaHD_GetSampleRaw wraps those indices back to 0
-     * (loop semantics).  For a non-looping sound this contaminates the last
-     * N output samples with beginning-of-sound amplitude.
+     * ROOT CAUSE: dmaHD_GetSampleRaw (all four _16bitMono/_8bitMono/etc.
+     * variants) wraps out-of-bounds indices modulo soundLength:
      *
-     * The no-interpolation path used for the bass sub-buffer also rounds up
-     * at the boundary (FLOAT_DECIMAL_PART > 0.5 → index++ → wraps to 0),
-     * affecting the very last bass sample the same way.
+     *     if (index >= samples) index -= samples;  // wraps to 0
      *
-     * Impact is most severe on silence-padded WAV files (e.g. a 1.5-second
-     * ding stored in a 4-second file): the 2.5 seconds of trailing zeros keep
-     * the DMA buffer at silence, so when the last output sample suddenly
-     * carries the attack amplitude the hardware produces a loud click/pop the
-     * instant playback ends — reproducibly at exactly 3-4 s after the kill.
+     * This is the correct behaviour for seamless-loop sounds, but for a
+     * non-looping sound it means that whenever any interpolation or rounding
+     * step reads one index past the end of the buffer, it silently returns
+     * the FIRST sample of the sound (the attack peak) instead of silence.
      *
-     * The number of contaminated output samples is ceil(2 / stepscale) because
-     * the kernel reads 2 input samples ahead and each input sample spans
-     * 1/stepscale output samples.  stepscale = inrate / dma.speed, so the
-     * count scales with the output rate: at 48 kHz (22 kHz source) it is ~5;
-     * at 96 kHz it is ~9; at 192 kHz it is ~18.  dma.speed is set from
-     * WASAPI's GetMixFormat at init time and may be any rate the hardware
-     * reports — a fixed constant would under-count at high output rates.
+     * Every interpolation mode triggers this at the final output sample:
      *
-     * Fix: compute n_pad adaptively from stepscale, then linearly fade the
-     * last n_pad output samples of both sub-buffers to zero.  For sounds that
-     * already decay to silence the fade is imperceptible; for others it adds
-     * at most ~0.5 ms of extra tail even at 192 kHz — inaudible.
+     *   • Hermite (dmaHD_interpolation 1/default): kernel reads x+1 and x+2;
+     *     at the last position both exceed soundLength and wrap to 0 and 1.
+     *
+     *   • No-interpolation (dmaHD_interpolation 0): the round-up
+     *     `if (FLOAT_DECIMAL_PART(t) > 0.5) x++` advances x from
+     *     soundLength-1 to soundLength, which dmaHD_GetSampleRaw then wraps
+     *     to 0.  Setting dmaHD_interpolation 0 does NOT avoid the click.
+     *
+     *   • Linear (2): reads x+1, same wrap as Hermite (one sample).
+     *   • Cubic (3): reads x+1 and x+2, same as Hermite.
+     *
+     * The bass sub-buffer is always filled with dmaHD_GetNoInterpolationSample
+     * and has the same round-up wrap.
+     *
+     * IMPACT: worst on silence-padded WAV files (e.g. a 1.5 s ding stored in
+     * a 4 s file): the 2.5 s of trailing zeros keep the DMA buffer at silence,
+     * so the single spike at the last output sample — a step from 0 to
+     * ~attack_peak × hp_a — is immediately audible as a loud click/pop the
+     * instant playback ends.  Reproducible at exactly 3-4 s after the kill,
+     * in both channels, regardless of dmaHD_interpolation setting.
+     *
+     * FIX: after the resampling loop, linearly fade the last n_pad samples of
+     * both sub-buffers (high-freq and bass) to zero.  The last sample is
+     * forced to exactly 0, eliminating the spike at the buffer boundary for
+     * all interpolation modes.  n_pad is computed from stepscale to cover the
+     * full Hermite lookahead at any WASAPI output rate (see below).
      */
     {
-        /* ceilf(2 / stepscale) + 4 safety margin; floor of DMAHD_ENDPAD_MIN */
+        /* n_pad = ceilf(2 / stepscale) + 4 covers all interpolation modes.
+         * The worst-case lookahead is Hermite (reads x+1 and x+2 = 2 input
+         * samples past the end), each spanning 1/stepscale output samples.
+         * The no-interpolation and bass paths (round-up wraps 1 input sample)
+         * are covered by the +4 margin.  Floored at DMAHD_ENDPAD_MIN.
+         * dma.speed comes from WASAPI GetMixFormat and can be any supported
+         * rate (44100, 48000, 96000, 192000 Hz); adaptive sizing ensures full
+         * coverage at high output rates where a fixed constant would fail. */
         int n_pad = (stepscale > 0.0f) ? (int)ceilf(2.0f / stepscale) + 4 : DMAHD_ENDPAD_MIN;
         int n, div, i;
         if (n_pad < DMAHD_ENDPAD_MIN) n_pad = DMAHD_ENDPAD_MIN;

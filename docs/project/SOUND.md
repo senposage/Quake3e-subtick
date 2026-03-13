@@ -359,41 +359,46 @@ The filter coefficient scaling (`44100.0f / dma.speed`) introduced in PR 67 is m
 **Symptoms (PRs #69, #70, #73, issue continuation):**
 A loud click/pop is audible in both channels at the exact moment a kill-sound finishes playing — approximately 3–4 seconds after a kill event on Windows with WASAPI. The sound is a 16-bit PCM stereo WAV file at 22 050 Hz, approximately 4 seconds long: ~1.5 seconds of actual ding audio followed by ~2.5 seconds of digital silence (zero samples). The click is reproducible on every kill.
 
-**Root cause — Hermite interpolation boundary wraparound (`dmaHD_ResampleSfx`):**
+**Root cause — modulo wraparound in `dmaHD_GetSampleRaw` (all interpolation modes):**
 
-The 4-point Hermite interpolator (`dmaHD_GetInterpolatedSampleHermite4pt3oX`) reads four neighbouring input samples — `x−1`, `x`, `x+1`, `x+2` — and passes them to `dmaHD_GetSampleRaw_*`. That function uses **modulo wrapping** for out-of-range indices (designed for seamless-loop sounds):
+Every `dmaHD_GetSampleRaw_*` variant uses **modulo wrapping** for out-of-bounds indices (correct for seamless-loop sounds, wrong for non-looping ones):
 
 ```c
-if (index < 0) index += samples;
-else if (index >= samples) index -= samples;  // wraps to 0 for index == samples
+if (index >= samples) index -= samples;  // wraps to 0 for index == samples
 ```
 
-At the very last output sample, `x = soundLength − 1` (last valid input sample), so:
+This is triggered at the final output sample by **every** interpolation mode:
 
-- `x+1 = soundLength` → wraps to **0** (first sample = sharp attack peak of the ding)
-- `x+2 = soundLength + 1` → wraps to **1** (also near the attack peak)
+| Mode (`dmaHD_interpolation`) | How it triggers the wrap |
+|------------------------------|--------------------------|
+| **0 — no-interpolation** | `FLOAT_DECIMAL_PART(t) > 0.5` rounds `x` up from `soundLength-1` to `soundLength` → wraps to 0 |
+| **1 — Hermite (default)** | kernel reads `x+1` and `x+2`; both exceed `soundLength` → wrap to 0 and 1 |
+| **2 — linear** | reads `x+1`; exceeds `soundLength` → wraps to 0 |
+| **3 — cubic** | reads `x+1` and `x+2`; same as Hermite |
 
-The `dmaHD_GetNoInterpolationSample` path used for the bass sub-buffer also wraps: at the final output sample, `FLOAT_DECIMAL_PART > 0.5` causes `index++` which makes `index = soundLength`, wrapping to 0.
+> **Setting `dmaHD_interpolation 0` does NOT avoid the click.** The no-interpolation round-up triggers the same wrap-to-0 that the Hermite lookahead does. This was confirmed by testing: the click was present with `dmaHD_interpolation 0`, `1`, and the default setting.
+
+The bass sub-buffer is always filled with `dmaHD_GetNoInterpolationSample` (mode 0 behaviour) regardless of `dmaHD_interpolation`, and has the same issue.
 
 **Why silence-padded files make this maximally audible:**
 
 With 2.5 seconds of trailing zeros in the source file:
 - Output samples `outcount − 120 000` through `outcount − 2` are all zero (silence)
-- Output sample `outcount − 1` (the last) is the Hermite-interpolated combination of near-zero end-of-sound samples and sample[0] (the large attack peak) — a value of roughly **±15 000** for a typical ding sound
-- The hardware DMA plays 2.5 s of silence, then encounters this spike, then drops to silence again → **step discontinuity → loud click in both channels**
+- Output sample `outcount − 1` (the last) has `sample[0]` (attack peak) injected via wraparound; the high-pass filter then outputs `hp_a × attack_peak ≈ attack_peak` — roughly **±15 000** for a typical ding sound
+- The hardware DMA plays 2.5 s of silence, then encounters this spike, then drops to silence → **step discontinuity → loud click in both channels**
 
 The timing matches exactly: `outcount / dma.speed ≈ 192 000 / 48 000 = 4.0 s` after the sound starts.
 
 **Fix applied (`dmaHD_ResampleSfx`):**
 
-After the main resampling loop, a linear fade-out is applied to the last `n_pad` samples of both the high-frequency and bass sub-buffers. `n_pad` is computed **adaptively** from `stepscale = inrate / dma.speed` so it always covers the exact number of output samples the Hermite kernel can contaminate, regardless of the output rate that WASAPI's `GetMixFormat` reports at runtime (which may be 44100, 48000, 96000, or 192000 Hz depending on the hardware):
+After the main resampling loop, a linear fade-out is applied to the last `n_pad` samples of both the high-frequency and bass sub-buffers. `n_pad` is computed **adaptively** from `stepscale = inrate / dma.speed` so it always covers the wraparound-contaminated samples across all interpolation modes and at any output rate that WASAPI's `GetMixFormat` may report (44100, 48000, 96000, or 192000 Hz):
 
-| Source rate | WASAPI rate | stepscale | Hermite contamination | n_pad used |
-|-------------|-------------|-----------|-----------------------|------------|
+| Source rate | WASAPI rate | stepscale | Max contamination | n_pad used |
+|-------------|-------------|-----------|-------------------|------------|
 | 22 050 Hz | 44 100 Hz | 0.500 | ~4 samples | 16 (floor) |
 | 22 050 Hz | 48 000 Hz | 0.459 | ~5 samples | 16 (floor) |
 | 22 050 Hz | 96 000 Hz | 0.230 | ~9 samples | 16 (floor) |
-| 22 050 Hz | 192 000 Hz | 0.115 | ~18 samples | **21** |
+| 22 050 Hz | 192 000 Hz | 0.115 | ~18 samples | **22** |
 | 11 025 Hz | 48 000 Hz | 0.230 | ~9 samples | 16 (floor) |
 | 8 000 Hz | 48 000 Hz | 0.167 | ~12 samples | 16 (floor) |
 
