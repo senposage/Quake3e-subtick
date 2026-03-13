@@ -117,6 +117,7 @@ static ALvoid    (AL_APIENTRY *qalSourcef)(ALuint sid, ALenum param, ALfloat val
 static ALvoid    (AL_APIENTRY *qalSource3f)(ALuint sid, ALenum param, ALfloat v1, ALfloat v2, ALfloat v3);
 static ALvoid    (AL_APIENTRY *qalSourcefv)(ALuint sid, ALenum param, const ALfloat *values);
 static ALvoid    (AL_APIENTRY *qalSourcei)(ALuint sid, ALenum param, ALint value);
+static ALvoid    (AL_APIENTRY *qalSource3i)(ALuint sid, ALenum param, ALint v1, ALint v2, ALint v3);
 static ALvoid    (AL_APIENTRY *qalSourceiv)(ALuint sid, ALenum param, const ALint *values);
 static ALvoid    (AL_APIENTRY *qalGetSourcef)(ALuint sid, ALenum param, ALfloat *value);
 static ALvoid    (AL_APIENTRY *qalGetSource3f)(ALuint sid, ALenum param, ALfloat *v1, ALfloat *v2, ALfloat *v3);
@@ -161,6 +162,24 @@ static LPALCRESETDEVICESOFT  qalcResetDeviceSoft  = NULL;  /* re-configure devic
 static LPALCGETSTRINGISOFT   qalcGetStringiSOFT   = NULL;  /* enumerate HRTF datasets */
 
 /* =========================================================================
+ * ALC_EXT_EFX function pointers (all optional — graceful no-op if absent)
+ * =========================================================================
+ */
+static LPALGENEFFECTS                 qalGenEffects;
+static LPALDELETEEFFECTS              qalDeleteEffects;
+static LPALEFFECTI                    qalEffecti;
+static LPALEFFECTF                    qalEffectf;
+static LPALEFFECTFV                   qalEffectfv;
+static LPALGENFILTERS                 qalGenFilters;
+static LPALDELETEFILTERS              qalDeleteFilters;
+static LPALFILTERI                    qalFilteri;
+static LPALFILTERF                    qalFilterf;
+static LPALGENAUXILIARYEFFECTSLOTS    qalGenAuxiliaryEffectSlots;
+static LPALDELETEAUXILIARYEFFECTSLOTS qalDeleteAuxiliaryEffectSlots;
+static LPALAUXILIARYEFFECTSLOTI       qalAuxiliaryEffectSloti;
+static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
+
+/* =========================================================================
  * Section 4 — Internal data structures
  * =========================================================================
  */
@@ -172,6 +191,13 @@ static LPALCGETSTRINGISOFT   qalcGetStringiSOFT   = NULL;  /* enumerate HRTF dat
 #define S_AL_MUSIC_BUFSZ    (32 * 1024)         /* 32 KiB per streaming buf */
 #define S_AL_RAW_BUFFERS    8                   /* raw-samples stream queue */
 #define S_AL_RAW_BUFSZ      (16 * 1024)         /* 16 KiB per raw buf */
+
+/* Q3/dmaHD-derived distance constants (replicated from snd_dma.c / snd_dmahd.c):
+ *   SOUND_FULLVOLUME = 80  — within this radius gain = 1.0
+ *   SOUND_ATTENUATE  = 0.0008 — linear falloff rate beyond full-volume radius
+ * Max audible distance = SOUND_FULLVOLUME + 1/SOUND_ATTENUATE = 1330 game units. */
+#define S_AL_SOUND_FULLVOLUME   80.0f
+#define S_AL_SOUND_MAXDIST      1330.0f   /* 80 + 1/0.0008 */
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
@@ -201,6 +227,8 @@ typedef struct {
     float           master_vol;
     qboolean        isPlaying;
     qboolean        isLocal;        /* non-spatialized */
+    float           occlusionGain;  /* [0..1] — 1.0 = unoccluded, 0.1 = fully blocked */
+    int             occlusionTick;  /* s_al_loopFrame when last computed */
 } alSrc_t;
 
 static alSrc_t  s_al_src[S_AL_MAX_SRC];
@@ -253,6 +281,21 @@ static ALCcontext *s_al_context = NULL;
 static qboolean s_al_started  = qfalse;
 static qboolean s_al_muted    = qfalse;
 static qboolean s_al_hrtf     = qfalse; /* ALC_HRTF_SOFT active */
+static qboolean s_al_inwater  = qfalse;
+
+static vec3_t s_al_listener_origin;   /* updated in S_AL_Respatialize */
+
+typedef struct {
+    qboolean available;       /* ALC_EXT_EFX present and procs loaded */
+    ALuint   reverbEffect;    /* AL_EFFECT_EAXREVERB (or AL_EFFECT_REVERB fallback) */
+    ALuint   reverbSlot;      /* auxiliary effect slot for reverb send */
+    ALuint   underwaterSlot;  /* auxiliary slot for underwater low-pass */
+    ALuint   underwaterEffect;/* AL_EFFECT_EAXREVERB for water acoustics */
+    ALuint   occlusionFilter[S_AL_MAX_SRC];
+    qboolean hasEAXReverb;    /* AL_EFFECT_EAXREVERB available (vs plain reverb) */
+} alEfx_t;
+
+static alEfx_t s_al_efx;
 
 /* Cvars */
 static cvar_t *s_alDevice;
@@ -327,6 +370,7 @@ static qboolean S_AL_LoadLibrary( void )
     AL_LOAD_FN(alSource3f);
     AL_LOAD_FN(alSourcefv);
     AL_LOAD_FN(alSourcei);
+    AL_LOAD_FN(alSource3i);
     AL_LOAD_FN(alSourceiv);
     AL_LOAD_FN(alGetSourcef);
     AL_LOAD_FN(alGetSource3f);
@@ -526,6 +570,11 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
 
     fmt = S_AL_Format(info.width, info.channels);
 
+    /* B-format Ambisonics: 4-channel files (W+X+Y+Z) loaded as BFORMAT3D */
+    if (info.channels == 4) {
+        fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
+    }
+
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
     if (S_AL_CheckError("alGenBuffers")) {
@@ -618,6 +667,27 @@ static int S_AL_GetFreeSource( void )
     return -1;
 }
 
+/* Trace a ray from the listener to the source through solid BSP geometry.
+ * Returns a gain multiplier: 1.0 = line-of-sight, 0.1 = fully occluded.
+ * We include CONTENTS_PLAYERCLIP so that player-solid geometry (stairs,
+ * clip brushes) also attenuates sound realistically. */
+static float S_AL_ComputeOcclusion( const vec3_t srcOrigin )
+{
+    trace_t tr;
+    vec3_t  listenerOrg;
+
+    VectorCopy(s_al_listener_origin, listenerOrg);
+    CM_BoxTrace(&tr, listenerOrg, srcOrigin,
+                vec3_origin, vec3_origin,
+                0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
+
+    if (tr.fraction >= 1.0f)
+        return 1.0f;           /* clear line of sight */
+
+    /* Linear blend: solid wall = 0.1 (muffled but audible), partial = blend */
+    return 0.1f + 0.9f * tr.fraction;
+}
+
 /* Configure a source for 3D or local playback. */
 static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                             const vec3_t origin, qboolean fixed_origin,
@@ -636,6 +706,8 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->loopSound    = qfalse;
     src->allocTime    = Com_Milliseconds();
     src->isPlaying    = qtrue;
+    src->occlusionGain = 1.0f;
+    src->occlusionTick = 0;
 
     if (origin)
         VectorCopy(origin, src->origin);
@@ -652,12 +724,24 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         qalSource3f(sid, AL_POSITION, 0.0f, 0.0f, 0.0f);
         qalSourcef(sid, AL_ROLLOFF_FACTOR, 0.0f);
     } else {
+        float maxDist = s_alMaxDist ? s_alMaxDist->value : S_AL_SOUND_MAXDIST;
+        if (maxDist < S_AL_SOUND_MAXDIST) maxDist = S_AL_SOUND_MAXDIST;
         qalSourcei(sid, AL_SOURCE_RELATIVE, AL_FALSE);
         qalSource3f(sid, AL_POSITION, src->origin[0], src->origin[1], src->origin[2]);
-        qalSourcef(sid, AL_ROLLOFF_FACTOR,  1.0f);
-        qalSourcef(sid, AL_REFERENCE_DISTANCE, 300.0f);
-        qalSourcef(sid, AL_MAX_DISTANCE,
-            s_alMaxDist ? s_alMaxDist->value : 1024.0f);
+        qalSourcef(sid, AL_ROLLOFF_FACTOR,      1.0f);
+        qalSourcef(sid, AL_REFERENCE_DISTANCE,  S_AL_SOUND_FULLVOLUME);
+        qalSourcef(sid, AL_MAX_DISTANCE,        maxDist);
+        if (s_al_efx.available) {
+            /* Reverb send (auxiliary send 0) */
+            qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                        (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
+            /* Occlusion direct filter (initially pass-through) */
+            qalSourcei(sid, AL_DIRECT_FILTER,
+                       (ALint)s_al_efx.occlusionFilter[idx]);
+            qalSourcei(sid, AL_AUXILIARY_SEND_FILTER_GAIN_AUTO,   AL_TRUE);
+            qalSourcei(sid, AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO, AL_TRUE);
+            qalSourcei(sid, AL_DIRECT_FILTER_GAINHF_AUTO,         AL_FALSE);
+        }
     }
 }
 
@@ -756,6 +840,112 @@ static void S_AL_MusicUpdate( void )
  * =========================================================================
  */
 
+/* Load EFX entry points via alcGetProcAddress (device-specific),
+ * create the reverb + underwater auxiliary slots, and per-source
+ * occlusion low-pass filters. */
+static void S_AL_InitEFX( void )
+{
+#define EFX_PROC(T, n) q##n = (T)qalcGetProcAddress(s_al_device, #n)
+    int i;
+    ALint maxSends = 0;
+
+    Com_Memset(&s_al_efx, 0, sizeof(s_al_efx));
+
+    if (!qalcIsExtensionPresent(s_al_device, "ALC_EXT_EFX"))
+        return;
+
+    EFX_PROC(LPALGENEFFECTS,                 alGenEffects);
+    EFX_PROC(LPALDELETEEFFECTS,              alDeleteEffects);
+    EFX_PROC(LPALEFFECTI,                    alEffecti);
+    EFX_PROC(LPALEFFECTF,                    alEffectf);
+    EFX_PROC(LPALEFFECTFV,                   alEffectfv);
+    EFX_PROC(LPALGENFILTERS,                 alGenFilters);
+    EFX_PROC(LPALDELETEFILTERS,              alDeleteFilters);
+    EFX_PROC(LPALFILTERI,                    alFilteri);
+    EFX_PROC(LPALFILTERF,                    alFilterf);
+    EFX_PROC(LPALGENAUXILIARYEFFECTSLOTS,    alGenAuxiliaryEffectSlots);
+    EFX_PROC(LPALDELETEAUXILIARYEFFECTSLOTS, alDeleteAuxiliaryEffectSlots);
+    EFX_PROC(LPALAUXILIARYEFFECTSLOTI,       alAuxiliaryEffectSloti);
+    EFX_PROC(LPALAUXILIARYEFFECTSLOTF,       alAuxiliaryEffectSlotf);
+#undef EFX_PROC
+
+    if (!qalGenEffects || !qalGenFilters || !qalGenAuxiliaryEffectSlots)
+        return;
+
+    qalGetError();  /* clear */
+
+    /* Reverb effect — prefer EAX reverb, fall back to standard reverb */
+    qalGenEffects(1, &s_al_efx.reverbEffect);
+    qalEffecti(s_al_efx.reverbEffect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
+    if (qalGetError() == AL_NO_ERROR) {
+        s_al_efx.hasEAXReverb = qtrue;
+        /* Medium-sized indoor room — sensible default for URT maps */
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DENSITY,           0.5f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DIFFUSION,         0.85f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAIN,              0.32f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINHF,            0.89f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINLF,            1.0f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,        1.49f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_HFRATIO,     0.83f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN,  0.05f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_DELAY, 0.007f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN,  1.26f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_DELAY, 0.011f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_AIR_ABSORPTION_GAINHF, 0.994f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_ROOM_ROLLOFF_FACTOR,   0.0f);
+        qalEffecti(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_HFLIMIT,    AL_TRUE);
+    } else {
+        /* Fallback: plain reverb */
+        qalEffecti(s_al_efx.reverbEffect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+        qalGetError();
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DENSITY,    0.5f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DIFFUSION,  0.85f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAIN,       0.32f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAINHF,     0.89f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME, 1.49f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,  0.05f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_DELAY, 0.007f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,  1.26f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_DELAY, 0.011f);
+    }
+    qalGenAuxiliaryEffectSlots(1, &s_al_efx.reverbSlot);
+    qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
+                            (ALint)s_al_efx.reverbEffect);
+
+    /* Underwater effect */
+    qalGenEffects(1, &s_al_efx.underwaterEffect);
+    if (s_al_efx.hasEAXReverb) {
+        qalEffecti(s_al_efx.underwaterEffect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
+        qalEffectf(s_al_efx.underwaterEffect, AL_EAXREVERB_DENSITY,    0.1f);
+        qalEffectf(s_al_efx.underwaterEffect, AL_EAXREVERB_DIFFUSION,  1.0f);
+        qalEffectf(s_al_efx.underwaterEffect, AL_EAXREVERB_GAIN,       0.1f);
+        qalEffectf(s_al_efx.underwaterEffect, AL_EAXREVERB_GAINHF,     0.1f);
+        qalEffectf(s_al_efx.underwaterEffect, AL_EAXREVERB_DECAY_TIME, 1.5f);
+        qalEffectf(s_al_efx.underwaterEffect, AL_EAXREVERB_DECAY_HFRATIO, 0.1f);
+    } else {
+        qalEffecti(s_al_efx.underwaterEffect, AL_EFFECT_TYPE, AL_EFFECT_REVERB);
+        qalGetError();
+        qalEffectf(s_al_efx.underwaterEffect, AL_REVERB_GAIN,   0.1f);
+        qalEffectf(s_al_efx.underwaterEffect, AL_REVERB_GAINHF, 0.1f);
+    }
+    qalGenAuxiliaryEffectSlots(1, &s_al_efx.underwaterSlot);
+    qalAuxiliaryEffectSloti(s_al_efx.underwaterSlot, AL_EFFECTSLOT_EFFECT,
+                            (ALint)s_al_efx.underwaterEffect);
+
+    /* Per-source occlusion low-pass filters */
+    qalGenFilters(S_AL_MAX_SRC, s_al_efx.occlusionFilter);
+    for (i = 0; i < S_AL_MAX_SRC; i++) {
+        qalFilteri(s_al_efx.occlusionFilter[i], AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+        qalFilterf(s_al_efx.occlusionFilter[i], AL_LOWPASS_GAIN,   1.0f);
+        qalFilterf(s_al_efx.occlusionFilter[i], AL_LOWPASS_GAINHF, 1.0f);
+    }
+
+    qalcGetIntegerv(s_al_device, ALC_MAX_AUXILIARY_SENDS, 1, &maxSends);
+    s_al_efx.available = qtrue;
+    Com_Printf("S_AL: EFX available (%s reverb, %d aux sends)\n",
+        s_al_efx.hasEAXReverb ? "EAX" : "standard", maxSends);
+}
+
 static void S_AL_Shutdown( void )
 {
     int i;
@@ -787,6 +977,19 @@ static void S_AL_Shutdown( void )
     }
     qalDeleteSources(1, &s_al_raw.source);
     qalDeleteBuffers(S_AL_RAW_BUFFERS, s_al_raw.buffers);
+
+    /* EFX cleanup */
+    if (s_al_efx.available) {
+        int j;
+        qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.reverbSlot);
+        qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.underwaterSlot);
+        qalDeleteEffects(1, &s_al_efx.reverbEffect);
+        qalDeleteEffects(1, &s_al_efx.underwaterEffect);
+        for (j = 0; j < s_al_numSrc; j++)
+            if (s_al_efx.occlusionFilter[j])
+                qalDeleteFilters(1, &s_al_efx.occlusionFilter[j]);
+        Com_Memset(&s_al_efx, 0, sizeof(s_al_efx));
+    }
 
     /* Sfx */
     S_AL_FreeSfx();
@@ -1050,6 +1253,8 @@ static void S_AL_Respatialize( int entityNum, const vec3_t origin,
 
     /* Listener position */
     qalListener3f(AL_POSITION, origin[0], origin[1], origin[2]);
+    VectorCopy(origin, s_al_listener_origin);
+    s_al_inwater = (inwater != 0);
 
     /* Orientation: forward then up vectors */
     orient[0] =  axis[0][0];   /* forward X */
@@ -1097,6 +1302,21 @@ static void S_AL_Update( int msec )
         S_AL_MusicUpdate();
     }
 
+    /* Switch all non-local sources between normal reverb and underwater effect */
+    if (s_al_efx.available) {
+        static qboolean lastInwater = qfalse;
+        if (s_al_inwater != lastInwater) {
+            int j;
+            ALuint slot = s_al_inwater ? s_al_efx.underwaterSlot : s_al_efx.reverbSlot;
+            for (j = 0; j < s_al_numSrc; j++) {
+                if (!s_al_src[j].isPlaying || s_al_src[j].isLocal) continue;
+                qalSource3i(s_al_src[j].source, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)slot, 0, (ALint)AL_FILTER_NULL);
+            }
+            lastInwater = s_al_inwater;
+        }
+    }
+
     /* Reap stopped sources */
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
@@ -1104,6 +1324,27 @@ static void S_AL_Update( int msec )
         if (state == AL_STOPPED) {
             qalSourcei(s_al_src[i].source, AL_BUFFER, 0);
             s_al_src[i].isPlaying = qfalse;
+            continue;
+        }
+        /* Occlusion: update every 4 frames to amortise CM_BoxTrace cost */
+        if (!s_al_src[i].isLocal) {
+            if ((s_al_loopFrame - s_al_src[i].occlusionTick) >= 4) {
+                float occ = S_AL_ComputeOcclusion(s_al_src[i].origin);
+                s_al_src[i].occlusionGain = occ;
+                s_al_src[i].occlusionTick = s_al_loopFrame;
+
+                if (s_al_efx.available) {
+                    qalFilterf(s_al_efx.occlusionFilter[i],
+                               AL_LOWPASS_GAIN,   0.25f + 0.75f * occ);
+                    qalFilterf(s_al_efx.occlusionFilter[i],
+                               AL_LOWPASS_GAINHF, occ * occ);
+                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                               (ALint)s_al_efx.occlusionFilter[i]);
+                } else {
+                    qalSourcef(s_al_src[i].source, AL_GAIN,
+                        (s_al_src[i].master_vol / 255.0f) * occ * masterGain);
+                }
+            }
         }
     }
 
@@ -1160,6 +1401,18 @@ static void S_AL_SoundInfo( void )
 
     Com_Printf("  Sources:  %d / %d active\n", s_al_numSrc, S_AL_MAX_SRC);
     Com_Printf("  Sfx:      %d loaded\n", s_al_numSfx);
+
+    Com_Printf("  EFX:      %s (%s reverb)\n",
+        s_al_efx.available ? "enabled" : "not available",
+        s_al_efx.hasEAXReverb ? "EAX" : "standard");
+
+    {
+        ALCint ambiOrder = 0;
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode"))
+            qalcGetIntegerv(s_al_device, ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &ambiOrder);
+        if (ambiOrder > 0)
+            Com_Printf("  Ambisonics: max order %d supported\n", ambiOrder);
+    }
 }
 
 static void S_AL_SoundList( void )
@@ -1192,7 +1445,7 @@ qboolean S_AL_Init( soundInterface_t *si )
 {
     int        i;
     const char *device;
-    ALCint     ctxAttribs[9];
+    ALCint     ctxAttribs[16];
     int        nAttribs = 0;
     ALCint     hrtfStatus = 0;
 
@@ -1254,6 +1507,18 @@ qboolean S_AL_Init( soundInterface_t *si )
             ctxAttribs[nAttribs++] = ALC_TRUE;
         }
     }
+    /* Ambisonic panning: request highest Ambisonic order the device supports. */
+    if (s_alHRTF->integer &&
+        qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
+        ALCint maxOrder = 1;
+        qalcGetIntegerv(s_al_device, ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &maxOrder);
+        if (maxOrder > 3) maxOrder = 3;
+        if (maxOrder >= 1) {
+            ctxAttribs[nAttribs++] = ALC_AMBISONIC_ORDER_SOFT;
+            ctxAttribs[nAttribs++] = maxOrder;
+            Com_DPrintf("S_AL: requesting Ambisonic order %d for HRTF rendering\n", maxOrder);
+        }
+    }
     ctxAttribs[nAttribs] = 0; /* sentinel */
 
     s_al_context = qalcCreateContext(s_al_device, ctxAttribs);
@@ -1302,8 +1567,8 @@ qboolean S_AL_Init( soundInterface_t *si )
             : "S_AL: HRTF disabled (s_alHRTF 0)\n");
     }
 
-    /* Distance model matching Q3 attenuation */
-    qalDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
+    /* Distance model matching Q3 linear attenuation */
+    qalDistanceModel(AL_LINEAR_DISTANCE_CLAMPED);
 
     /* Doppler — OpenAL Soft models this natively when AL_VELOCITY is set */
     if (s_doppler && s_doppler->integer)
@@ -1311,6 +1576,8 @@ qboolean S_AL_Init( soundInterface_t *si )
     else
         qalDopplerFactor(0.0f);
     qalSpeedOfSound(1700.0f);   /* game units/sec, tuned to Q3 scale */
+
+    S_AL_InitEFX();
 
     /* Allocate source pool */
     s_al_numSrc = 0;

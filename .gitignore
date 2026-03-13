@@ -9,4 +9,5 @@ UrbanTerror42_Source/
 .claud
 .git
 build/
-tmp/
+tmp/snd_main.o
+snd_openal.o
