@@ -173,22 +173,25 @@ All EFX entry points are loaded via `alcGetProcAddress(device, ...)` at runtime 
 
 **Per-source occlusion filters**: One `AL_FILTER_LOWPASS` is allocated per source slot at init. The filter is updated by the occlusion trace and attached via `AL_DIRECT_FILTER`.  When a source slot is reused, the filter is **explicitly reset to pass-through** before being attached so that stale attenuation from a previous (possibly occluded) sound never bleeds into the new sound — this was the cause of the sporadic "suppressor" effect on multi-layer weapon events.
 
-**Underwater mode**: When `S_AL_Respatialize` reports `inwater != 0`, all active 3D sources are switched from the reverb slot to the underwater slot in the next `S_AL_Update` tick.
-
 **EFX source wiring** (set in `S_AL_SrcSetup`):
 ```c
 /* Non-local (3-D) sources: */
-alFilterf(occlusionFilter[idx], AL_LOWPASS_GAIN,   1.0f);  /* reset to pass-through */
+alFilterf(occlusionFilter[idx], AL_LOWPASS_GAIN,   1.0f);  /* pre-set to pass-through */
 alFilterf(occlusionFilter[idx], AL_LOWPASS_GAINHF, 1.0f);
 alSource3i(src, AL_AUXILIARY_SEND_FILTER, reverbSlot, 0, AL_FILTER_NULL);
-alSourcei(src,  AL_DIRECT_FILTER, occlusionFilter[idx]);
+alSourcei(src,  AL_DIRECT_FILTER, AL_FILTER_NULL);          /* bypass until first trace */
 alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAIN_AUTO,   AL_TRUE);
 alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO, AL_TRUE);
 alSourcei(src,  AL_DIRECT_FILTER_GAINHF_AUTO,         AL_FALSE);
 
 /* Local (own-player / weapon) sources: */
-alSourcei(src, AL_DIRECT_FILTER, AL_FILTER_NULL);  /* clear any inherited filter */
+alSourcei(src, AL_DIRECT_FILTER,       AL_FILTER_NULL);  /* clear any inherited filter */
+alSourcei(src, AL_DIRECT_CHANNELS_SOFT, AL_TRUE);        /* bypass HRTF — see below */
 ```
+
+> **Why `AL_DIRECT_CHANNELS_SOFT` for local sources**: even a source at `AL_POSITION (0,0,0)` relative to the listener is processed through the HRTF "center" HRIR when HRTF mode is active.  That convolution smears the initial transient attack of weapon sounds (e.g. `de.wav`) and produces a characteristic "wet blanket / lacking punch" coloration.  `AL_DIRECT_CHANNELS_SOFT = AL_TRUE` routes the PCM directly to the stereo output, completely bypassing the HRTF kernel for head-locked sounds.  3D sources (other players' weapons) are not affected — they go through the normal HRTF path for correct directional rendering.
+
+> **Why start 3D sources with `AL_FILTER_NULL`**: attaching the occlusion filter object even at GAIN=1/GAINHF=1 (passthrough) still routes the signal through a biquad, which introduces group-delay coloration on the transient attack.  Starting with `AL_FILTER_NULL` (complete signal bypass) lets the occlusion update tick connect the filter only when actual attenuation is needed.
 
 ### Ambisonic Panning
 
@@ -276,10 +279,12 @@ s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
   (controlled by `s_alOccPosBlend`).  Only `CONTENTS_SOLID` brushes are tested —
   `CONTENTS_PLAYERCLIP` is excluded so invisible movement-constraint geometry on
   slopes and ledges does not cause false muffling of nearby weapon fire.
-- **CHAN_WEAPON proximity bypass**: weapon-channel sources within `s_alOccWeaponDist`
-  (default 160 u) of the listener skip occlusion entirely, covering the gun-muzzle
-  offset (~50–100 u ahead of the player eye) that would otherwise trigger false
-  filter attenuation from nearby slope/clip geometry.
+- **CHAN_WEAPON proximity bypass**: weapon-channel sources and any `sound/weapons/`
+  sound within `s_alOccWeaponDist` (default 160 u) of the listener skip occlusion
+  entirely, covering the gun-muzzle offset (~50–100 u ahead of the player eye) that
+  would otherwise trigger false filter attenuation from nearby slope/clip geometry.
+  The path-based check ensures secondary weapon layers on `CHAN_AUTO` also receive the
+  bypass (e.g. a tail layer played alongside a primary `CHAN_WEAPON` crack).
 - `s_alMaxDist 1330` is the vanilla dma maximum audible radius; sounds beyond
   this distance are inaudible regardless of wall status.
 
@@ -308,7 +313,7 @@ transitions without per-frame CM_BoxTrace overhead:
 | Source distance | Trace interval | Rationale |
 |---|---|---|
 | < 80 u (full-vol zone) | every frame — no trace | Wall impossible at this range; real position used |
-| CHAN_WEAPON < `s_alOccWeaponDist` u | every frame — no trace | Gun-muzzle zone; always pass-through |
+| CHAN_WEAPON or `sound/weapons/` < `s_alOccWeaponDist` u | every frame — no trace | Gun-muzzle zone; always pass-through; covers CHAN_AUTO weapon layers |
 | 80 – 300 u | every frame | Nearby players — maximum HRTF precision |
 | 300 – 600 u | every 4 frames | Medium range |
 | > 600 u | every 8 frames | Far — distance model dominates |

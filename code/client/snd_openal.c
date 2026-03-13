@@ -225,6 +225,12 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
  * the player's own weapon fire even when the sound was emitted as a world sound. */
 #define S_AL_WEAPON_NOOCC_DIST  160.0f
 
+/* Path prefix used to identify weapon sounds by filename.
+ * Sounds under this directory receive the CHAN_WEAPON occlusion bypass when
+ * near the listener, regardless of which channel they were started on. */
+#define S_AL_WEAPON_SOUND_PREFIX        "sound/weapons/"
+#define S_AL_WEAPON_SOUND_PREFIX_LEN    14  /* strlen("sound/weapons/") */
+
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
@@ -384,6 +390,14 @@ static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each fram
 
 /* Set to qtrue by the s_alReset command; cleared on the next probe cycle. */
 static qboolean s_al_reverbReset = qfalse;
+
+/* AL_SOFT_direct_channels: when available, local (head-locked) sources bypass
+ * the HRTF convolution pipeline and route PCM straight to the stereo output.
+ * Without this, even a source at position (0,0,0) relative goes through the
+ * HRTF "center" HRIR, which smears the initial transient of weapon sounds
+ * (e.g. de.wav) and produces the characteristic "wet blanket / no punch"
+ * complaint on weapons like the DE-50. */
+static qboolean s_al_directChannels = qfalse;
 
 /* =========================================================================
  * Section 5 — Library loading helpers
@@ -1053,6 +1067,17 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
             if (s_alDebugReverb && s_alDebugReverb->integer >= 2)
                 Com_Printf(S_COLOR_CYAN "[alfilter] src#%d local: cleared stale filter\n", idx);
         }
+        /* Bypass the HRTF convolution for head-locked (own-player) sounds.
+         * Even at AL_POSITION (0,0,0) relative, OpenAL Soft runs the signal
+         * through the "center" HRIR when HRTF is enabled.  That convolution
+         * smears the initial transient of de.wav and removes the characteristic
+         * crack that defines the DE-50's punch — producing the "wet blanket"
+         * effect.  AL_DIRECT_CHANNELS_SOFT routes the PCM directly to the
+         * stereo output mix, bypassing all spatialization / HRTF entirely.
+         * 3D sources (other players' weapons) are unaffected: they need HRTF
+         * for correct directional rendering. */
+        if (s_al_directChannels)
+            qalSourcei(sid, AL_DIRECT_CHANNELS_SOFT, AL_TRUE);
     } else {
         float maxDist = s_alMaxDist ? s_alMaxDist->value : S_AL_SOUND_MAXDIST;
         if (maxDist < S_AL_SOUND_MAXDIST) maxDist = S_AL_SOUND_MAXDIST;
@@ -1061,6 +1086,11 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         qalSourcef(sid, AL_ROLLOFF_FACTOR,      1.0f);
         qalSourcef(sid, AL_REFERENCE_DISTANCE,  S_AL_SOUND_FULLVOLUME);
         qalSourcef(sid, AL_MAX_DISTANCE,        maxDist);
+        /* If this slot was previously used as a local source, it may have
+         * AL_DIRECT_CHANNELS_SOFT = AL_TRUE left over.  A 3D source must
+         * go through the HRTF/spatialization pipeline, so clear it now. */
+        if (s_al_directChannels)
+            qalSourcei(sid, AL_DIRECT_CHANNELS_SOFT, AL_FALSE);
         if (s_al_efx.available) {
             /* Reverb send (auxiliary send 0) — skip when reverb is disabled */
             if (s_alReverb && s_alReverb->integer) {
@@ -1070,11 +1100,14 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
             }
-            /* Reset the occlusion filter to pass-through before attaching it.
-             * A previous sound on this slot may have left the filter at a
-             * heavily-attenuated state (e.g. a fully-occluded source), which
-             * would make the new sound appear muffled or suppressed until the
-             * occlusion tick resets it on the next update cycle. */
+            /* Pre-set the occlusion filter to pass-through values so the
+             * filter object is ready for the first occlusion update tick.
+             * Start the source with AL_FILTER_NULL (complete bypass) rather
+             * than the filter object: even a biquad at GAIN=1/GAINHF=1
+             * introduces group-delay coloration on the attack transient of
+             * weapon sounds (de.wav) heard from other players, producing a
+             * subtle "wet blanket" quality.  The occlusion update will swap
+             * in the filter object only when actual attenuation is needed. */
             if (s_alDebugReverb && s_alDebugReverb->integer >= 2
                     && src->occlusionGain < 0.99f) {
                 Com_Printf(S_COLOR_CYAN "[alfilter] src#%d 3D: reset stale filter"
@@ -1083,8 +1116,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
             }
             qalFilterf(s_al_efx.occlusionFilter[idx], AL_LOWPASS_GAIN,   1.0f);
             qalFilterf(s_al_efx.occlusionFilter[idx], AL_LOWPASS_GAINHF, 1.0f);
-            qalSourcei(sid, AL_DIRECT_FILTER,
-                       (ALint)s_al_efx.occlusionFilter[idx]);
+            qalSourcei(sid, AL_DIRECT_FILTER, (ALint)AL_FILTER_NULL);
             qalSourcei(sid, AL_AUXILIARY_SEND_FILTER_GAIN_AUTO,   AL_TRUE);
             qalSourcei(sid, AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO, AL_TRUE);
             qalSourcei(sid, AL_DIRECT_FILTER_GAINHF_AUTO,         AL_FALSE);
@@ -2557,9 +2589,17 @@ static void S_AL_Update( int msec )
             if (distSq < (S_AL_SOUND_FULLVOLUME * S_AL_SOUND_FULLVOLUME)) {
                 /* Full-volume zone: wall cannot separate source from listener. */
                 interval = 0;
-            } else if (s_al_src[i].entchannel == CHAN_WEAPON &&
-                       distSq < (weapDist * weapDist)) {
-                /* Gun-muzzle zone: bypass occlusion for CHAN_WEAPON near the listener. */
+            } else if (distSq < (weapDist * weapDist) &&
+                       (s_al_src[i].entchannel == CHAN_WEAPON ||
+                        (s_al_src[i].sfx >= 0 && s_al_src[i].sfx < s_al_numSfx &&
+                         !Q_strncmp(s_al_sfx[s_al_src[i].sfx].name,
+                                    S_AL_WEAPON_SOUND_PREFIX,
+                                    S_AL_WEAPON_SOUND_PREFIX_LEN)))) {
+                /* Gun-muzzle zone: bypass occlusion for CHAN_WEAPON sources
+                 * and for any sound/weapons/ sound near the listener.  Covers
+                 * secondary weapon layers on CHAN_AUTO (e.g. de.wav fired
+                 * alongside a primary crack layer) where the channel tag alone
+                 * would not trigger the bypass. */
                 interval = 0;
             } else if (distSq < (300.f * 300.f)) {
                 /* Close range — trace every frame for nearby player accuracy. */
@@ -3141,6 +3181,14 @@ qboolean S_AL_Init( soundInterface_t *si )
     qalSpeedOfSound(1700.0f);   /* game units/sec, tuned to Q3 scale */
 
     S_AL_InitEFX();
+
+    /* Detect AL_SOFT_direct_channels.  Available in OpenAL Soft since v1.13.
+     * When present, local sources (own-player weapons, footsteps) will be
+     * routed directly to the stereo output instead of through the HRTF
+     * convolution kernel — preserving the transient punch of de.wav etc. */
+    s_al_directChannels = qalIsExtensionPresent("AL_SOFT_direct_channels");
+    Com_Printf("S_AL: AL_SOFT_direct_channels: %s\n",
+               s_al_directChannels ? "available" : "not available");
 
     /* Allocate source pool */
     s_al_numSrc = 0;
