@@ -1440,11 +1440,18 @@ static void S_AL_DisableSounds( void )
 {
     S_AL_StopAllSounds();
     s_al_muted = qtrue;
+    Com_DPrintf("S_AL: DisableSounds -- muted until next BeginRegistration\n");
 }
 
 static void S_AL_BeginRegistration( void )
 {
-    /* Nothing special needed — sounds are loaded on demand. */
+    /* Mirror S_Base_BeginRegistration: clear the mute flag that
+     * S_AL_DisableSounds set so that sounds can play again.
+     * Without this, every map load (which calls S_DisableSounds then
+     * S_BeginRegistration) would leave the system permanently muted --
+     * causing complete audio silence in-game and on return to the menu. */
+    s_al_muted = qfalse;
+    Com_DPrintf("S_AL: BeginRegistration -- unmuted, ready to play\n");
 }
 
 static void S_AL_ClearSoundBuffer( void )
