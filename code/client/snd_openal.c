@@ -215,8 +215,8 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
  * FADEOUT — gain ramps 1→0 before a loop source stops, triggered when the entity
  *           leaves the client snapshot (PVS cull) or is explicitly removed, so the
  *           sound tapers off instead of cutting to silence mid-cycle. */
-#define S_AL_LOOP_FADEIN_MS   150   /* ms — ~9 frames at 60 fps */
-#define S_AL_LOOP_FADEOUT_MS  120   /* ms — ~7 frames at 60 fps */
+#define S_AL_LOOP_FADEIN_MS   600   /* ms — ~36 frames at 60 fps (was 150) */
+#define S_AL_LOOP_FADEOUT_MS  500   /* ms — ~30 frames at 60 fps (was 120) */
 
 /* CHAN_WEAPON gun-muzzle proximity: sources on the weapon channel within this
  * distance of the listener are treated as "own gun barrel" and bypass occlusion
@@ -266,8 +266,10 @@ typedef struct {
     alSrcCat_t      category;       /* volume group for s_alVolSelf/Other/Env */
     qboolean        isPlaying;
     qboolean        isLocal;        /* non-spatialized */
-    float           occlusionGain;  /* [0..1] — 1.0 = unoccluded, 0.1 = fully blocked */
-    int             occlusionTick;  /* s_al_loopFrame when last computed */
+    float           occlusionGain;      /* smoothed [0..1] — 1.0 = unoccluded, applied every frame */
+    float           occlusionTarget;    /* raw trace result [0..1] — occlusionGain blends towards this */
+    int             occlusionTick;      /* s_al_loopFrame when last traced */
+    vec3_t          acousticOffset;     /* displacement from real origin towards gap (×posBlend) */
 } alSrc_t;
 
 static alSrc_t  s_al_src[S_AL_MAX_SRC];
@@ -374,6 +376,11 @@ static cvar_t *s_alEnvHistorySize; /* rolling history window size [1-S_AL_ENV_HI
 static cvar_t *s_alEnvVelThresh;   /* speed (units/probe-cycle) to enable look-ahead */
 static cvar_t *s_alEnvVelWeight;   /* max look-ahead ray blend weight [0-0.5] */
 static cvar_t *s_alOccWeaponDist;  /* CHAN_WEAPON no-occlusion radius (gun-muzzle zone) */
+/* Occlusion filter tuning — live-tunable, use /s_alReset to hear changes. */
+static cvar_t *s_alOccGainFloor;   /* floor of AL_LOWPASS_GAIN for fully-blocked sources */
+static cvar_t *s_alOccHFFloor;     /* floor of AL_LOWPASS_GAINHF (HF content) through walls */
+static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest gap [0-1] */
+static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each frame */
 
 /* Set to qtrue by the s_alReset command; cleared on the next probe cycle. */
 static qboolean s_al_reverbReset = qfalse;
@@ -825,36 +832,57 @@ static int S_AL_FindSourceByChannel( int entnum, int entchannel )
     return -1;
 }
 
-/* Find a free source slot, stealing the oldest non-loop one if needed.
+/* Find a free source slot.  When the pool is full, steal the FARTHEST non-loop
+ * 3D source rather than the oldest: distant sounds have less gameplay impact
+ * than close ones, so evicting them first keeps nearby player/weapon audio
+ * alive under the 30-player overload scenario.  Falls back to oldest overall
+ * if every active source is local (own-player sounds).
  * Returns source index or -1 on hard failure. */
 static int S_AL_GetFreeSource( void )
 {
-    int i;
-    int oldest      = Com_Milliseconds();
-    int oldestIdx   = -1;
+    int   i;
+    float farthestDist = -1.f;
+    int   farthestIdx  = -1;
+    int   oldestTime   = Com_Milliseconds();
+    int   oldestIdx    = -1;
 
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying)
             return i;
-        if (!s_al_src[i].loopSound && s_al_src[i].allocTime < oldest) {
-            oldest    = s_al_src[i].allocTime;
-            oldestIdx = i;
+
+        if (!s_al_src[i].loopSound) {
+            /* Track oldest as fallback for when no 3D sources exist */
+            if (s_al_src[i].allocTime < oldestTime) {
+                oldestTime = s_al_src[i].allocTime;
+                oldestIdx  = i;
+            }
+            /* Prefer evicting the farthest non-local 3D source */
+            if (!s_al_src[i].isLocal) {
+                vec3_t d;
+                float  distSq;
+                VectorSubtract(s_al_src[i].origin, s_al_listener_origin, d);
+                distSq = DotProduct(d, d);
+                if (distSq > farthestDist) {
+                    farthestDist = distSq;
+                    farthestIdx  = i;
+                }
+            }
         }
     }
 
-    /* Steal oldest non-loop source.
-     * Explicitly detach the buffer (AL_BUFFER = 0) after stopping so the
-     * slot is in a fully clean state before S_AL_SrcSetup attaches a new
-     * buffer.  Skipping this step leaves the old buffer attached; some AL
-     * implementations start playback from the wrong offset or silently fail
-     * to play the new buffer when the new alSourcei(AL_BUFFER) call is made
-     * on a still-attached stopped source — observed as a missing layer in
-     * multi-sample weapon events (e.g. the DE-50's 5-sample fire profile). */
-    if (oldestIdx >= 0) {
-        qalSourceStop(s_al_src[oldestIdx].source);
-        qalSourcei(s_al_src[oldestIdx].source, AL_BUFFER, 0);
-        s_al_src[oldestIdx].isPlaying = qfalse;
-        return oldestIdx;
+    /* Steal farthest 3D source if available; fall back to oldest overall */
+    {
+        int stealIdx = (farthestIdx >= 0) ? farthestIdx : oldestIdx;
+        if (stealIdx >= 0) {
+            /* Detach buffer explicitly so the slot is clean for reuse.
+             * Skipping this leaves the old buffer attached on some AL
+             * implementations, causing wrong-offset playback or silent
+             * failure on multi-sample weapon events (e.g. DE-50). */
+            qalSourceStop(s_al_src[stealIdx].source);
+            qalSourcei(s_al_src[stealIdx].source, AL_BUFFER, 0);
+            s_al_src[stealIdx].isPlaying = qfalse;
+            return stealIdx;
+        }
     }
     return -1;
 }
@@ -970,8 +998,10 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->loopSound    = qfalse;
     src->allocTime    = Com_Milliseconds();
     src->isPlaying    = qtrue;
-    src->occlusionGain = 1.0f;
-    src->occlusionTick = 0;
+    src->occlusionGain   = 1.0f;
+    src->occlusionTarget = 1.0f;
+    src->occlusionTick   = 0;
+    VectorClear(src->acousticOffset);
 
     /* Classify into volume category.
      * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
@@ -1014,6 +1044,12 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
          * the sporadic "suppressor" effect heard on weapons like the DE-50. */
         if (s_al_efx.available) {
             qalSourcei(sid, AL_DIRECT_FILTER, (ALint)AL_FILTER_NULL);
+            /* Also disconnect any stale reverb auxiliary send.  Without this,
+             * a local source that reuses a slot previously used for a 3D
+             * reverb-enabled sound inherits the reverb routing, adding an
+             * unwanted wet tail to own-player weapon and footstep sounds. */
+            qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                        (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
             if (s_alDebugReverb && s_alDebugReverb->integer >= 2)
                 Com_Printf(S_COLOR_CYAN "[alfilter] src#%d local: cleared stale filter\n", idx);
         }
@@ -1042,10 +1078,8 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
             if (s_alDebugReverb && s_alDebugReverb->integer >= 2
                     && src->occlusionGain < 0.99f) {
                 Com_Printf(S_COLOR_CYAN "[alfilter] src#%d 3D: reset stale filter"
-                           " (prev occ=%.2f  GAIN≈%.2f  GAINHF≈%.2f)\n",
-                           idx, src->occlusionGain,
-                           0.25f + 0.75f * src->occlusionGain,
-                           src->occlusionGain * src->occlusionGain);
+                           " (prev occlusionGain=%.2f)\n",
+                           idx, src->occlusionGain);
             }
             qalFilterf(s_al_efx.occlusionFilter[idx], AL_LOWPASS_GAIN,   1.0f);
             qalFilterf(s_al_efx.occlusionFilter[idx], AL_LOWPASS_GAINHF, 1.0f);
@@ -1358,6 +1392,37 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     if (!s_al_started || sfx < 0 || sfx >= s_al_numSfx) return;
     r = &s_al_sfx[sfx];
     if (!r->inMemory || r->defaultSound || !r->buffer) return;
+
+    /* Per-entity per-sfx dedup: prevent the same sound starting twice on the
+     * same entity within a short window.  Matches DMA's 20-ms dedup window.
+     * ENTITYNUM_WORLD (bullet impacts / casings at sv_fps rate) gets a wider
+     * 100-ms window — the same value DMA uses — so a burst of impacts doesn't
+     * saturate the pool before the world-entity cap below can kick in. */
+    {
+        int now     = Com_Milliseconds();
+        int dedupMs = (entnum == ENTITYNUM_WORLD) ? 100 : 20;
+        int j;
+        for (j = 0; j < s_al_numSrc; j++) {
+            if (!s_al_src[j].isPlaying)       continue;
+            if (s_al_src[j].entnum != entnum) continue;
+            if (s_al_src[j].sfx   != sfx)     continue;
+            if ((now - s_al_src[j].allocTime) < dedupMs)
+                return;
+        }
+    }
+
+    /* Hard cap on sources owned by ENTITYNUM_WORLD (impacts, casings, debris).
+     * All these events share a single entity number so without a cap they can
+     * exhaust the 96-source pool during heavy fire and starve player sounds.
+     * Mirrors DMA's WORLD_ENTITY_MAX_CHANNELS = MAX_CHANNELS / 8 = 12. */
+    if (entnum == ENTITYNUM_WORLD) {
+        int worldCount = 0;
+        for (int j = 0; j < s_al_numSrc; j++)
+            if (s_al_src[j].isPlaying && s_al_src[j].entnum == ENTITYNUM_WORLD)
+                worldCount++;
+        if (worldCount >= (s_al_numSrc / 8))
+            return;
+    }
 
     /* Reuse/override same (entnum, entchannel) if not CHAN_AUTO */
     if (entchannel != CHAN_AUTO) {
@@ -2454,109 +2519,153 @@ static void S_AL_Update( int msec )
             s_al_src[i].isPlaying = qfalse;
             continue;
         }
-        /* Occlusion + direction correction with distance-adaptive update cadence.
+        /* Occlusion: three-phase update for smooth wall↔clear transitions.
          *
-         * Update interval is based on source distance to the listener so that
-         * nearby entities (other players) get per-frame precision while distant
-         * sources are updated less often, keeping CM_BoxTrace cost proportional
-         * to where positional accuracy actually matters:
+         * Phase 1 (trace, on interval): measure occlusion and set target.
+         *   Full-vol zone / weapon-muzzle zone / occlusion off → snap target=1.0.
+         *   Otherwise: run CM_BoxTrace every interval frames (1/4/8 by distance),
+         *   update occlusionTarget and acousticOffset (partial gap redirect).
          *
-         *   < S_AL_SOUND_FULLVOLUME (80 u) : full-vol zone — skip occlusion,
-         *                                    snap to real position each frame.
-         *   80 – 300 u  (close / player)   : every frame  — super-accurate.
-         *   300 – 600 u (medium range)      : every 4 frames.
-         *   > 600 u     (far range)         : every 8 frames.
+         * Phase 2 (smooth, every frame): IIR blend occlusionGain → occlusionTarget.
+         *   Opening (gain rising): step=0.30 — fast snap on line-of-sight regain.
+         *   Closing (gain falling): step=0.18 — gradual muffle, no abrupt pop.
          *
-         * When s_alOcclusion is disabled all sources use real position with a
-         * pass-through filter, matching vanilla dma behaviour.
+         * Phase 3 (apply, every frame): push position + filter using smoothed values.
+         *   Position = origin + acousticOffset (tracks the entity; gap hint is
+         *              relative so it follows moving players automatically).
+         *   LOWPASS_GAIN   = s_alOccGainFloor + (1-floor)*occ
+         *   LOWPASS_GAINHF = s_alOccHFFloor   + (1-floor)*occ
+         *   Both tunable live; set s_alDebugOcc 1 to print per-source state.
+         *
+         * Trace intervals (same thresholds as before):
+         *   < 80 u or CHAN_WEAPON < weapDist : interval=0 (full-vol / muzzle zone)
+         *   80 – 300 u : every frame
+         *   300 – 600 u: every 4 frames
+         *   > 600 u    : every 8 frames
          */
         if (!s_al_src[i].isLocal) {
             vec3_t diff;
             float  distSq;
             int    interval;
+            float  weapDist;
 
             VectorSubtract(s_al_src[i].origin, s_al_listener_origin, diff);
-            distSq = DotProduct(diff, diff);
+            distSq   = DotProduct(diff, diff);
+            weapDist = s_alOccWeaponDist ? s_alOccWeaponDist->value
+                                         : S_AL_WEAPON_NOOCC_DIST;
 
             if (distSq < (S_AL_SOUND_FULLVOLUME * S_AL_SOUND_FULLVOLUME)) {
-                /* Full-volume zone: always at max gain, exact HRTF position.
-                 * No wall can separate source from listener at this range; any
-                 * filter attenuation here would be wrong. */
+                /* Full-volume zone: wall cannot separate source from listener. */
                 interval = 0;
             } else if (s_al_src[i].entchannel == CHAN_WEAPON &&
-                       distSq < ((s_alOccWeaponDist ? s_alOccWeaponDist->value : S_AL_WEAPON_NOOCC_DIST) *
-                                 (s_alOccWeaponDist ? s_alOccWeaponDist->value : S_AL_WEAPON_NOOCC_DIST))) {
-                /* Gun-muzzle zone: weapon-channel sources within 160 u of the
-                 * listener are almost certainly the own player's gun barrel.
-                 * Skip occlusion regardless of entity ownership — a muzzle
-                 * origin at ~80 u can be just past the full-volume sphere and
-                 * clip-brush geometry on nearby slopes would otherwise trigger
-                 * false muffling on every shot. */
+                       distSq < (weapDist * weapDist)) {
+                /* Gun-muzzle zone: bypass occlusion for CHAN_WEAPON near the listener. */
                 interval = 0;
             } else if (distSq < (300.f * 300.f)) {
-                interval = 1;   /* close — per-frame, e.g. nearby players */
+                /* Close range — trace every frame for nearby player accuracy. */
+                interval = 1;
             } else if (distSq < (600.f * 600.f)) {
-                interval = 4;   /* medium */
+                /* Medium range — trace every 4 frames. */
+                interval = 4;
             } else {
-                interval = 8;   /* far — distance model handles audibility */
+                /* Far range — distance model dominates; trace every 8 frames. */
+                interval = 8;
             }
 
-            if (interval == 0) {
-                /* Snap to real position; ensure pass-through filter */
-                s_al_src[i].occlusionGain = 1.0f;
-                s_al_src[i].occlusionTick = s_al_loopFrame;
-                qalSource3f(s_al_src[i].source, AL_POSITION,
-                            s_al_src[i].origin[0],
-                            s_al_src[i].origin[1],
-                            s_al_src[i].origin[2]);
-                if (s_al_efx.available) {
-                    qalFilterf(s_al_efx.occlusionFilter[i], AL_LOWPASS_GAIN,   1.0f);
-                    qalFilterf(s_al_efx.occlusionFilter[i], AL_LOWPASS_GAINHF, 1.0f);
-                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
-                               (ALint)s_al_efx.occlusionFilter[i]);
-                }
+            /* ---- Phase 1: trace on interval ---- */
+            if (interval == 0 || !(s_alOcclusion && s_alOcclusion->integer)) {
+                /* Full-vol zone OR occlusion disabled: snap target to clear,
+                 * zero out any position redirect. */
+                s_al_src[i].occlusionTarget = 1.0f;
+                if (interval == 0)
+                    s_al_src[i].occlusionTick = s_al_loopFrame;
+                VectorClear(s_al_src[i].acousticOffset);
             } else if ((s_al_loopFrame - s_al_src[i].occlusionTick) >= interval) {
-                s_al_src[i].occlusionTick = s_al_loopFrame;
+                vec3_t acousticPos;
+                float  occ    = S_AL_ComputeAcousticPosition(
+                                    s_al_src[i].origin, acousticPos);
+                /* Scale position blend by how much the path is blocked.
+                 * s_alOccPosBlend=0.25: max 25% redirect when fully blocked,
+                 * near-zero when nearly clear — preserves directional accuracy. */
+                float  pBlend = (s_alOccPosBlend ? s_alOccPosBlend->value : 0.25f)
+                                * (1.0f - occ);
+                s_al_src[i].occlusionTick     = s_al_loopFrame;
+                s_al_src[i].occlusionTarget   = occ;
+                /* Store as offset from real origin so it tracks moving entities */
+                s_al_src[i].acousticOffset[0] = pBlend *
+                    (acousticPos[0] - s_al_src[i].origin[0]);
+                s_al_src[i].acousticOffset[1] = pBlend *
+                    (acousticPos[1] - s_al_src[i].origin[1]);
+                s_al_src[i].acousticOffset[2] = pBlend *
+                    (acousticPos[2] - s_al_src[i].origin[2]);
+            }
 
-                if (s_alOcclusion && s_alOcclusion->integer) {
-                    vec3_t acousticPos;
-                    float  occ = S_AL_ComputeAcousticPosition(
-                                     s_al_src[i].origin, acousticPos);
-                    s_al_src[i].occlusionGain = occ;
+            /* ---- Phase 2: IIR smooth occlusionGain toward target ---- */
+            {
+                float target  = s_al_src[i].occlusionTarget;
+                float current = s_al_src[i].occlusionGain;
+                /* Opening responds faster (snap on corner clear);
+                 * closing is more gradual (no abrupt muffle pop). */
+                float step    = (target > current) ? 0.30f : 0.18f;
+                s_al_src[i].occlusionGain = current + (target - current) * step;
+            }
 
-                    /* Push the virtual position so HRTF aims from the gap */
-                    qalSource3f(s_al_src[i].source, AL_POSITION,
-                                acousticPos[0], acousticPos[1], acousticPos[2]);
+            /* ---- Phase 3: apply position + filter every frame ---- */
+            {
+                float occ       = s_al_src[i].occlusionGain;
+                float gainFloor = s_alOccGainFloor ? s_alOccGainFloor->value : 0.55f;
+                float hfFloor   = s_alOccHFFloor   ? s_alOccHFFloor->value   : 0.50f;
+                /* Linear floor→1.0 curves.  gainFloor controls how much overall
+                 * volume remains when fully blocked; hfFloor controls how much
+                 * high-frequency content survives (higher = less "muffled").
+                 * Old hardcoded: GAIN=0.25+0.75*occ, GAINHF=occ*occ.
+                 * Defaults (0.55 / 0.50) keep weapon-fire timbre recognisable
+                 * and substantially reduce the wall-to-clear volume jump. */
+                float gain   = gainFloor + (1.0f - gainFloor) * occ;
+                float gainHF = hfFloor   + (1.0f - hfFloor)   * occ;
+                vec3_t pos;
 
-                    if (s_al_efx.available) {
+                /* Position: real origin + gap-hint offset (tracks moving entities) */
+                pos[0] = s_al_src[i].origin[0] + s_al_src[i].acousticOffset[0];
+                pos[1] = s_al_src[i].origin[1] + s_al_src[i].acousticOffset[1];
+                pos[2] = s_al_src[i].origin[2] + s_al_src[i].acousticOffset[2];
+                qalSource3f(s_al_src[i].source, AL_POSITION,
+                            pos[0], pos[1], pos[2]);
+
+                if (s_al_efx.available) {
+                    if (occ > 0.98f) {
+                        /* Fully clear: remove the lowpass from the signal path
+                         * entirely.  Even a "passthrough" biquad filter object
+                         * can introduce subtle phase-shift coloration that makes
+                         * non-occluded weapon fire sound tinny / bass-light
+                         * compared to vanilla DMA.  AL_FILTER_NULL bypasses the
+                         * filter stage completely, restoring the raw signal. */
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)AL_FILTER_NULL);
+                    } else {
                         qalFilterf(s_al_efx.occlusionFilter[i],
-                                   AL_LOWPASS_GAIN,   0.25f + 0.75f * occ);
+                                   AL_LOWPASS_GAIN,   gain);
                         qalFilterf(s_al_efx.occlusionFilter[i],
-                                   AL_LOWPASS_GAINHF, occ * occ);
+                                   AL_LOWPASS_GAINHF, gainHF);
                         qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
                                    (ALint)s_al_efx.occlusionFilter[i]);
-                    } else {
-                        qalSourcef(s_al_src[i].source, AL_GAIN,
-                            (s_al_src[i].master_vol / 255.0f) *
-                            S_AL_GetCategoryVol(s_al_src[i].category) *
-                            occ * masterGain);
                     }
                 } else {
-                    /* Occlusion off — vanilla dma behaviour: real position,
-                     * no extra gain attenuation, pass-through filter. */
-                    s_al_src[i].occlusionGain = 1.0f;
-                    qalSource3f(s_al_src[i].source, AL_POSITION,
-                                s_al_src[i].origin[0],
-                                s_al_src[i].origin[1],
-                                s_al_src[i].origin[2]);
-                    if (s_al_efx.available) {
-                        qalFilterf(s_al_efx.occlusionFilter[i],
-                                   AL_LOWPASS_GAIN,   1.0f);
-                        qalFilterf(s_al_efx.occlusionFilter[i],
-                                   AL_LOWPASS_GAINHF, 1.0f);
-                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
-                                   (ALint)s_al_efx.occlusionFilter[i]);
-                    }
+                    /* No EFX: approximate occlusion by direct gain reduction */
+                    qalSourcef(s_al_src[i].source, AL_GAIN,
+                        (s_al_src[i].master_vol / 255.0f) *
+                        S_AL_GetCategoryVol(s_al_src[i].category) *
+                        occ * masterGain);
+                }
+
+                if (s_alDebugOcc && s_alDebugOcc->integer && occ < 0.99f) {
+                    Com_Printf(S_COLOR_CYAN
+                        "[alOcc] ent=%4d dist=%5.0f  "
+                        "tgt=%.2f cur=%.2f  G=%.2f GHF=%.2f\n",
+                        s_al_src[i].entnum,
+                        sqrtf(distSq),
+                        s_al_src[i].occlusionTarget,
+                        occ, gain, gainHF);
                 }
             }
         }
@@ -2862,6 +2971,41 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alOccWeaponDist = Cvar_Get("s_alOccWeaponDist", "160", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOccWeaponDist, "80", "400", CV_FLOAT);
     Cvar_SetDescription(s_alOccWeaponDist, "Occlusion: CHAN_WEAPON sources within this distance of the listener bypass occlusion tracing entirely. Covers gun-muzzle origin offsets (~50-100 u) and prevents PLAYERCLIP slope geometry from muffling your own weapon fire. Default 160.");
+
+    /* Occlusion filter tuning CVars.
+     * All live-tunable — type /s_alReset after changing to hear the effect.
+     * Use s_alDebugOcc 1 to print per-source state each frame while testing. */
+    s_alOccGainFloor = Cvar_Get("s_alOccGainFloor", "0.55", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOccGainFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alOccGainFloor,
+        "Occlusion: floor of AL_LOWPASS_GAIN (overall volume) for fully-blocked sources [0-1]. "
+        "0 = can go fully silent through thick walls; 1 = no volume change (vanilla-like). "
+        "Default 0.55 keeps occluded sounds audible while halving the wall-to-clear volume jump. "
+        "Old hardcoded floor was 0.25.");
+    s_alOccHFFloor = Cvar_Get("s_alOccHFFloor", "0.50", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOccHFFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alOccHFFloor,
+        "Occlusion: floor of AL_LOWPASS_GAINHF (high-frequency content) for fully-blocked sources [0-1]. "
+        "0 = strip all HF (bass-only thump through walls); 1 = no HF filtering (only volume changes). "
+        "Default 0.50 preserves enough weapon-fire crack to remain recognisable. "
+        "Old formula was occ\xc2\xb2 which reached near-zero HF even at moderate occlusion — "
+        "this caused the 'tinny then boom' corner-pop effect.");
+    s_alOccPosBlend = Cvar_Get("s_alOccPosBlend", "0.25", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOccPosBlend, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alOccPosBlend,
+        "Occlusion: how far to redirect the HRTF apparent-source position towards the nearest "
+        "acoustic gap when a source is blocked [0-1]. "
+        "0 = always use true source position (best direction accuracy, no gap hint); "
+        "1 = full redirect to gap (old behaviour — confuses direction of fire). "
+        "Default 0.25: subtle gap hint that helps 'around the corner' perception "
+        "without sacrificing the ability to locate shooting players.");
+    s_alDebugOcc = Cvar_Get("s_alDebugOcc", "0", CVAR_TEMP);
+    Cvar_CheckRange(s_alDebugOcc, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alDebugOcc,
+        "Occlusion debug output [0/1]. When 1, prints one line per occluded source each frame: "
+        "entity number, listener distance, trace target, smoothed gain, LOWPASS_GAIN, LOWPASS_GAINHF. "
+        "Use this to isolate whether a specific sound is being filtered and by how much. "
+        "Not archived.");
 
     /* Load library */
     if (!S_AL_LoadLibrary())
