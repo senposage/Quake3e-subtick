@@ -1071,8 +1071,18 @@ static void SCR_DrawNetMonitor( void ) {
 	/* row 6 - drops + extrapolations + caps */
 	{
 		int nmSnapHz = ( cl.snapshotMsec > 0 ) ? ( 1000 / cl.snapshotMsec ) : 60;
-		int extrapYellow = nmSnapHz * 3 / 5;
-		int extrapRed    = nmSnapHz * 3 / 4;
+		int extrapYellow, extrapRed;
+		// At high fps (snapshotMsec < 30, e.g. 60Hz) the Ext equilibrium is ~snapsHz/2
+		// (design intent: stable serverTimeDelta).  Raise alert thresholds accordingly
+		// to avoid spurious yellow/red for normal steady-state behaviour.
+		// At low fps (snapshotMsec >= 30) equilibrium is ~snapsHz/3; keep tighter thresholds.
+		if ( cl.snapshotMsec > 0 && cl.snapshotMsec < 30 ) {
+			extrapYellow = nmSnapHz * 3 / 4; // ~1.5x the 50% equilibrium
+			extrapRed    = nmSnapHz;          // every frame = definitely broken
+		} else {
+			extrapYellow = nmSnapHz * 3 / 5; // ~1.8x the 33% equilibrium (unchanged)
+			extrapRed    = nmSnapHz * 3 / 4; // ~2.25x the 33% equilibrium (unchanged)
+		}
 		col = ( netMonDropRate > 0 ) ? colorRed :
 		      ( netMonDispExtrapCnt > extrapRed ) ? colorRed :
 		      ( netMonDispExtrapCnt > extrapYellow ) ? colorYellow : colorGreen;

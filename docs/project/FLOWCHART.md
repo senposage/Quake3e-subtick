@@ -413,6 +413,16 @@
     |            cl.serverTime     |           |
     |            (targeted here    |           |
     |             at ~50% mark)    |           |
+
+  NOTE — netgraph Ext counter at 60Hz:
+    At high fps (snapshotMsec < 30), the feedback loop uses equal backward/
+    forward steps (-2 / +2) to keep serverTimeDelta rock-stable (no ping
+    jitter).  This equilibrates at ~50% detection-zone entries, so Ext shows
+    approximately snapsHz/2 per second (e.g. ~30/s at sv_fps 60).
+    This is EXPECTED behaviour — the safety cap (Clp) prevents cl.serverTime
+    from passing the snapshot; Ext here reflects loop equilibrium, not genuine
+    client-side extrapolation.  The netgraph colour thresholds are raised
+    accordingly for snapshotMsec < 30 to avoid spurious yellow/red alerts.
 ```
 
 ## 9. Net Monitor Widget (cl_scrn.c)
