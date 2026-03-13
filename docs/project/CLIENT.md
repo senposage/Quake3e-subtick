@@ -323,7 +323,7 @@ if deltaDelta > resetTime:   hard reset to newDelta; slowFrac = 0
 elif deltaDelta > fastAdjust: cl.serverTimeDelta = (old + new) / 2; slowFrac = 0
 else (slow drift — fractional accumulator):
     if extrapolatedSnapshot:
-        slowFrac -= (snapshotMsec < 30) ? 2 : 4   // -½ms or -1ms
+        slowFrac -= (snapshotMsec < 30) ? 2 : 4   // -½ms (60Hz: equal to fwd → stable serverTimeDelta) or -1ms (20Hz)
     else:
         slowFrac += 2                               // +½ms always
     if |slowFrac| >= 4:                             // commit threshold = ±1ms
@@ -335,7 +335,7 @@ else (slow drift — fractional accumulator):
         slowFrac -= 4 (or += 4)
 ```
 
-**Fractional accumulator:** Prevents ±1ms oscillation at equilibrium. At 60Hz, equilibrium extrap rate is 50% (-2 and +2 cancel). At 20Hz, 33% (-4 and +2 cancel at 1:2 ratio). slowFrac oscillates in [-2, +2] at equilibrium — never reaching the ±4 commit threshold, so serverTimeDelta stays rock stable.
+**Fractional accumulator:** Prevents ±1ms oscillation at equilibrium. At 60Hz (snapshotMsec < 30), the backward and forward steps are equal (-2 / +2): slowFrac oscillates in [-2, +2] without ever reaching the ±4 commit threshold — serverTimeDelta stays rock-stable with zero ping jitter. The tradeoff is a ~50% detection-zone entry rate, visible as **Ext ≈ snapsHz/2 in the netgraph** (e.g. ~30/s at sv_fps 60). **This is expected behaviour, not actual client-side extrapolation.** The safety cap (Clp counter) prevents cl.serverTime from passing the snapshot; the Ext counter reflects feedback-loop equilibrium. At 20Hz (snapshotMsec ≥ 30), 33% rate (-4 and +2 cancel at 1:2 ratio).
 
 **Relationship to the safety cap:** `extrapolateThresh = snapshotMsec/3` (set in the CL_SetCGameTime block below the cap). `capMs = snapshotMsec/4`. Because snapshotMsec/3 > snapshotMsec/4, the extrapolate flag fires and AdjustTimeDelta starts pulling serverTimeDelta back *before* cl.serverTime reaches the cap boundary. In steady state the cap should fire rarely — only during sudden jitter spikes. It is a backstop, not the primary timing control.
 

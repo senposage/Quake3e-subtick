@@ -1045,6 +1045,14 @@ static void CL_AdjustTimeDelta( void ) {
 				// adaptive timing: slow drift via fractional accumulator
 				if ( cl.extrapolatedSnapshot ) {
 					cl.extrapolatedSnapshot = qfalse;
+					// At high fps (snapshotMsec < 30, e.g. 60Hz) the backward step equals
+					// the forward step (-2 / +2), so slowFrac oscillates in [-2,+2] without
+					// ever reaching the +/-4 commit threshold.  serverTimeDelta stays rock-stable
+					// (no +/-1ms ping jitter) at the cost of a ~50% detection-zone entry rate.
+					// This appears in the netgraph as Ext ~ snapsHz/2 (e.g. ~30/s at 60Hz)
+					// and is EXPECTED BEHAVIOR, not actual client-side extrapolation.  The
+					// safety cap (Clp) prevents cl.serverTime from passing the snapshot.
+					// At low fps (snapshotMsec >= 30, e.g. 20Hz): -4 gives a 33% rate.
 					slowFrac -= ( cl.snapshotMsec < 30 ) ? 2 : 4;
 				} else {
 					slowFrac += 2;
