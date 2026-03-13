@@ -308,6 +308,9 @@ static alEfx_t s_al_efx;
 static cvar_t *s_alDevice;
 static cvar_t *s_alHRTF;
 static cvar_t *s_alMaxDist;
+static cvar_t *s_alReverb;       /* master EFX reverb toggle (0/1) */
+static cvar_t *s_alReverbGain;   /* wet-signal slot gain [0..1] */
+static cvar_t *s_alReverbDecay;  /* reverb decay time in seconds (LATCH) */
 
 /* =========================================================================
  * Section 5 — Library loading helpers
@@ -739,9 +742,14 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         qalSourcef(sid, AL_REFERENCE_DISTANCE,  S_AL_SOUND_FULLVOLUME);
         qalSourcef(sid, AL_MAX_DISTANCE,        maxDist);
         if (s_al_efx.available) {
-            /* Reverb send (auxiliary send 0) */
-            qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
-                        (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
+            /* Reverb send (auxiliary send 0) — skip when reverb is disabled */
+            if (s_alReverb && s_alReverb->integer) {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
+            } else {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
+            }
             /* Occlusion direct filter (initially pass-through) */
             qalSourcei(sid, AL_DIRECT_FILTER,
                        (ALint)s_al_efx.occlusionFilter[idx]);
@@ -900,17 +908,21 @@ static void S_AL_InitEFX( void )
     qalEffecti(s_al_efx.reverbEffect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
     if (qalGetError() == AL_NO_ERROR) {
         s_al_efx.hasEAXReverb = qtrue;
-        /* Medium-sized indoor room — sensible default for URT maps */
+        /* Medium-sized indoor room — sensible default for URT maps.
+         * Reflections gain is intentionally kept moderate so early
+         * reflections are audible but the late reverb tail does not
+         * drown out direct weapon / footstep sounds. */
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DENSITY,           0.5f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DIFFUSION,         0.85f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAIN,              0.32f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAIN,              0.20f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINHF,            0.89f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINLF,            1.0f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,        1.49f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,
+                   s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_HFRATIO,     0.83f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN,  0.05f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN,  0.15f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_DELAY, 0.007f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN,  1.26f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN,  0.35f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_DELAY, 0.011f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_AIR_ABSORPTION_GAINHF, 0.994f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_ROOM_ROLLOFF_FACTOR,   0.0f);
@@ -921,17 +933,25 @@ static void S_AL_InitEFX( void )
         qalGetError();
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DENSITY,    0.5f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DIFFUSION,  0.85f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAIN,       0.32f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAIN,       0.20f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAINHF,     0.89f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME, 1.49f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,  0.05f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME,
+                   s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,  0.15f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_DELAY, 0.007f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,  1.26f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,  0.35f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_DELAY, 0.011f);
     }
     qalGenAuxiliaryEffectSlots(1, &s_al_efx.reverbSlot);
     qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
                             (ALint)s_al_efx.reverbEffect);
+    /* Apply initial reverb slot gain from cvar */
+    {
+        float slotGain = s_alReverbGain ? s_alReverbGain->value : 0.20f;
+        if (slotGain < 0.0f) slotGain = 0.0f;
+        if (slotGain > 1.0f) slotGain = 1.0f;
+        qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot, AL_EFFECTSLOT_GAIN, slotGain);
+    }
 
     /* Underwater effect */
     qalGenEffects(1, &s_al_efx.underwaterEffect);
@@ -1378,14 +1398,32 @@ static void S_AL_Update( int msec )
         S_AL_MusicUpdate();
     }
 
-    /* Switch all non-local sources between normal reverb and underwater effect */
+    /* Live-update reverb slot gain and water-transition routing */
     if (s_al_efx.available) {
         static qboolean lastInwater = qfalse;
+        static float    lastReverbGain = -1.0f;
+
+        /* s_alReverbGain can be changed at any time — push to AL slot */
+        if (s_alReverbGain) {
+            float rg = s_alReverbGain->value;
+            if (rg < 0.0f) rg = 0.0f;
+            if (rg > 1.0f) rg = 1.0f;
+            if (rg != lastReverbGain) {
+                float slotGain = (s_alReverb && s_alReverb->integer) ? rg : 0.0f;
+                qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot,
+                                        AL_EFFECTSLOT_GAIN, slotGain);
+                lastReverbGain = rg;
+            }
+        }
+
+        /* Switch all non-local sources between normal reverb and underwater effect */
         if (s_al_inwater != lastInwater) {
             int j;
             ALuint slot = s_al_inwater ? s_al_efx.underwaterSlot : s_al_efx.reverbSlot;
             for (j = 0; j < s_al_numSrc; j++) {
                 if (!s_al_src[j].isPlaying || s_al_src[j].isLocal) continue;
+                if (s_alReverb && !s_alReverb->integer)
+                    slot = (ALuint)AL_EFFECTSLOT_NULL;
                 qalSource3i(s_al_src[j].source, AL_AUXILIARY_SEND_FILTER,
                             (ALint)slot, 0, (ALint)AL_FILTER_NULL);
             }
@@ -1579,6 +1617,16 @@ qboolean S_AL_Init( soundInterface_t *si )
      *   If HRTF still reports disabled after context creation (e.g. OpenAL
      *   implementation switched it off based on device type), call
      *   alcResetDeviceSoft with ALC_HRTF_SOFT = ALC_TRUE to force it.
+     *
+     * NOTE: ALC_AMBISONIC_ORDER_SOFT is intentionally NOT requested here.
+     *   In OpenAL Soft, setting ALC_AMBISONIC_ORDER_SOFT in the context
+     *   attributes forces Ambisonic output mode, silently overriding
+     *   ALC_STEREO_HRTF_SOFT.  Standard mono/stereo game sources are then
+     *   routed through an intermediate Ambisonic encode/decode path which
+     *   introduces positional errors (own sounds appear to come from the
+     *   wrong direction, panning is ambiguous near the listener).  Stereo
+     *   HRTF without Ambisonics applies the HRIR directly per-source, which
+     *   gives accurate positional audio for a first-person shooter.
      * ----------------------------------------------------------------------- */
     nAttribs = 0;
     if (s_alHRTF->integer) {
@@ -1591,18 +1639,6 @@ qboolean S_AL_Init( soundInterface_t *si )
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
             ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
             ctxAttribs[nAttribs++] = ALC_TRUE;
-        }
-    }
-    /* Ambisonic panning: request highest Ambisonic order the device supports. */
-    if (s_alHRTF->integer &&
-        qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
-        ALCint maxOrder = 1;
-        qalcGetIntegerv(s_al_device, ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &maxOrder);
-        if (maxOrder > 3) maxOrder = 3;
-        if (maxOrder >= 1) {
-            ctxAttribs[nAttribs++] = ALC_AMBISONIC_ORDER_SOFT;
-            ctxAttribs[nAttribs++] = maxOrder;
-            Com_DPrintf("S_AL: requesting Ambisonic order %d for HRTF rendering\n", maxOrder);
         }
     }
     ctxAttribs[nAttribs] = 0; /* sentinel */
