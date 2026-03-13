@@ -186,7 +186,10 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 
 #define S_AL_MAX_SFX        4096
 #define S_AL_SFX_HASHSIZE   1024
-#define S_AL_MAX_SRC        MAX_CHANNELS        /* 96 active sources */
+#define S_AL_MAX_SRC        512     /* upper bound for source creation; OpenAL Soft
+                                     * caps actual sources to its mix-voice limit
+                                     * (default 256, raise via alsoft.ini to serve
+                                     * 32-38 players × ~5 sounds + world headroom) */
 #define S_AL_MUSIC_BUFFERS  4                   /* ping-pong music stream */
 #define S_AL_MUSIC_BUFSZ    (32 * 1024)         /* 32 KiB per streaming buf */
 #define S_AL_RAW_BUFFERS    8                   /* raw-samples stream queue */
@@ -231,25 +234,11 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_WEAPON_SOUND_PREFIX        "sound/weapons/"
 #define S_AL_WEAPON_SOUND_PREFIX_LEN    14  /* strlen("sound/weapons/") */
 
-/* Preemption guard cap for CHAN_WEAPON.  Prevents a long fire sound (e.g.
- * de_out.wav with ~2.5 s of audible content) from blocking rapid-fire events
- * for its full content duration.  150 ms covers the initial crack/transient
- * of every URT weapon while allowing the next shot and cycle sounds through
- * at any realistic fire cadence. */
-#define WEAPON_GUARD_CAP_MS         150
-
-/* Weapon-fire loop inactivity timeout.  While the trigger is held, the game
- * re-fires EV_FIRE_WEAPON at the weapon's fire rate and each event refreshes
- * lastFireMs.  When no event arrives within this window (trigger released or
- * burst ended), AL_LOOPING is cleared so the current buffer iteration plays
- * out to its natural end rather than being hard-stopped. */
-#define WEAPON_FIRE_LOOP_TIMEOUT_MS 250
-
-/* Gain fade-in duration (ms) for newly-started sources that preempted an
- * existing sound on the same channel.  Masks the hard cut on the predecessor
- * and makes the preemption transition perceptibly smooth without requiring a
- * full crossfade (which would need two concurrent sources per channel). */
-#define SRC_FADE_IN_MS              15
+/* Dedup window removed — vanilla URT has the same double-start behaviour
+ * and nobody notices.  Culling is handled by distance rejection and by the
+ * priority-ordered eviction in S_AL_GetFreeSource.
+ * s_alDedupMs is registered as a cvar for potential future use; no code
+ * currently reads it (value is ignored at runtime). */
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
@@ -257,9 +246,6 @@ typedef struct alSfxRec_s {
     char                name[MAX_QPATH];
     int                 soundLength;            /* in samples (file-rate frames) */
     int                 fileRate;               /* original sample rate from the file (Hz) */
-    int                 contentSamples;         /* last non-silent frame + 1 (file-rate frames);
-                                                 * 0 = all-silent / unknown; used as adaptive
-                                                 * preemption guard — see S_AL_ContentSamples() */
     qboolean            defaultSound;           /* buzz on load failure */
     qboolean            inMemory;
     int                 lastTimeUsed;           /* Com_Milliseconds() */
@@ -296,9 +282,6 @@ typedef struct {
     alSrcCat_t      category;       /* volume group for s_alVolSelf/Other/Env */
     qboolean        isPlaying;
     qboolean        isLocal;        /* non-spatialized */
-    int             fadeStartMs;    /* >0: gain fade-in active; Com_Milliseconds() at start */
-    qboolean        weaponLoop;     /* source is an active AL_LOOPING weapon-fire loop */
-    int             lastFireMs;     /* Com_Milliseconds() of last EV_FIRE_WEAPON event */
     float           occlusionGain;      /* smoothed [0..1] — 1.0 = unoccluded, applied every frame */
     float           occlusionTarget;    /* raw trace result [0..1] — occlusionGain blends towards this */
     int             occlusionTick;      /* s_al_loopFrame when last traced */
@@ -418,6 +401,8 @@ static cvar_t *s_alOccHFFloor;     /* floor of AL_LOWPASS_GAINHF (HF content) th
 static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest gap [0-1] */
 static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each frame */
 static cvar_t *s_alDebugPlayback;  /* 0=off 1=rate-mismatch+preemption 2=+natural-stop */
+static cvar_t *s_alMaxSrc;         /* max source pool size (LATCH) */
+static cvar_t *s_alDedupMs;        /* same-frame dedup window in ms (live) */
 
 /* Set to qtrue by the s_alReset command; cleared on the next probe cycle. */
 static qboolean s_al_reverbReset = qfalse;
@@ -728,61 +713,6 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     return normGain;
 }
 
-/* Scan PCM data backwards from the last frame to find the end of audible
- * content.  Returns the number of frames that contain non-silent audio,
- * i.e. (index of last frame above the silence threshold) + 1.
- *
- * This value drives the adaptive preemption guard in S_AL_StartSound: a
- * source playing on a named channel will not be cut short until its audible
- * content has been consumed.  Trailing digital silence, fade-outs, and
- * encoder padding are excluded so channels are not held unnecessarily long.
- *
- * Threshold: |sample| > 64 for 16-bit (≈ −54 dB) / |sample−128| > 2 for
- * 8-bit.  Quiet reverb tails below this level are treated as silence.
- *
- * Key design property: weapon fire sounds are authored so that their audible
- * content length ≈ the weapon's fire interval (e.g. MAC-11: 150 ms crack in
- * an 858 ms file).  The silent tail is padding.  Using contentSamples as the
- * guard therefore naturally matches each weapon's cadence without any hard-
- * coded per-weapon constants. */
-static int S_AL_ContentSamples( const void *pcm, const snd_info_t *info )
-{
-    int maxFrames, frame, c;
-
-    if ( !pcm || info->samples <= 0 || info->channels <= 0 || info->width <= 0
-         || info->size <= 0 )
-        return 0;
-
-    /* Guard against info->samples exceeding the actual buffer size. */
-    maxFrames = (int)( info->size / ( info->width * info->channels ) );
-    if ( maxFrames > info->samples )
-        maxFrames = info->samples;
-
-    if ( info->width == 2 ) {
-        const short *s = (const short *)pcm;
-        for ( frame = maxFrames - 1; frame >= 0; frame-- ) {
-            for ( c = 0; c < info->channels; c++ ) {
-                int v = s[ frame * info->channels + c ];
-                if ( v < 0 ) v = -v;
-                if ( v > 64 )
-                    return frame + 1;
-            }
-        }
-    } else if ( info->width == 1 ) {
-        const byte *s = (const byte *)pcm;
-        for ( frame = maxFrames - 1; frame >= 0; frame-- ) {
-            for ( c = 0; c < info->channels; c++ ) {
-                int v = (int)s[ frame * info->channels + c ] - 128;
-                if ( v < 0 ) v = -v;
-                if ( v > 2 )
-                    return frame + 1;
-            }
-        }
-    }
-
-    return 0;   /* all silent or unsupported bit depth */
-}
-
 /* Load a sound file into an AL buffer.  Returns the sfxHandle_t index
  * (>= 0) on success, 0 (the default-sound slot) on failure. */
 static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
@@ -832,10 +762,8 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
         fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
     }
 
-    /* Analyse PCM while it is still in the temp allocation — both passes are
-     * O(N) backward scans and complete in microseconds. */
-    r->normGain       = S_AL_CalcNormGain(pcm, &info);
-    r->contentSamples = S_AL_ContentSamples(pcm, &info);
+    /* Analyse PCM while it is still in the temp allocation. */
+    r->normGain = S_AL_CalcNormGain(pcm, &info);
 
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
@@ -940,72 +868,133 @@ static float S_AL_GetCategoryVol( alSrcCat_t cat )
     }
 }
 
-static int S_AL_FindSourceByChannel( int entnum, int entchannel )
-{
-    int i;
-    for (i = 0; i < s_al_numSrc; i++) {
-        if (!s_al_src[i].isPlaying) continue;
-        if (s_al_src[i].entnum == entnum &&
-            s_al_src[i].entchannel == entchannel &&
-            entchannel != CHAN_AUTO)
-            return i;
-    }
-    return -1;
-}
-
-/* Find a free source slot.  When the pool is full, steal the FARTHEST non-loop
- * 3D source rather than the oldest: distant sounds have less gameplay impact
- * than close ones, so evicting them first keeps nearby player/weapon audio
- * alive under the 30-player overload scenario.  Falls back to oldest overall
- * if every active source is local (own-player sounds).
- * Returns source index or -1 on hard failure. */
+/* Find a free source slot.  Before stealing anything, tries to grow the pool
+ * by asking OpenAL for a new source — slots are cheap on modern hardware.
+ *
+ * When the pool is genuinely full, eviction priority is:
+ *
+ *   Tier 1 — ENTITYNUM_WORLD (impacts, brass, debris): farthest first.
+ *            Missing a casing 2000 u away is fine; dropping a player shot
+ *            never is.
+ *   Tier 2 — Other-player / entity non-local 3D sources: farthest first.
+ *            Distant sounds have already faded; nearby teammates stay alive.
+ *   Tier 3 — Any non-local non-loop source: oldest first.
+ *   Tier 4 — Any non-loop source (own-player included): oldest first.
+ *            Last resort — own-player sounds are almost never here.
+ *
+ * Loop (ambient) sources are never stolen; they have their own management.
+ * Returns source index, or -1 only on a true hard AL failure. */
 static int S_AL_GetFreeSource( void )
 {
     int   i;
-    float farthestDist = -1.f;
-    int   farthestIdx  = -1;
-    int   oldestTime   = Com_Milliseconds();
-    int   oldestIdx    = -1;
+    int   maxSrc;
 
+    /* ---- Pass 1: free slot -------------------------------------------- */
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying)
             return i;
+    }
 
-        if (!s_al_src[i].loopSound) {
-            /* Track oldest as fallback for when no 3D sources exist */
-            if (s_al_src[i].allocTime < oldestTime) {
-                oldestTime = s_al_src[i].allocTime;
-                oldestIdx  = i;
+    /* ---- Pass 2: grow the pool ----------------------------------------- */
+    maxSrc = (s_alMaxSrc && s_alMaxSrc->integer > 0)
+             ? s_alMaxSrc->integer : S_AL_MAX_SRC;
+    if (maxSrc > S_AL_MAX_SRC) maxSrc = S_AL_MAX_SRC;
+
+    if (s_al_numSrc < maxSrc) {
+        ALuint newSource = 0;
+        qalGetError();
+        qalGenSources(1, &newSource);
+        if (qalGetError() == AL_NO_ERROR) {
+            i = s_al_numSrc;
+            s_al_src[i].source  = newSource;
+            s_al_src[i].sfx     = -1;
+            /* The EFX filter for this slot was pre-allocated at init —
+             * initialise it as pass-through for the first use. */
+            if (s_al_efx.available && s_al_efx.occlusionFilter[i]) {
+                qalFilteri(s_al_efx.occlusionFilter[i],
+                           AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                qalFilterf(s_al_efx.occlusionFilter[i],
+                           AL_LOWPASS_GAIN,   1.0f);
+                qalFilterf(s_al_efx.occlusionFilter[i],
+                           AL_LOWPASS_GAINHF, 1.0f);
             }
-            /* Prefer evicting the farthest non-local 3D source */
-            if (!s_al_src[i].isLocal) {
-                vec3_t d;
-                float  distSq;
-                VectorSubtract(s_al_src[i].origin, s_al_listener_origin, d);
+            s_al_numSrc++;
+            Com_DPrintf("S_AL: pool grew to %d sources\n", s_al_numSrc);
+            return i;
+        }
+    }
+
+    /* ---- Pass 3: steal by priority ------------------------------------- */
+    {
+        int   now          = Com_Milliseconds();
+        /* Tier 1 — world-entity, farthest */
+        float worldFarthest = -1.f;
+        int   worldIdx      = -1;
+        /* Tier 2 — other-entity non-local 3D, farthest */
+        float otherFarthest = -1.f;
+        int   otherIdx      = -1;
+        /* Tier 3 — any non-local, oldest */
+        int   nonLocalOldest = now;
+        int   nonLocalIdx    = -1;
+        /* Tier 4 — any non-loop, oldest (includes own-player as last resort) */
+        int   anyOldest      = now;
+        int   anyIdx         = -1;
+
+        for (i = 0; i < s_al_numSrc; i++) {
+            alSrc_t *src = &s_al_src[i];
+            if (!src->isPlaying || src->loopSound) continue;
+
+            /* Tier 4 baseline: oldest of everything */
+            if (src->allocTime < anyOldest) {
+                anyOldest = src->allocTime;
+                anyIdx    = i;
+            }
+
+            if (src->isLocal) continue; /* own-player: skip tiers 1-3 */
+
+            /* Tier 3: oldest non-local */
+            if (src->allocTime < nonLocalOldest) {
+                nonLocalOldest = src->allocTime;
+                nonLocalIdx    = i;
+            }
+
+            /* Distance for tiers 1 & 2 */
+            {
+                vec3_t  d;
+                float   distSq;
+                VectorSubtract(src->origin, s_al_listener_origin, d);
                 distSq = DotProduct(d, d);
-                if (distSq > farthestDist) {
-                    farthestDist = distSq;
-                    farthestIdx  = i;
+
+                if (src->entnum == ENTITYNUM_WORLD) {
+                    if (distSq > worldFarthest) {
+                        worldFarthest = distSq;
+                        worldIdx      = i;
+                    }
+                } else {
+                    if (distSq > otherFarthest) {
+                        otherFarthest = distSq;
+                        otherIdx      = i;
+                    }
                 }
             }
         }
-    }
 
-    /* Steal farthest 3D source if available; fall back to oldest overall */
-    {
-        int stealIdx = (farthestIdx >= 0) ? farthestIdx : oldestIdx;
-        if (stealIdx >= 0) {
-            /* Detach buffer explicitly so the slot is clean for reuse.
-             * Skipping this leaves the old buffer attached on some AL
-             * implementations, causing wrong-offset playback or silent
-             * failure on multi-sample weapon events (e.g. DE-50). */
-            qalSourceStop(s_al_src[stealIdx].source);
-            qalSourcei(s_al_src[stealIdx].source, AL_BUFFER, 0);
-            s_al_src[stealIdx].isPlaying = qfalse;
-            return stealIdx;
+        i = (worldIdx    >= 0) ? worldIdx    :
+            (otherIdx    >= 0) ? otherIdx    :
+            (nonLocalIdx >= 0) ? nonLocalIdx : anyIdx;
+
+        if (i >= 0) {
+            qalSourceStop(s_al_src[i].source);
+            qalSourcei(s_al_src[i].source, AL_BUFFER, 0);
+            s_al_src[i].isPlaying = qfalse;
+            return i;
         }
     }
-    return -1;
+
+    Com_DPrintf(S_COLOR_YELLOW
+        "S_AL_GetFreeSource: pool exhausted (all %d sources are looping ambients)\n",
+        s_al_numSrc);
+    return -1; /* all sources are looping ambients — should never happen */
 }
 
 /* Compute occlusion gain and find the best apparent source position for HRTF
@@ -1119,9 +1108,6 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->loopSound    = qfalse;
     src->allocTime    = Com_Milliseconds();
     src->isPlaying    = qtrue;
-    src->fadeStartMs  = 0;
-    src->weaponLoop   = qfalse;
-    src->lastFireMs   = 0;
     src->occlusionGain   = 1.0f;
     src->occlusionTarget = 1.0f;
     src->occlusionTick   = 0;
@@ -1273,9 +1259,6 @@ static void S_AL_StopSource( int idx )
     qalSourcei(s_al_src[idx].source, AL_BUFFER, 0);
     s_al_src[idx].isPlaying  = qfalse;
     s_al_src[idx].loopSound  = qfalse;
-    s_al_src[idx].weaponLoop = qfalse;
-    s_al_src[idx].lastFireMs = 0;
-    s_al_src[idx].fadeStartMs = 0;
 }
 
 /* =========================================================================
@@ -1542,7 +1525,7 @@ static void S_AL_Shutdown( void )
         qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.underwaterSlot);
         qalDeleteEffects(1, &s_al_efx.reverbEffect);
         qalDeleteEffects(1, &s_al_efx.underwaterEffect);
-        for (j = 0; j < s_al_numSrc; j++)
+        for (j = 0; j < S_AL_MAX_SRC; j++)
             if (s_al_efx.occlusionFilter[j])
                 qalDeleteFilters(1, &s_al_efx.occlusionFilter[j]);
         Com_Memset(&s_al_efx, 0, sizeof(s_al_efx));
@@ -1574,198 +1557,35 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     r = &s_al_sfx[sfx];
     if (!r->inMemory || r->defaultSound || !r->buffer) return;
 
-    /* Per-entity per-sfx dedup: prevent the same sound starting twice on the
-     * same entity within a short window.  Matches DMA's 20-ms dedup window.
-     * ENTITYNUM_WORLD (bullet impacts / casings at sv_fps rate) gets a wider
-     * 100-ms window — the same value DMA uses — so a burst of impacts doesn't
-     * saturate the pool before the world-entity cap below can kick in. */
-    {
-        int now     = Com_Milliseconds();
-        int dedupMs = (entnum == ENTITYNUM_WORLD) ? 100 : 20;
-        int j;
-        for (j = 0; j < s_al_numSrc; j++) {
-            if (!s_al_src[j].isPlaying)       continue;
-            if (s_al_src[j].entnum != entnum) continue;
-            if (s_al_src[j].sfx   != sfx)     continue;
-            if ((now - s_al_src[j].allocTime) < dedupMs)
-                return;
-        }
-    }
-
-    /* Hard cap on sources owned by ENTITYNUM_WORLD (impacts, casings, debris).
-     * All these events share a single entity number so without a cap they can
-     * exhaust the 96-source pool during heavy fire and starve player sounds.
-     * Mirrors DMA's WORLD_ENTITY_MAX_CHANNELS = MAX_CHANNELS / 8 = 12. */
-    if (entnum == ENTITYNUM_WORLD) {
-        int worldCount = 0;
-        for (int j = 0; j < s_al_numSrc; j++)
-            if (s_al_src[j].isPlaying && s_al_src[j].entnum == ENTITYNUM_WORLD)
-                worldCount++;
-        if (worldCount >= (s_al_numSrc / 8))
-            return;
-    }
-
-    /* Reuse/override same (entnum, entchannel) if not CHAN_AUTO */
-    if (entchannel != CHAN_AUTO) {
-        srcIdx = S_AL_FindSourceByChannel(entnum, entchannel);
-        if (srcIdx >= 0) {
-            /* Weapon-fire loop: same sfx re-submitted on the same named
-             * channel while still playing.  This is the game driving a
-             * continuous fire sound (automatic fire or rapid semi-auto).
-             *
-             * Three things happen on each fire event within the window:
-             *   1. AL_LOOPING is enabled (first time only) so that the
-             *      buffer repeats seamlessly when the trigger is held.
-             *   2. AL_SAMPLE_OFFSET is reset to 0 so the attack transient
-             *      is heard at the weapon's actual fire cadence even when
-             *      the sample is longer than the inter-shot interval.
-             *      Without the seek, the source would continue mid-buffer
-             *      and the crack would only be heard at each full sample-
-             *      length cycle rather than at each animation frame.
-             *   3. lastFireMs is refreshed so S_AL_Update keeps the loop
-             *      alive while the trigger is held.
-             *
-             * Age is measured against lastFireMs (not allocTime) once the
-             * loop is active.  Using allocTime breaks sustained automatic
-             * fire: the source is created once at shot 1, so after
-             * WEAPON_FIRE_LOOP_TIMEOUT_MS from that moment every subsequent
-             * fire event falls through and is either blocked by the guard
-             * or silently dropped.  lastFireMs reflects the most recent
-             * EV_FIRE_WEAPON and resets with every shot, keeping the loop
-             * alive for as long as the trigger is held.
-             *
-             * S_AL_Update clears AL_LOOPING once no event arrives within
-             * WEAPON_FIRE_LOOP_TIMEOUT_MS (trigger released / burst ended),
-             * letting the current buffer iteration play to its natural end.
-             */
-            {
-                int nowMs   = Com_Milliseconds();
-                int loopAge = (s_al_src[srcIdx].weaponLoop &&
-                               s_al_src[srcIdx].lastFireMs > 0)
-                              ? (nowMs - s_al_src[srcIdx].lastFireMs)
-                              : (nowMs - s_al_src[srcIdx].allocTime);
-                if (s_al_src[srcIdx].sfx == sfx &&
-                        loopAge <= WEAPON_FIRE_LOOP_TIMEOUT_MS) {
-                    if (!s_al_src[srcIdx].weaponLoop) {
-                        qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
-                        s_al_src[srcIdx].weaponLoop = qtrue;
-                    }
-                    /* Seek to frame 0: attack transient at every fire cadence. */
-                    qalSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, 0);
-                    s_al_src[srcIdx].lastFireMs = nowMs;
-                    return;
-                }
-            }
-
-            /* Preemption guard — protects the initial attack transient of
-             * the current sound from being immediately cut by a new one.
-             *
-             * The guard is only applied when the incoming sfx DIFFERS from
-             * the current one (e.g. a cycle sound arriving while a fire
-             * sound is playing).  Same-sfx re-fires that fall outside the
-             * loop window above represent a new burst after a pause; they
-             * bypass the guard and preempt immediately.  Without this
-             * bypass, a looping source whose AL_SAMPLE_OFFSET just reset to
-             * 0 at the loop boundary would look like a "fresh" sound to the
-             * guard and block the incoming shot indefinitely.
-             *
-             * For CHAN_WEAPON the guard is capped at WEAPON_GUARD_CAP_MS
-             * (150 ms) so that a long fire sound (e.g. de_out.wav with
-             * ~2.5 s of audible content) cannot silence rapid-fire events
-             * for its full content duration.  The cap covers the crack /
-             * transient of every URT weapon while allowing cycle sounds
-             * through at any realistic fire cadence.
-             *
-             * Non-weapon channels (ambient, impacts) use the full
-             * contentSamples so they play to their audible end.
-             *
-             * AL_SOURCE_STATE is checked first: an AL_STOPPED source has
-             * its AL_SAMPLE_OFFSET reset to 0 which would falsely hold the
-             * guard open — skip the guard entirely when the source is done. */
-            if (s_al_src[srcIdx].sfx != sfx) {
-                int curSfx = s_al_src[srcIdx].sfx;
-                if (curSfx >= 0 && curSfx < s_al_numSfx) {
-                    int content = s_al_sfx[curSfx].contentSamples;
-                    if (content > 0) {
-                        ALint state = AL_STOPPED;
-                        if (entchannel == CHAN_WEAPON) {
-                            int cap = (int)((long long)WEAPON_GUARD_CAP_MS *
-                                            s_al_sfx[curSfx].fileRate / 1000);
-                            if (cap > 0 && content > cap)
-                                content = cap;
-                        }
-                        qalGetSourcei(s_al_src[srcIdx].source,
-                                      AL_SOURCE_STATE, &state);
-                        if (state == AL_PLAYING) {
-                            ALint offset = 0;
-                            qalGetSourcei(s_al_src[srcIdx].source,
-                                          AL_SAMPLE_OFFSET, &offset);
-                            if (offset < content)
-                                return;
-                        }
-                    }
-                }
-            }
-
-            /* Level 1: label preemptions so they are visually distinct from
-             * natural completions in the playback log. */
-            if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1) {
-                alSrc_t    *old   = &s_al_src[srcIdx];
-                ALint       offset = 0;
-                const char *oldName = "(unknown)";
-                const char *newName = "(unknown)";
-                int         total   = 0;
-
-                qalGetSourcei(old->source, AL_SAMPLE_OFFSET, &offset);
-                if (old->sfx >= 0 && old->sfx < s_al_numSfx) {
-                    oldName = s_al_sfx[old->sfx].name;
-                    total   = s_al_sfx[old->sfx].soundLength;
-                }
-                if (sfx >= 0 && sfx < s_al_numSfx)
-                    newName = s_al_sfx[sfx].name;
-
-                Com_Printf(S_COLOR_RED
-                    "[alDbg] PREEMPT  %-40s  played %d / %d smp (%.0f%%)  "
-                    "chan=%d  by: %s\n",
-                    oldName, offset, total,
-                    (total > 0) ? (100.0f * offset / total) : 0.0f,
-                    entchannel, newName);
-            }
-            S_AL_StopSource(srcIdx);
-        }
-    }
-
-    srcIdx = S_AL_GetFreeSource();
-    if (srcIdx < 0) return;
-
+    /* Determine the sound's world origin as early as possible so we can
+     * apply a distance-based rejection before allocating any slot.
+     * Sounds beyond s_alMaxDist are already inaudible in the distance
+     * model — don't waste a slot on them. */
     if (entnum == s_al_listener_entnum &&
             (!s_alLocalSelf || s_alLocalSelf->integer)) {
-        /* Own-entity sound: always non-spatialized regardless of whether an
-         * explicit origin was supplied.  The origin passed by the game code
-         * is the player's position at the moment the event fired; with URT's
-         * jumping/sliding physics that position can be significantly stale by
-         * the time the frame is rendered, causing footstep and landing sounds
-         * to appear to come from behind the player.  Treating them as local
-         * (relative-mode, position 0,0,0) keeps them firmly at the listener
-         * regardless of velocity — matching snd_dma.c behaviour.
-         * Disable with s_alLocalSelf 0 to restore the old positional path. */
         VectorClear(sndOrigin);
         isLocal = qtrue;
     } else if (origin) {
-        /* Caller supplied a world-space origin — use it as-is. */
         VectorCopy(origin, sndOrigin);
         isLocal = qfalse;
     } else {
-        /* No origin given: look up entity's last known position from cache
-         * (filled by UpdateEntityPosition and Respatialize).  If the cache
-         * is still zero the sound starts at the world origin and is corrected
-         * on the very next frame by UpdateEntityPosition. */
         if (entnum >= 0 && entnum < MAX_GENTITIES)
             VectorCopy(s_al_entity_origins[entnum], sndOrigin);
         else
             VectorClear(sndOrigin);
         isLocal = qfalse;
     }
+
+    if (!isLocal) {
+        float maxDist = s_alMaxDist ? s_alMaxDist->value : S_AL_SOUND_MAXDIST;
+        vec3_t d;
+        VectorSubtract(sndOrigin, s_al_listener_origin, d);
+        if (DotProduct(d, d) > maxDist * maxDist)
+            return;   /* beyond audible range — no slot needed */
+    }
+
+    srcIdx = S_AL_GetFreeSource();
+    if (srcIdx < 0) return;
 
     vol = S_AL_GetMasterVol();
     /* fixed_origin: lock position only for explicit world-space origins that
@@ -1776,16 +1596,6 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                   qfalse /* one-shot entity sound, not ambient */);
 
     r->lastTimeUsed = Com_Milliseconds();
-
-    /* Fade-in: start at silence and ramp to full gain over SRC_FADE_IN_MS
-     * to smooth the preemption transition for local (own-player) sounds.
-     * Non-local sources have their gain managed every frame by the occlusion
-     * updater, so the fade is applied only to the isLocal path here. */
-    if (s_al_src[srcIdx].isLocal) {
-        qalSourcef(s_al_src[srcIdx].source, AL_GAIN, 0.0f);
-        s_al_src[srcIdx].fadeStartMs = Com_Milliseconds();
-    }
-
     qalSourcePlay(s_al_src[srcIdx].source);
 }
 
@@ -2736,7 +2546,7 @@ static void S_AL_ReverbReset_f( void )
 
 static void S_AL_Update( int msec )
 {
-    int   i, now;
+    int   i;
     ALint state;
     float masterGain, musicGain;
 
@@ -2829,39 +2639,10 @@ static void S_AL_Update( int msec )
         }
     }
 
-    /* Reap stopped sources; also drive weapon-fire loop timeouts and
-     * per-source gain fade-ins. */
-    now = Com_Milliseconds();
+    /* Reap stopped sources — mark them free immediately so the next
+     * S_AL_GetFreeSource pass 1 finds them without growing or stealing. */
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
-
-        /* Weapon-fire loop: clear AL_LOOPING when the trigger has been
-         * released (no new EV_FIRE_WEAPON event for WEAPON_FIRE_LOOP_-
-         * TIMEOUT_MS).  Setting AL_LOOPING = AL_FALSE on a playing source
-         * causes OpenAL to finish the current buffer iteration and then
-         * stop — the "plays out naturally on trigger release" behaviour. */
-        if (s_al_src[i].weaponLoop &&
-                (now - s_al_src[i].lastFireMs) > WEAPON_FIRE_LOOP_TIMEOUT_MS) {
-            qalSourcei(s_al_src[i].source, AL_LOOPING, AL_FALSE);
-            s_al_src[i].weaponLoop = qfalse;
-        }
-
-        /* Gain fade-in for local (own-player) sources: ramp from 0 to
-         * the base gain over SRC_FADE_IN_MS to smooth the hard cut of a
-         * preempted predecessor.  Non-local source gain is written every
-         * frame by the occlusion updater, so no separate ramp is needed. */
-        if (s_al_src[i].fadeStartMs > 0 && s_al_src[i].isLocal) {
-            int   elapsed = now - s_al_src[i].fadeStartMs;
-            float catVol  = S_AL_GetCategoryVol(s_al_src[i].category);
-            float target  = (s_al_src[i].master_vol / 255.0f) * catVol;
-            if (elapsed >= SRC_FADE_IN_MS) {
-                qalSourcef(s_al_src[i].source, AL_GAIN, target);
-                s_al_src[i].fadeStartMs = 0;
-            } else {
-                float t = (float)elapsed / SRC_FADE_IN_MS;
-                qalSourcef(s_al_src[i].source, AL_GAIN, t * target);
-            }
-        }
 
         qalGetSourcei(s_al_src[i].source, AL_SOURCE_STATE, &state);
         if (state == AL_STOPPED) {
@@ -3477,6 +3258,27 @@ qboolean S_AL_Init( soundInterface_t *si )
         "or degraded by the resampler (rate mismatch). "
         "Not archived. Set before loading a map to catch registration warnings.");
 
+    /* Source pool size.  The pool starts at this size and grows dynamically
+     * on demand up to S_AL_MAX_SRC.  Reduce if your audio driver struggles
+     * (extremely rare on modern hardware).  Requires vid_restart (LATCH). */
+    s_alMaxSrc = Cvar_Get("s_alMaxSrc", "512", CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alMaxSrc, "16", va("%d", S_AL_MAX_SRC), CV_INTEGER);
+    Cvar_SetDescription(s_alMaxSrc,
+        "Maximum OpenAL source slots.  Default 512 — slots are cheap on modern "
+        "hardware; reduce only if the audio driver reports resource errors.  "
+        "Requires vid_restart (LATCH).");
+
+    /* Dedup window — disabled by default (0).  Set to e.g. 20 to suppress
+     * identical (entity, sfx) re-submissions within that many milliseconds.
+     * Vanilla URT doesn't bother and nobody notices; kept as a cvar in case
+     * it is ever needed for unusual sound designs. */
+    s_alDedupMs = Cvar_Get("s_alDedupMs", "0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alDedupMs, "0", "200", CV_INTEGER);
+    Cvar_SetDescription(s_alDedupMs,
+        "Same-entity same-sfx dedup window in milliseconds.  0 = disabled (default).  "
+        "When > 0, suppresses a second start of the exact same sound from the same "
+        "entity within this window — prevents audible doubling on rapid re-triggers.");
+
     /* Load library */
     if (!S_AL_LoadLibrary())
         return qfalse;
@@ -3654,19 +3456,26 @@ qboolean S_AL_Init( soundInterface_t *si )
                (s_al_directChannelsExt && !s_al_directChannels)
                    ? " (disabled by s_alDirectChannels 0)" : "");
 
-    /* Allocate source pool */
-    s_al_numSrc = 0;
-    Com_Memset(s_al_src, 0, sizeof(s_al_src));
-    for (i = 0; i < S_AL_MAX_SRC; i++) {
-        qalGenSources(1, &s_al_src[i].source);
-        if (qalGetError() != AL_NO_ERROR) {
-            Com_DPrintf("S_AL: created %d sources (AL_OUT_OF_RESOURCES)\n", i);
-            break;
+    /* Allocate source pool — up to s_alMaxSrc sources (capped at S_AL_MAX_SRC).
+     * OpenAL Soft will stop early if it hits its own mix-voice limit. */
+    {
+        int wantSrc = (s_alMaxSrc && s_alMaxSrc->integer > 0)
+                      ? s_alMaxSrc->integer : S_AL_MAX_SRC;
+        if (wantSrc > S_AL_MAX_SRC) wantSrc = S_AL_MAX_SRC;
+
+        s_al_numSrc = 0;
+        Com_Memset(s_al_src, 0, sizeof(s_al_src));
+        for (i = 0; i < wantSrc; i++) {
+            qalGenSources(1, &s_al_src[i].source);
+            if (qalGetError() != AL_NO_ERROR) {
+                Com_DPrintf("S_AL: created %d sources (AL_OUT_OF_RESOURCES)\n", i);
+                break;
+            }
+            s_al_src[i].sfx = -1;
+            s_al_numSrc++;
         }
-        s_al_src[i].sfx = -1;
-        s_al_numSrc++;
+        Com_Printf("S_AL: %d sources allocated\n", s_al_numSrc);
     }
-    Com_Printf("S_AL: %d sources allocated\n", s_al_numSrc);
 
     /* Music streaming source and buffers */
     Com_Memset(&s_al_music, 0, sizeof(s_al_music));
