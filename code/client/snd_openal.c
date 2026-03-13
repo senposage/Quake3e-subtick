@@ -578,12 +578,12 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
     if (S_AL_CheckError("alGenBuffers")) {
-        Z_Free(pcm);
+        Hunk_FreeTempMemory(pcm);
         return 0;
     }
 
     qalBufferData(r->buffer, fmt, pcm, info.size, info.rate);
-    Z_Free(pcm);
+    Hunk_FreeTempMemory(pcm);
 
     if (S_AL_CheckError("alBufferData")) {
         qalDeleteBuffers(1, &r->buffer);

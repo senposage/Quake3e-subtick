@@ -645,6 +645,8 @@ else
 
   ifeq ($(PLATFORM),linux)
     LDFLAGS += -ldl -Wl,--hash-style=both
+    # Allow the client binary to load libopenal.so.1 from its own directory
+    CLIENT_LDFLAGS += -Wl,-rpath,'$$ORIGIN'
     ifeq ($(ARCH),x86)
       # linux32 make ...
       BASE_CFLAGS += -m32
