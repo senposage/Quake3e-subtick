@@ -227,7 +227,9 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `s_alDevice` | `""` | OpenAL output device; empty = system default. Type `/s_devices` for a numbered pick-list. (LATCH) |
-| `s_alHRTF` | `1` | Enable HRTF binaural rendering via OpenAL Soft (LATCH) |
+| `s_alHRTF` | `0` | Enable HRTF binaural rendering via OpenAL Soft. **Default 0 (off)** — only enable when using headphones; on speakers HRTF smears weapon transients. (LATCH) |
+| `s_alEFX` | `1` | Enable ALC_EXT_EFX (occlusion filters, reverb aux slots). Set to 0 to skip EFX entirely for diagnostic isolation. (LATCH) |
+| `s_alDirectChannels` | `1` | Route own-player (local) sources directly to the stereo output, bypassing the HRTF centre-HRIR convolution. **Default 1 (on)** — preserves the transient punch of weapon sounds (e.g. de.wav). Set to 0 to route all sources through the full OpenAL pipeline. Requires `AL_SOFT_direct_channels` extension. (LATCH) |
 | `s_alMaxDist` | `1330` | Max attenuation distance in game units; matches vanilla dma range |
 | `s_alReverb` | `0` | Master EFX reverb toggle. **Default 0 = vanilla dma behaviour** |
 | `s_alReverbGain` | `0.20` | EFX wet slot gain [0–1]. Ceiling when `s_alDynamicReverb 1` |
@@ -1049,13 +1051,15 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | Cvar | Default | Notes |
 |---|---|---|
 | `s_alDevice` | `""` | OpenAL output device name; empty = OS default |
-| `s_alHRTF` | `1` | Enable three-layer HRTF + higher-order Ambisonic rendering |
-| `s_alMaxDist` | `1024` | Override max attenuation distance (floor: 1330 Q3 units) |
+| `s_alHRTF` | `0` | Enable three-layer HRTF + higher-order Ambisonic rendering. Off by default (headphones only). (LATCH) |
+| `s_alEFX` | `1` | Enable ALC_EXT_EFX. Set to 0 for diagnostic isolation. (LATCH) |
+| `s_alDirectChannels` | `1` | Route own-player sources directly to stereo output, bypassing HRTF centre-HRIR. (LATCH) |
+| `s_alMaxDist` | `1330` | Override max attenuation distance (floor: 1330 Q3 units) |
 
 - OpenAL Soft selects the native device rate automatically (no `s_khz` needed).
 - `s_doppler` controls `AL_DOPPLER_FACTOR` (1.0 = enabled, 0.0 = disabled).
 - HRTF uses OpenAL Soft's built-in CIPIC / MIT KEMAR datasets — no custom DSP code.
-- EFX (`ALC_EXT_EFX`) is detected and enabled automatically; no cvar needed.
+- EFX (`ALC_EXT_EFX`) is detected and enabled when `s_alEFX 1`; set to 0 to bypass entirely.
 - Occlusion traced via `CM_BoxTrace` every 4 frames per source; applied as EFX low-pass filter if available, else gain scale.
 - Ambisonic order for HRTF rendering auto-detected from `ALC_MAX_AMBISONIC_ORDER_SOFT` (capped at 3rd order).
 

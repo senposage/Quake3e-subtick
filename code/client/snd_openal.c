@@ -357,6 +357,7 @@ static alEfx_t s_al_efx;
 static cvar_t *s_alDevice;
 static cvar_t *s_alHRTF;
 static cvar_t *s_alEFX;          /* 0 = skip EFX init entirely (test/debug) */
+static cvar_t *s_alDirectChannels; /* 0 = disable AL_SOFT_direct_channels even if available (LATCH) */
 static cvar_t *s_alMaxDist;
 static cvar_t *s_alReverb;       /* master EFX reverb toggle (0/1) */
 static cvar_t *s_alReverbGain;   /* wet-signal slot gain [0..1] */
@@ -398,7 +399,8 @@ static qboolean s_al_reverbReset = qfalse;
  * HRTF "center" HRIR, which smears the initial transient of weapon sounds
  * (e.g. de.wav) and produces the characteristic "wet blanket / no punch"
  * complaint on weapons like the DE-50. */
-static qboolean s_al_directChannels = qfalse;
+static qboolean s_al_directChannelsExt = qfalse; /* AL_SOFT_direct_channels extension present */
+static qboolean s_al_directChannels    = qfalse; /* active: extension present AND cvar enabled */
 
 /* =========================================================================
  * Section 5 — Library loading helpers
@@ -2914,11 +2916,16 @@ static void S_AL_SoundInfo( void )
             : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
         s_alOcclusion ? s_alOcclusion->integer : 0);
 
-    /* AL_DIRECT_CHANNELS_SOFT — bypasses HRTF on local sources (good) */
-    Com_Printf("    DirectChannels    %s  (AL_SOFT_direct_channels%s)\n",
-        s_al_directChannels ? S_COLOR_GREEN "ON " S_COLOR_WHITE
-                            : S_COLOR_YELLOW "OFF" S_COLOR_WHITE,
-        s_al_directChannels ? " available" : " not available");
+    /* AL_DIRECT_CHANNELS_SOFT — bypasses HRTF on local sources (good for weapons) */
+    if (!s_al_directChannelsExt) {
+        Com_Printf("    DirectChannels    " S_COLOR_YELLOW "OFF" S_COLOR_WHITE
+                   "  (AL_SOFT_direct_channels not available)\n");
+    } else {
+        Com_Printf("    DirectChannels    %s  (s_alDirectChannels %d, LATCH)\n",
+            s_al_directChannels ? S_COLOR_GREEN "ON " S_COLOR_WHITE
+                                : S_COLOR_YELLOW "OFF" S_COLOR_WHITE,
+            s_alDirectChannels ? s_alDirectChannels->integer : 1);
+    }
 
     Com_Printf("\n");
 
@@ -2929,11 +2936,17 @@ static void S_AL_SoundInfo( void )
             !hrtfOn &&
             !s_al_efx.available &&
             !(s_alOcclusion && s_alOcclusion->integer);
-        Com_Printf("  Passthrough check: %s\n",
-            passthrough
-                ? S_COLOR_GREEN "PASS — HRTF off, EFX off, occlusion off.  "
-                  "Signal path is: PCM → distance model → stereo pan → output." S_COLOR_WHITE
-                : S_COLOR_YELLOW "PARTIAL — one or more features still active (see above)" S_COLOR_WHITE);
+        if (passthrough) {
+            Com_Printf("  Passthrough check: %s\n",
+                S_COLOR_GREEN "PASS — HRTF off, EFX off, occlusion off.  "
+                "Signal path is: PCM → distance model → stereo pan → output." S_COLOR_WHITE);
+            if (s_al_directChannels)
+                Com_Printf("    (DirectChannels ON: own-player sources skip distance model too"
+                           " — PCM → stereo output directly.)\n");
+        } else {
+            Com_Printf("  Passthrough check: %s\n",
+                S_COLOR_YELLOW "PARTIAL — one or more features still active (see above)" S_COLOR_WHITE);
+        }
     }
 
     Com_Printf("\n");
@@ -3014,6 +3027,15 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alEFX, "Enable ALC_EXT_EFX (occlusion filters, reverb slots). "
         "0 = skip EFX init entirely; no filter objects or aux sends on any source. "
         "Use to isolate EFX as a cause of audio issues. Requires vid_restart (LATCH).");
+    s_alDirectChannels = Cvar_Get("s_alDirectChannels", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alDirectChannels, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alDirectChannels,
+        "Enable AL_SOFT_direct_channels for own-player (local) sources. "
+        "When 1 (default), own-weapon and footstep sounds are routed directly to the "
+        "stereo mix, bypassing the HRTF centre-HRIR convolution — this preserves the "
+        "transient punch of weapon sounds (e.g. de.wav) even when s_alHRTF is on. "
+        "Set to 0 to route all sources through the full OpenAL pipeline. "
+        "Requires vid_restart (LATCH).");
     /* s_alMaxDist: default matches the vanilla dma max-audible distance.
      * Values below 1330 are clamped to 1330 by the distance-model setup. */
     s_alMaxDist = Cvar_Get("s_alMaxDist", "1330", CVAR_ARCHIVE_ND);
@@ -3283,12 +3305,17 @@ qboolean S_AL_Init( soundInterface_t *si )
     S_AL_InitEFX();
 
     /* Detect AL_SOFT_direct_channels.  Available in OpenAL Soft since v1.13.
-     * When present, local sources (own-player weapons, footsteps) will be
-     * routed directly to the stereo output instead of through the HRTF
-     * convolution kernel — preserving the transient punch of de.wav etc. */
-    s_al_directChannels = qalIsExtensionPresent("AL_SOFT_direct_channels");
-    Com_Printf("S_AL: AL_SOFT_direct_channels: %s\n",
-               s_al_directChannels ? "available" : "not available");
+     * When present AND s_alDirectChannels is 1 (default), local sources
+     * (own-player weapons, footsteps) will be routed directly to the stereo
+     * output instead of through the HRTF convolution kernel — preserving the
+     * transient punch of de.wav etc. */
+    s_al_directChannelsExt = qalIsExtensionPresent("AL_SOFT_direct_channels");
+    s_al_directChannels    = s_al_directChannelsExt &&
+                             s_alDirectChannels && s_alDirectChannels->integer;
+    Com_Printf("S_AL: AL_SOFT_direct_channels: %s%s\n",
+               s_al_directChannelsExt ? "available" : "not available",
+               (s_al_directChannelsExt && !s_al_directChannels)
+                   ? " (disabled by s_alDirectChannels 0)" : "");
 
     /* Allocate source pool */
     s_al_numSrc = 0;
