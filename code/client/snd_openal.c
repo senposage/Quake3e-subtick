@@ -742,6 +742,10 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
 
     VectorCopy(srcOrigin, acousticPos);
 
+    /* Guard: CM_BoxTrace with handle 0 will crash if no map is loaded. */
+    if (CM_NumInlineModels() <= 0)
+        return 1.0f;
+
     CM_BoxTrace(&tr, s_al_listener_origin, srcOrigin,
                 vec3_origin, vec3_origin,
                 0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
@@ -1489,10 +1493,16 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
     if (entityNum >= 0 && entityNum < MAX_GENTITIES)
         VectorCopy(origin, s_al_entity_origins[entityNum]);
 
-    /* Move any active source attached to this entity */
+    /* Move any active source attached to this entity.
+     * Skip local (listener-relative) sources: they use AL_SOURCE_RELATIVE=TRUE
+     * and must stay at position (0,0,0).  Setting them to a world-space origin
+     * while they are in relative mode causes the sound to appear off to the
+     * side or behind the player (the world coordinate is treated as a relative
+     * offset from the listener instead of an absolute position). */
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying) continue;
-        if (s_al_src[i].entnum == entityNum && !s_al_src[i].fixed_origin) {
+        if (s_al_src[i].entnum == entityNum && !s_al_src[i].fixed_origin
+                && !s_al_src[i].isLocal) {
             VectorCopy(origin, s_al_src[i].origin);
             qalSource3f(s_al_src[i].source, AL_POSITION,
                         origin[0], origin[1], origin[2]);
@@ -1566,6 +1576,9 @@ static void S_AL_UpdateDynamicReverb( void )
     if (!s_alReverb        || !s_alReverb->integer)           return;
     if (!s_alDynamicReverb || !s_alDynamicReverb->integer)    return;
     if (s_al_inwater)                                         return;
+    /* No map loaded yet (main menu, pre-game) — CM_BoxTrace with handle 0
+     * would crash with "bad handle 0 < 0 < 256" when cm.numSubModels == 0. */
+    if (CM_NumInlineModels() <= 0)                            return;
 
     /* Detect frame-counter reset (map load / StopAllSounds) */
     snap = (s_al_loopFrame < lastFrame || curDecay < 0.f);
