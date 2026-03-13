@@ -1591,18 +1591,22 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
              * If audible content is still playing, drop the incoming request
              * rather than cutting the sound short.
              *
-             * This handles every case uniformly:
-             *   • Long fire sounds (de_out.wav, 2.5 s content) are never
-             *     cut by short animation events (cock.wav) on CHAN_WEAPON.
-             *   • Full-auto fire sounds authored with content ≈ fire interval
-             *     (MAC-11: 150 ms crack in 858 ms file) expire their guard
-             *     right at the fire cadence, so rapid-fire restarts go
-             *     through naturally.
-             *   • Inside/outside weapon variants switch cleanly once the
-             *     current sound's audible content is consumed.
-             *   • Ambient/environment sounds (trucks, city noise) play to
-             *     their audible end before the map can retrigger them.
-             *   • Impact sounds play their full crack before being replaced.
+             * Exception: if the incoming sound has MORE audible content than
+             * the current sound, allow preemption unconditionally.  This lets
+             * fire booms (large contentSamples) cut through weapon-cycle
+             * sounds (small contentSamples, e.g. cock.wav) still in playback,
+             * so automatic fire and rapid-fire pistols are never silenced by
+             * the previous shot's cycle event.
+             *
+             * Summary of cases:
+             *   • Long fire sounds (de_out.wav, 2.5 s) blocked from being
+             *     cut by short cycle sounds (cock.wav) — incoming < current.
+             *   • Next fire boom preempts a cycle sound still playing —
+             *     incoming > current, guard skipped.
+             *   • Full-auto same-sfx (MAC-11): equal content, guard expires
+             *     at fire cadence, every shot restarts cleanly.
+             *   • Ambient same-sfx (truckpassby): equal content, guard holds
+             *     for full audible length.
              *
              * Falls through immediately when contentSamples == 0 (all-
              * silent or unknown file) so those are always preemptable. */
@@ -1620,10 +1624,22 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                         ALint state = AL_STOPPED;
                         qalGetSourcei(s_al_src[srcIdx].source, AL_SOURCE_STATE, &state);
                         if ( state == AL_PLAYING ) {
-                            ALint offset = 0;
-                            qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
-                            if ( offset < content )
-                                return;
+                            /* Additionally, skip the guard when the incoming
+                             * sound has MORE audible content than the current
+                             * sound.  A fire boom (large contentSamples) must
+                             * always be able to preempt a weapon-cycle sound
+                             * (small contentSamples, e.g. cock.wav, slide.wav)
+                             * so that automatic fire and rapid-fire pistols are
+                             * never silenced by a cycle event that is still in
+                             * playback on the channel. */
+                            int incomingContent = (sfx >= 0 && sfx < s_al_numSfx)
+                                                  ? s_al_sfx[sfx].contentSamples : 0;
+                            if ( incomingContent <= content ) {
+                                ALint offset = 0;
+                                qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
+                                if ( offset < content )
+                                    return;
+                            }
                         }
                     }
                 }

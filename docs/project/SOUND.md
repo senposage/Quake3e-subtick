@@ -1161,22 +1161,64 @@ frame above the silence threshold (≈ −54 dB for 16-bit).  This value,
 is an O(N) integer comparison loop — microseconds per file — done once while
 the PCM is already in RAM before being handed to OpenAL.
 
-`S_AL_StartSound` first queries `AL_SOURCE_STATE`.  If the source is
-`AL_STOPPED` (the sound finished playing but `isPlaying` has not yet been
-cleared by `S_AL_Update`), the guard is skipped — preemption proceeds
-immediately so that rapid-fire and back-to-back requests are never silenced.
-If the source is `AL_PLAYING`, `AL_SAMPLE_OFFSET` is read; if
-`offset < contentSamples`, the incoming request is dropped.  If the current
-sound has consumed its audible content (or the file is all-silent,
-`contentSamples == 0`), preemption proceeds normally.
+`S_AL_StartSound` applies two checks before engaging the guard:
 
-This single rule handles every case without any channel-specific constants:
+1. **State check** — query `AL_SOURCE_STATE`.  If `AL_STOPPED` (sound finished
+   but `isPlaying` not yet cleared by `S_AL_Update`), skip the guard entirely;
+   `AL_SAMPLE_OFFSET` resets to 0 on a stopped source and would otherwise
+   falsely trigger the guard, silencing rapid-fire follow-ups.
+
+2. **Content-magnitude check** — compare the incoming sound's `contentSamples`
+   against the current sound's `contentSamples`.  If the incoming sound has
+   *more* audible content than the current sound, skip the guard and allow
+   preemption immediately.  This lets a fire boom (large `contentSamples`)
+   always cut through a weapon-cycle sound (small `contentSamples`, e.g.
+   `cock.wav`, `slide.wav`) that is still in playback on the channel —
+   preventing automatic fire and rapid-fire pistols from being silenced when the
+   cycle event from the previous shot has not yet finished.
+
+If both checks pass (source is `AL_PLAYING` and incoming content ≤ current
+content), `AL_SAMPLE_OFFSET` is read; if `offset < contentSamples`, the
+incoming request is dropped.  If the current sound has consumed its audible
+content (or the file is all-silent, `contentSamples == 0`), preemption proceeds
+normally.
+
+### URT weapon audio model
+
+URT builds weapon audio by continuously re-submitting the fire sound while the
+trigger is held — it does **not** use OpenAL looping (`AL_LOOPING`).  The game
+fires `EV_FIRE_WEAPON` every server frame; each submission attempts to restart
+the same file from the beginning.  The guard lets the current iteration play
+until its audible content is consumed before accepting the restart, which
+creates a seamless looping effect at the weapon's fire cadence.  When the
+trigger is released (no more `EV_FIRE_WEAPON` events), the current iteration
+plays out its silent tail and the source reaches `AL_STOPPED` naturally —
+producing the characteristic "spin-down" feel without any hard truncation.
+
+Semi-automatic weapons (pistols, DE-50) additionally submit per-shot animation
+sounds (`back.wav`, `cock.wav`, `slide.wav`) on `CHAN_WEAPON` immediately after
+the fire event.  These cycle sounds must not be able to silence the fire boom,
+and the fire boom must be able to preempt a cycle sound that is still playing
+when the trigger is pulled again.
+
+### What the guard handles
 
 - **DE-50 `de_out.wav`** — ~2.5 s audible content in a 3.74 s file.
-  `cock.wav` arriving at 130 ms is dropped.  The fire boom plays fully.
-- **MAC-11 `mac11-inside.wav`** — 858 ms file, fire rate 150 ms.  Audible
-  crack ≈ 150 ms; silent tail ≈ 708 ms.  The guard expires at exactly the fire
-  cadence, so every shot restarts cleanly without clipping its predecessor.
+  `cock.wav` (short, small `contentSamples`) arriving at 130 ms: incoming
+  content < current content → guard applied → `cock.wav` dropped.  Fire boom
+  plays fully.
+- **MAC-11 continuous fire** — fire sound re-submitted every server frame.
+  Same sfx → equal content → guard applied; guard expires at the fire cadence
+  so the sound restarts cleanly at each cycle.  Trigger release: no more
+  submissions; current iteration plays out its tail.  Re-fire after burst:
+  either the silent tail has been passed (`offset ≥ contentSamples`, guard
+  expired) or the source is `AL_STOPPED` (guard skipped by state check) —
+  both cases allow an immediate restart.
+- **Pistol / semi-auto rapid-fire** — fire sound (`contentSamples` = X) plays,
+  cycle sound (`contentSamples` = Y < X) preempts once the fire guard expires.
+  Next fire event: incoming content (X) > current content (Y) → content-
+  magnitude check skips the guard → fire sound starts immediately.  No silent
+  shots on rapid trigger pulls.
 - **MAC-11 inside → outside** — location variant switch at 160 ms.  Guard
   (≈ 150 ms) has just expired; the outside variant is accepted immediately.
 - **`truckpassby.wav`** — 9.2 s ambient pass-by.  Guard holds for the full
