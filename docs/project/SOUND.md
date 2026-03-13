@@ -232,6 +232,10 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | `s_alDynamicReverb` | `0` | Ray-traced acoustic environment. **Default 0 = opt-in** |
 | `s_alDebugReverb` | `0` | Debug output for dynamic reverb. `1` = env label + smoothed params every probe cycle. `2` = also raw probe data and filter-reset events. Not archived. |
 | `s_alOcclusion` | `1` | Wall-occlusion tracing with HRTF direction correction |
+| `s_alOccGainFloor` | `0.55` | Floor of `AL_LOWPASS_GAIN` for fully-blocked sources [0–1]. `1.0` = no volume change through walls (vanilla-like). `0.0` = can go fully silent. Default 0.55 keeps occluded sounds audible with a modest volume jump at line-of-sight. |
+| `s_alOccHFFloor` | `0.50` | Floor of `AL_LOWPASS_GAINHF` (high-frequency content) for fully-blocked sources [0–1]. `1.0` = no HF filtering (only volume changes). `0.0` = bass-only thud through walls. Default 0.50 preserves enough weapon crack to remain recognisable. Old formula `occ²` reached near-zero HF even at moderate occlusion — this was the main cause of the "tinny pop" corner transition. |
+| `s_alOccPosBlend` | `0.25` | How far to redirect HRTF apparent-source position towards the nearest acoustic gap [0–1]. `0.0` = always true source position (best direction accuracy). `1.0` = full gap redirect (old behaviour — confused weapon direction). Default 0.25: subtle gap hint that aids "around the corner" perception without sacrificing localizability. |
+| `s_alDebugOcc` | `0` | Print per-source occlusion state each frame. Each occluded source shows entity, distance, trace target, smoothed gain, GAIN and GAINHF values. Use to identify which sounds are being filtered and by how much. Not archived. |
 | `s_alVolSelf` | `1.0` | Own player/weapon/breath volume multiplier **[0–1.5]** |
 | `s_alVolOther` | `0.7` | Other player/entity volume multiplier **[0–1.0]** — capped, anti-cheat |
 | `s_alVolEnv` | `0.3` | Looping ambient/environmental volume multiplier **[0–1.0]** — capped |
@@ -268,10 +272,10 @@ s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 
 - **`s_alReverb 0` (default)**: no EFX reverb, matches plain dma/Q3 audio.
 - **`s_alOcclusion 1` (default)**: sources behind walls are gain-attenuated and their
-  apparent HRTF direction is redirected to the nearest audible gap.  Only
-  `CONTENTS_SOLID` brushes are tested — `CONTENTS_PLAYERCLIP` is excluded so
-  invisible movement-constraint geometry on slopes and ledges does not cause
-  false muffling of nearby weapon fire.
+  apparent HRTF direction is partially redirected towards the nearest audible gap
+  (controlled by `s_alOccPosBlend`).  Only `CONTENTS_SOLID` brushes are tested —
+  `CONTENTS_PLAYERCLIP` is excluded so invisible movement-constraint geometry on
+  slopes and ledges does not cause false muffling of nearby weapon fire.
 - **CHAN_WEAPON proximity bypass**: weapon-channel sources within `s_alOccWeaponDist`
   (default 160 u) of the listener skip occlusion entirely, covering the gun-muzzle
   offset (~50–100 u ahead of the player eye) that would otherwise trigger false
@@ -281,24 +285,103 @@ s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 
 #### Ambient looping sound fades
 
-Looping ambient sources (fountains, machinery, wind, etc.) now fade in and out
+Looping ambient sources (fountains, machinery, wind, etc.) fade in and out
 instead of starting and stopping abruptly:
 
 | Event | Duration | Effect |
 |---|---|---|
-| Source starts / re-enters range | `s_al_LOOP_FADEIN_MS` = 150 ms | Gain 0 → 1 (cold-start pop eliminated) |
-| Entity leaves PVS / out of range | `S_AL_LOOP_FADEOUT_MS` = 120 ms | Gain 1 → 0 (hard cut eliminated) |
+| Source starts / re-enters range | `S_AL_LOOP_FADEIN_MS` = 600 ms | Gain 0 → 1 (cold-start pop eliminated) |
+| Entity leaves PVS / out of range | `S_AL_LOOP_FADEOUT_MS` = 500 ms | Gain 1 → 0 (hard cut eliminated) |
 | Entity re-enters during fade-out | Immediate | Fade-out cancelled; fade-in from current level |
 
 #### Occlusion update cadence (distance-adaptive)
 
-| Source distance | Update interval | Rationale |
+The occlusion system uses a **three-phase design** to give smooth wall↔clear
+transitions without per-frame CM_BoxTrace overhead:
+
+| Phase | Runs | What it does |
+|---|---|---|
+| **1 — Trace** | On interval (see table) | Runs `CM_BoxTrace`, updates `occlusionTarget` + `acousticOffset` |
+| **2 — Smooth** | Every frame | IIR-blends `occlusionGain` toward target. Opening: step 0.30 (fast snap on LOS). Closing: step 0.18 (gradual muffle, no pop) |
+| **3 — Apply** | Every frame | Writes position + filter using smoothed values. Detaches filter entirely (`AL_FILTER_NULL`) when `occ > 0.98` to eliminate biquad phase-shift coloration on clear sources |
+
+| Source distance | Trace interval | Rationale |
 |---|---|---|
 | < 80 u (full-vol zone) | every frame — no trace | Wall impossible at this range; real position used |
 | CHAN_WEAPON < `s_alOccWeaponDist` u | every frame — no trace | Gun-muzzle zone; always pass-through |
 | 80 – 300 u | every frame | Nearby players — maximum HRTF precision |
 | 300 – 600 u | every 4 frames | Medium range |
 | > 600 u | every 8 frames | Far — distance model dominates |
+
+#### Occlusion filter tuning (`s_alOccGainFloor`, `s_alOccHFFloor`)
+
+The filter applied to occluded sources uses linear floor→1.0 curves:
+
+```
+AL_LOWPASS_GAIN   = s_alOccGainFloor + (1 - s_alOccGainFloor) * occ
+AL_LOWPASS_GAINHF = s_alOccHFFloor   + (1 - s_alOccHFFloor)   * occ
+```
+
+| occ | GAIN (floor=0.55) | GAINHF (floor=0.50) | Old GAIN | Old GAINHF (occ²) |
+|-----|-------------------|----------------------|----------|-------------------|
+| 0.1 (thick wall) | 0.595 | 0.545 | 0.325 | 0.010 |
+| 0.3 (partial)    | 0.685 | 0.650 | 0.475 | 0.090 |
+| 0.5 (moderate)   | 0.775 | 0.750 | 0.625 | 0.250 |
+| 0.8 (slight)     | 0.910 | 0.900 | 0.850 | 0.640 |
+| 1.0 (clear)      | 1.000 | 1.000 | 1.000 | 1.000 |
+
+Old `occ²` for GAINHF reached 0.01 through any solid wall — stripping ~99% of
+high-frequency weapon-fire content and causing the "tinny pop" when rounding a
+corner (extreme bass → sudden full crack).  The new defaults keep the timbre
+recognisable at all occlusion levels.
+
+#### Occlusion debugging workflow
+
+Use `s_alDebugOcc 1` to print per-source filter state each frame, then isolate
+the cause of a specific sound issue:
+
+```
+[alOcc] ent=   5 dist=  350  tgt=0.34 cur=0.56  G=0.86 GHF=0.78
+         │            │         │         │       │       └─ LOWPASS_GAINHF applied
+         │            │         │         │       └─ LOWPASS_GAIN applied
+         │            │         │         └─ smoothed occlusionGain (IIR)
+         │            │         └─ raw trace result (occlusionTarget)
+         │            └─ distance to listener
+         └─ entity number
+```
+
+**Isolating the filter vs. position-redirect vs. other:**
+
+| Command | Effect | What it tests |
+|---|---|---|
+| `s_alOcclusion 0` | No filter, no position redirect, real pos | Baseline: is HRTF/distance model the issue? |
+| `s_alOccGainFloor 1; s_alOccHFFloor 1` | No frequency filtering, position redirect only | Is it the lowpass filter causing the problem? |
+| `s_alOccPosBlend 0` | No position redirect, filter only | Is the HRTF direction jump causing the issue? |
+| `s_alOccGainFloor 1` | No volume change, HF-only filter | Is volume attenuation causing the pop? |
+| `s_alOccHFFloor 1` | No HF change, volume-only filter | Is HF stripping causing the tinny/pop effect? |
+
+#### Source pool management (30+ player overload)
+
+With 30+ players firing simultaneously the 96-source pool can exhaust. Three
+DMA-matching mechanisms prevent degradation:
+
+1. **Distance-based eviction**: `S_AL_GetFreeSource` evicts the *farthest* non-loop
+   3D source rather than the oldest — nearby (high-impact) sounds survive.
+2. **World-entity cap**: `ENTITYNUM_WORLD` (bullet impacts, casings) is capped at
+   `numSrc / 8` = 12 sources, matching DMA's `WORLD_ENTITY_MAX_CHANNELS`.
+3. **Per-entity dedup**: same sfx on the same entity within 20 ms (100 ms for world
+   impacts) is suppressed, matching DMA's dedup window.
+
+#### Own-player audio (DMA comparison)
+
+DMA plays own-entity sounds at `leftvol = rightvol = master_vol` — pure stereo
+mix, no filter, no spatialization.  OpenAL matches this via:
+
+- `s_alLocalSelf 1` (default): own-entity sounds → `AL_SOURCE_RELATIVE=TRUE`,
+  position (0,0,0), no rolloff, `AL_DIRECT_FILTER = AL_FILTER_NULL`.
+- **Stale reverb fix**: when a local source reuses a slot previously used for a
+  3D sound, the auxiliary send is now explicitly disconnected — preventing an
+  unwanted reverb tail on own-player weapons and footsteps.
 
 #### Dynamic acoustic environment (`s_alDynamicReverb 1`)
 
