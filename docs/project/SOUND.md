@@ -304,27 +304,13 @@ s_alReverb 1  s_alOcclusion 1  →  + static EFX reverb room
 s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 ```
 
-#### CHAN_WEAPON minimum play-time guard
+#### Channel preemption
 
-The root cause of the DE-50 "no sound" regression was confirmed by
-`s_alDebugPlayback 1`: all three DE-50 fire-animation sounds (`de_out.wav`,
-`back.wav`, `cock.wav`) were submitted on `CHAN_WEAPON` in rapid succession.
-Each one preempted the previous after only **~30 ms (1 % of the 3.74 s shot
-sound)**, making the gunshot completely inaudible.
-
-Fix (in `S_AL_StartSound`): before preempting a sound on `CHAN_WEAPON`, check
-how long the current sound has been playing using `allocTime`.  If less than
-`CHAN_WEAPON_MIN_PLAY_MS` (100 ms), the new request is silently dropped and
-the engine retries naturally on the next frame.
-
-| Why 100 ms |
-|---|
-| Covers the initial crack/transient of the DE-50 shot before mechanical cycling sounds (slide back, hammer cock) take over |
-| Does **not** block the Negev, which fires `negev_sil.wav` every ~100 ms — the guard expires at the same cadence as the fire rate |
-| Semi-auto weapons physically cannot fire faster than 100 ms/round, so no legitimate preemption is blocked |
-
-With the guard in place the heard sequence becomes:  
-**crack (100 ms+) → back.wav (~196 ms) → cock.wav (~370 ms)** — matching the intended animation audio.
+See [Global Audio Preemption — Design and Implementation](#global-audio-preemption--design-and-implementation)
+for the full description of how `S_AL_StartSound` handles same-channel
+collisions, the `AL_LOOPING` fire-loop mechanism, the 150 ms
+`CHAN_WEAPON` guard cap, and the per-class content guard for impacts and
+ambients.
 
 #### Vanilla-behaviour notes
 
@@ -1241,21 +1227,81 @@ an occupied named channel:
 | Ambient pass-by | Cut mid-file by retrigger | Full content guard; completes audible length |
 | Impacts / brass | Pool exhaustion | Existing world-entity cap + dedup window |
 
-### Future work
+### Future work — DMA-style improvements
 
-- **True crossfade**: requires two concurrent sources per channel slot.  An
-  "orphan fade-out" list would let the evicted source decay to silence (≈ 20 ms)
-  while the new source fades in — eliminating even the brief click on the
-  predecessor.  Cost: doubles source-pool usage for active weapons.
+The DMA backend's simplicity is its strength: no per-sound guards, just three
+blunt mechanisms (dedup window, concurrency cap, world-entity cap) and a large
+channel pool.  The OpenAL backend can replicate that model cleanly now that the
+preemption root cause is fixed.
 
-- **Priority tagging**: a `soundPriority` field on `alSfxRec_t` (set at load
-  time from the file path or a sidecar config) would replace the content-
-  magnitude heuristic with explicit intent: `fire_boom > cycle > ambient`.
+#### 1. True crossfade on preemption
 
-- **Per-class dedup / cap tuning**: brass and ricochet sounds could carry their
-  own dedup window (matching the DMA 100 ms world-entity window) and a
-  per-class concurrency cap, giving the same headroom DMA provides without
-  requiring the blunt world-entity hard cap.
+**Problem**: the current implementation hard-stops the evicted source then
+starts the new one at zero gain and ramps up over 15 ms.  There is a brief
+discontinuity on the evicted sound.
+
+**DMA-style solution**: maintain a small "orphan fade-out" list alongside the
+source pool.  When a source is preempted, move it to the orphan list with a
+20 ms gain ramp-down (`AL_GAIN 1→0`) rather than calling `qalSourceStop`
+immediately.  The incoming source starts its own 15 ms ramp-up at the same
+time.  The two ramps overlap — a true crossfade.  Cost: up to N orphan sources
+active simultaneously (N = max concurrently-preempted slots; in practice 1–2
+for weapons).
+
+#### 2. Explicit sound priority tags
+
+**Problem**: the content-magnitude comparison (`incoming.contentSamples >
+current.contentSamples`) is a heuristic — it works for URT's weapon files
+but could misfire on unusual sound designs.
+
+**DMA-style solution**: add a `soundPriority` field to `alSfxRec_t`, set at
+load time from the file path:
+
+```c
+/* Path-prefix priority table (checked in order): */
+"sound/weapons/"   → PRIORITY_WEAPON_FIRE    (highest — never dropped)
+"sound/player/"    → PRIORITY_PLAYER
+"sound/world/"     → PRIORITY_WORLD
+"sound/ambient/"   → PRIORITY_AMBIENT        (lowest — always preemptable)
+```
+
+Use `soundPriority` instead of (or alongside) `contentSamples` in the
+preemption guard.  Matches DMA's implicit priority (CHAN_ANNOUNCER protected,
+listener sounds evicted last).
+
+#### 3. Per-class dedup window and concurrency cap
+
+**Problem**: brass casings, bullet impacts, and ricochets all share
+`ENTITYNUM_WORLD` and are governed by the same blunt pool/8 hard cap.  A burst
+of rifle fire can still flood the cap with one sound class, starving others.
+
+**DMA-style solution**: assign each sound a class tag at load time (same
+path-prefix table as above).  Keep a per-class active-source counter updated in
+`S_AL_Update`.  Apply independent caps:
+
+| Class | Dedup window | Concurrent cap |
+|-------|-------------|----------------|
+| Brass / casings | 100 ms | 4 |
+| Bullet impacts | 50 ms | 6 |
+| Ricochets | 50 ms | 4 |
+| Player weapon fire | 20 ms | 2 (per player) |
+| Ambient pass-bys | 500 ms | 2 |
+
+This mirrors DMA's per-sound `allowed` variable (16 / 8 / 2 depending on
+entity) but applied per sound class, giving fine-grained control without the
+blunt world-entity hard cap.
+
+#### 4. `AL_LOOPING` looping model for all repeating sounds
+
+**Problem**: the current weapon-fire loop is driven by EV_FIRE_WEAPON
+re-submissions.  Other sounds that repeat at high rates (e.g. minigun spin,
+chainsaw) would benefit from the same treatment.
+
+**DMA-style solution**: generalise `weaponLoop`/`lastFireMs` into a
+`loopClass` field.  Any sound that re-fires at the same `(entnum, entchannel,
+sfx)` within the loop timeout becomes an `AL_LOOPING` source.  The timeout
+clears `AL_LOOPING` when events stop, letting the buffer play out naturally
+regardless of which sound class triggered it.
 
 ### Design note — why no cache for `contentSamples`
 
@@ -1265,3 +1311,148 @@ session.  A persistent cache file would add file-I/O overhead, staleness risk
 on pk3 updates, and ~100 extra lines of code in exchange for an imperceptible
 saving.  The value is computed inline at load time and stored in the existing
 `alSfxRec_t` pool.
+
+The PCM scan is ≈ 0.04 ms per file.  Across a full session (≤ 1 000 sounds
+loaded lazily on first use), total cost is under 50 ms spread across the whole
+session.  A persistent cache file would add file-I/O overhead, staleness risk
+on pk3 updates, and ~100 extra lines of code in exchange for an imperceptible
+saving.  The value is computed inline at load time and stored in the existing
+`alSfxRec_t` pool.
+
+---
+
+## Cleanup Audit — What Was Wrong and Why
+
+### The root problem, stated plainly
+
+`S_AL_StartSound` had a "newest sound wins" preemption model — any new sound
+on the same `(entnum, entchannel)` slot immediately hard-stopped whatever was
+playing.  URT's weapon animation system submits all three DE-50 sounds
+(`de_out.wav`, `back.wav`, `cock.wav`) on `CHAN_WEAPON` within the same server
+frame burst (~30 ms).  Each one killed its predecessor before a single sample
+of the crack was audible.  This was confirmed by `s_alDebugPlayback 1` in
+PR #89 — `de_out.wav` was being cut at **1 % completion** by `back.wav`.
+
+**Every audio quality complaint prior to PR #90 — "wet blanket", "no punch",
+"tinny", "muffled", "lacking crack" — was this bug.  Not HRTF.  Not the
+occlusion filter.  Not the resampler.  Preemption cutting the attack transient
+at 30 ms.**
+
+PRs #84 through #88 were written without knowing this.  Some of them contain
+genuine fixes to real independent problems.  Others are pure workarounds for a
+symptom whose cause was not yet understood.  The table below separates them.
+
+---
+
+### PR-by-PR verdict
+
+#### PR #84 — "Fix audio issues with desert eagle and map sounds"
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| Remove `CONTENTS_PLAYERCLIP` from occlusion LOS traces | ✅ **GENUINE** | Playerclip geometry was genuinely producing false occlusion on slopes/ledges regardless of preemption |
+| `CHAN_WEAPON` 160 u no-occlusion zone (`s_alOccWeaponDist`) | ✅ **GENUINE** | Gun-muzzle world-origin offset (~50–100 u ahead of player eye) is a real geometry issue |
+| Ambient loop fade-in / fade-out | ✅ **GENUINE** | Ambient pop-in/pop-out is a real problem unrelated to preemption |
+| Dynamic reverb look-ahead rays + velocity-adaptive IIR | ✅ **GENUINE** | Spatial enhancement; no relation to weapon sound |
+| Tuning CVars (`s_alEnv*`, `s_alOccWeaponDist`) | ✅ **GENUINE** | User control for the above |
+
+No hacks introduced.  All changes in this PR stand.
+
+---
+
+#### PR #85 — "Occlusion smoothing, filter tuning, debug CVars, source pool hardening"
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| Replace `occ²` GAINHF with tunable floor curves | ✅ **GENUINE** | `occ²` was reaching 0.01 through any wall, stripping 99 % of HF content — independently bad regardless of preemption |
+| Three-phase occlusion (trace / smooth / apply separately) | ✅ **GENUINE** | Eliminates boundary snaps; IIR smoothing is correct regardless |
+| `AL_FILTER_NULL` hard-detach when `occ > 0.98` | ✅ **GENUINE** | No reason to keep a biquad in the signal path when the source is fully clear |
+| Source pool hardening (distance eviction, world-entity cap, dedup window) | ✅ **GENUINE** | Real pool exhaustion under 30+ players; matches DMA's own mechanisms |
+| "Tinny sound" complaint used to motivate filter changes | ⚠️ **MISDIAGNOSIS** | The tinny/popping perception was preemption cutting the crack.  The filter changes were correct for independent reasons, but the stated motivation was wrong |
+
+No hacks to remove.  All changes stand.
+
+---
+
+#### PR #86 — "Fix DE-50 weapon fire HRTF coloration ('wet blanket')"
+
+**The entire PR was written against a wrong diagnosis.**  Every symptom
+described — "wet blanket", "no punch", "lacking crack" — was preemption cutting
+`de_out.wav` at 30 ms, not HRTF convolution.
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| `AL_DIRECT_CHANNELS_SOFT = AL_TRUE` for local sources | ⚠️ **AUDIT** | Bypasses HRTF centre-HRIR on head-locked sounds.  With `s_alHRTF 0` (the default since #87) this is a no-op — HRTF is off, so there is nothing to bypass.  With `s_alHRTF 1` it does prevent centre-HRIR smearing, which is a legitimate quality enhancement *for headphone users*, but it was added to fix the wrong problem.  Should be gated: only apply `AL_DIRECT_CHANNELS_SOFT` when `s_alHRTF 1`. |
+| Path-based occlusion bypass — `sound/weapons/` files on `CHAN_AUTO` | ❌ **HACK — REMOVE** | Added because "secondary weapon layers were muffled".  They were muffled because preemption killed them before they played.  With preemption fixed, secondary layers play on their own slots exactly like DMA.  This path-prefix check bypasses occlusion for any file under `sound/weapons/` within 160 u regardless of channel — incorrect for legitimate 3D weapon sounds from other players at that range. |
+| 3D sources start with `AL_FILTER_NULL` instead of attaching filter object | ⚠️ **AUDIT** | Motivation: "group-delay coloration on the transient of other players' weapon sounds".  That coloration was preemption.  However, the `AL_FILTER_NULL`-until-first-trace pattern does have independent merit: don't put a biquad in the signal path before you know it's needed.  Leave it for now but note the motivation was wrong. |
+
+**`s_alDirectChannels` cvar (PR #88) exists solely to make the
+`AL_DIRECT_CHANNELS_SOFT` behaviour above user-controllable.  If that
+behaviour is corrected, the cvar's scope shrinks accordingly.**
+
+---
+
+#### PR #87 — "Guarantee true passthrough when all processing cvars are 0"
+
+This PR was written to construct a "known-clean" baseline to isolate what was
+causing the "wet blanket".  The baseline was never needed because the cause
+was always preemption.  However, several real bugs were found and fixed as
+collateral:
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| `s_volume` double-apply fix (`S_AL_GetMasterVol` returning `255` not `s_volume×255`) | ✅ **GENUINE BUG FIX** | Was applying `s_volume²` to all sources — at the default 0.8, weapons were at 64 % amplitude |
+| Live category-vol update (`s_alVolSelf` etc.) moved outside EFX guard | ✅ **GENUINE BUG FIX** | When `s_alEFX 0`, changing volume cvars at runtime had no effect on local sources |
+| No-EFX occlusion gain path double-applied `masterGain` | ✅ **GENUINE BUG FIX** | Real double-multiply in the non-EFX path |
+| `/sndinfo` processing-feature diagnostic table | ✅ **GENUINE** | Permanently useful diagnostic tool |
+| `s_alEFX 0` kill switch | ✅ **KEEP FOR DIAGNOSTICS** | Still useful for isolating future issues |
+| `s_alHRTF` default changed from `1` → `0` | ⚠️ **MOTIVATED BY WRONG DIAGNOSIS** | Changed because HRTF was blamed for "wet blanket".  `0` is a safe default (HRTF is headphone-only), but the reasoning was wrong.  Leave as 0. |
+| `alcResetDeviceSoft` Layer-3 belt-and-suspenders HRTF-off | ⚠️ **MOTIVATED BY WRONG DIAGNOSIS** | Added to be certain HRTF was truly off when `s_alHRTF 0`.  Defensively correct as belt-and-suspenders.  Leave it but note the reason it was added was wrong. |
+| Explicit `ALC_HRTF_SOFT = ALC_FALSE` when `s_alHRTF 0` | ✅ **CORRECT MECHANISM** | Ensures the cvar actually disables HRTF even when alsoft.conf overrides it.  The mechanism is correct regardless of what motivated it. |
+
+---
+
+#### PR #88 — "`s_alDirectChannels` cvar"
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| `s_alDirectChannels` cvar + split extension tracking | ⚠️ **AUDIT** | Added to make `AL_DIRECT_CHANNELS_SOFT` user-toggleable for diagnostic isolation of PR #86's "wet blanket" fix.  If the `AL_DIRECT_CHANNELS_SOFT` usage is corrected (gate to `s_alHRTF 1` only), this cvar may be simplified or removed. |
+
+---
+
+#### PR #89 — "`s_alDebugPlayback` diagnostic cvar"
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| `s_alDebugPlayback` cvar + `fileRate` persistence + `s_al_deviceFreq` | ✅ **PERMANENTLY VALUABLE** | This PR found the actual root cause.  Keep forever. |
+
+---
+
+#### PR #90 — "CHAN_WEAPON minimum play-time guard (100 ms)"
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| `CHAN_WEAPON_MIN_PLAY_MS = 100` time-based guard | ❌ **BANDAID — SUPERSEDED** | Correctly identified preemption as the problem but used wall-clock time instead of audio content.  A 100 ms wall-clock guard blocked rapid-fire at any cadence faster than 100 ms, and did nothing for non-CHAN_WEAPON sounds.  Replaced by the content-based guard in #91 and the capped looping model in the current PR. |
+
+---
+
+#### PRs #91 / #92 — "Adaptive content-based guard"
+
+| Change | Verdict | Reason |
+|--------|---------|--------|
+| `contentSamples` PCM scan at load time | ✅ **KEEP** | The machinery is correct and still used by the current implementation |
+| Full-`contentSamples` guard on `CHAN_WEAPON` | ❌ **REPLACED** | Blocking `de_out.wav`'s full 2.5 s content caused spam-trigger silence.  Replaced by the 150 ms cap in the current PR. |
+| `AL_SOURCE_STATE` check before reading `AL_SAMPLE_OFFSET` (#92) | ✅ **GENUINE FIX** | Real bug: offset resets to 0 on `AL_STOPPED`; guard would falsely re-engage.  Still present in the current implementation. |
+
+---
+
+### Summary — what to clean up next session
+
+| Item | File | Action |
+|------|------|--------|
+| `S_AL_WEAPON_SOUND_PREFIX` path-based occlusion bypass | `snd_openal.c` | **Remove** — revert to CHAN_WEAPON-only; the path check was added for the wrong reason |
+| `AL_DIRECT_CHANNELS_SOFT` unconditional on all local sources | `snd_openal.c` | **Narrow scope** — gate to `s_alHRTF 1` only; harmless when HRTF is off (default) but should reflect actual intent |
+| `s_alDirectChannels` cvar (PR #88) | `snd_openal.c` | **Review after above** — may simplify to a compile-time check or remove entirely |
+| 3D sources starting with `AL_FILTER_NULL` instead of filter object | `snd_openal.c` | **Leave for now** — independent merit; re-evaluate after other cleanup |
+| `alcResetDeviceSoft` Layer-3 HRTF disable | `snd_openal.c` | **Leave** — defensively correct even if motivated by wrong diagnosis |
+| Stale `SOUND.md` references to old 100 ms guard | `docs/project/SOUND.md` | ✅ **Done in this PR** |
