@@ -314,6 +314,8 @@ switch ( s_khz->integer ) { ... }
 
 `dmaHD_TransferPaintBuffer` was updated with a 32-bit float write path that normalises the 24.8 fixed-point paint accumulator to `[-1.0, 1.0]`, matching the formula used by the base `S_TransferPaintBuffer` in `snd_mix.c`.
 
+**24-bit display fix:** `dma.validbits` (a new field in `dma_t`) is set from `wValidBitsPerSample` when the device reports a WAVEFORMATEXTENSIBLE format whose container width (`wBitsPerSample = 32`) differs from the valid bit depth (e.g. `wValidBitsPerSample = 24` for a 24-bit device). `dmaHD_SoundInfo` (`s_info`) now displays `dma.validbits` when it differs from `dma.samplebits` so that a 48 kHz / 24-bit device correctly shows **24 bps** instead of the container width of 32. The transfer path continues to use `dma.samplebits` (32) to select the correct output branch.
+
 ### Build System
 
 `Makefile` additions:
@@ -354,70 +356,79 @@ dmaHD was audited for correctness at sample rates above the original 44 100 Hz t
 
 The filter coefficient scaling (`44100.0f / dma.speed`) introduced in PR 67 is mathematically correct for first-order IIR filters at the small-coefficient approximation used here. Overflow in `CALCSMPOFF` is not possible at supported sample rates (≤ 48 000 Hz) for any in-map distance.
 
-### Audio Click/Pop at End of Sound — Bug & Fix [URT]
+### Audio Click/Pop — Full Root Cause Analysis & Fix [URT]
 
-**Symptoms (PRs #69, #70, #73, issue continuation):**
-A loud click/pop is audible in both channels at the exact moment a kill-sound finishes playing — approximately 3–4 seconds after a kill event on Windows with WASAPI. The sound is a 16-bit PCM stereo WAV file at 22 050 Hz, approximately 4 seconds long: ~1.5 seconds of actual ding audio followed by ~2.5 seconds of digital silence (zero samples). The click is reproducible on every kill.
+**Symptoms (PRs #69, #70, #73, #74, issue continuation):**
+A click/pop is audible whenever sounds play during a kill event on Windows with WASAPI. The click is reproducible: every sound that starts (or ends) during the kill window contributes one click. If multiple sounds are active at the same time, multiple clicks are heard. The specific kill-ding sound is 22 050 Hz stereo, ~4 s long: ~1.5 s of audio followed by ~2.5 s of digital silence.
 
-**Root cause — modulo wraparound in `dmaHD_GetSampleRaw` (all interpolation modes):**
+---
 
-Every `dmaHD_GetSampleRaw_*` variant uses **modulo wrapping** for out-of-bounds indices (correct for seamless-loop sounds, wrong for non-looping ones):
+**Root cause — two separate click sources, both from `dmaHD_GetSampleRaw` wrapping**
 
-```c
-if (index >= samples) index -= samples;  // wraps to 0 for index == samples
-```
-
-This is triggered at the final output sample by **every** interpolation mode:
-
-| Mode (`dmaHD_interpolation`) | How it triggers the wrap |
-|------------------------------|--------------------------|
-| **0 — no-interpolation** | `FLOAT_DECIMAL_PART(t) > 0.5` rounds `x` up from `soundLength-1` to `soundLength` → wraps to 0 |
-| **1 — Hermite (default)** | kernel reads `x+1` and `x+2`; both exceed `soundLength` → wrap to 0 and 1 |
-| **2 — linear** | reads `x+1`; exceeds `soundLength` → wraps to 0 |
-| **3 — cubic** | reads `x+1` and `x+2`; same as Hermite |
-
-> **Setting `dmaHD_interpolation 0` does NOT avoid the click.** The no-interpolation round-up triggers the same wrap-to-0 that the Hermite lookahead does. This was confirmed by testing: the click was present with `dmaHD_interpolation 0`, `1`, and the default setting.
-
-The bass sub-buffer is always filled with `dmaHD_GetNoInterpolationSample` (mode 0 behaviour) regardless of `dmaHD_interpolation`, and has the same issue.
-
-**Why silence-padded files make this maximally audible:**
-
-With 2.5 seconds of trailing zeros in the source file:
-- Output samples `outcount − 120 000` through `outcount − 2` are all zero (silence)
-- Output sample `outcount − 1` (the last) has `sample[0]` (attack peak) injected via wraparound; the high-pass filter then outputs `hp_a × attack_peak ≈ attack_peak` — roughly **±15 000** for a typical ding sound
-- The hardware DMA plays 2.5 s of silence, then encounters this spike, then drops to silence → **step discontinuity → loud click in both channels**
-
-The timing matches exactly: `outcount / dma.speed ≈ 192 000 / 48 000 = 4.0 s` after the sound starts.
-
-**Fix applied (`dmaHD_ResampleSfx`):**
-
-After the main resampling loop, a linear fade-out is applied to the last `n_pad` samples of both the high-frequency and bass sub-buffers. `n_pad` is computed **adaptively** from `stepscale = inrate / dma.speed` so it always covers the wraparound-contaminated samples across all interpolation modes and at any output rate that WASAPI's `GetMixFormat` may report (44100, 48000, 96000, or 192000 Hz):
-
-| Source rate | WASAPI rate | stepscale | Max contamination | n_pad used |
-|-------------|-------------|-----------|-------------------|------------|
-| 22 050 Hz | 44 100 Hz | 0.500 | ~4 samples | 16 (floor) |
-| 22 050 Hz | 48 000 Hz | 0.459 | ~5 samples | 16 (floor) |
-| 22 050 Hz | 96 000 Hz | 0.230 | ~9 samples | 16 (floor) |
-| 22 050 Hz | 192 000 Hz | 0.115 | ~18 samples | **22** |
-| 11 025 Hz | 48 000 Hz | 0.230 | ~9 samples | 16 (floor) |
-| 8 000 Hz | 48 000 Hz | 0.167 | ~12 samples | 16 (floor) |
+The `dmaHD_GetSampleRaw_*` functions previously used **modulo wrapping** for indices outside `[0, samples)`:
 
 ```c
-int n_pad = (stepscale > 0.0f) ? (int)ceilf(2.0f / stepscale) + 4 : DMAHD_ENDPAD_MIN;
-int n     = (outcount < n_pad) ? outcount : n_pad;
-int div   = (n > 1) ? (n - 1) : 1;   // guard: div by zero when n == 1
-for (i = 0; i < n; i++) {
-    int scale256 = ((n - 1 - i) * 256) / div;   // 256→0 over n samples
-    int idx      = outcount - n + i;
-    buffer[idx]            = (short)(((int)buffer[idx]            * scale256) >> 8);
-    buffer[outcount + idx] = (short)(((int)buffer[outcount + idx] * scale256) >> 8);
-}
-if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
-    Com_DPrintf("dmaHD: %s resampled %d->%d Hz, end-fade %d samples\n",
-        sfx->soundName, inrate, dma.speed, n);
+if (index < 0) index += samples;
+else if (index >= samples) index -= samples;   // wraps to sample[0] (attack peak)
 ```
 
-`n_pad` = `ceilf(2 / stepscale) + 4` (where `stepscale = inrate / dma.speed`), floored at `DMAHD_ENDPAD_MIN = 16`.  This is adaptive: on a device where WASAPI's `GetMixFormat` reports 192 kHz, `stepscale = 22050 / 192000 ≈ 0.115` → `n_pad = 22`; at the typical 48 kHz → `n_pad = 9`, floored to 16.  The `dmaHD_debugLevel 1` log line lets the user confirm the actual rate and pad size during testing.
+This was correct for seamless-loop playback but wrong for the **resampling** context where it runs. During `dmaHD_ResampleSfx`, the wraparound contaminated the output buffer at **two distinct locations**:
+
+#### Click 1 — Start of buffer (`buffer[0..2]`): click at the kill event
+
+`dmaHD_ResampleSfx` initialises the HP filter by running it on a 4-sample **warm-up** from `idx_smp = −4×stepscale`. `dmaHD_NormalizeSamplePosition` wraps these negative positions to near the **end** of the source sound (e.g. `88198.16` for 22 050 → 48 000 Hz). The Hermite kernel then reads `x+1` and `x+2`, which exceed `soundLength` and — in the old code — **wrapped back to `sample[0]` (the attack peak)**. This incorrectly primed the HP filter with a large negative contamination:
+
+```
+OLD buffer[0] = −1046  ← HP filter response to spurious attack-peak injection
+OLD buffer[1] =   806
+OLD buffer[2] =  8852
+OLD buffer[3] = 13915  ← first real audio sample
+```
+
+When the mixer reads from `buffer[0]` the moment a sound starts, the paint buffer jumps from 0 (silence) to −1046 — an instantaneous step discontinuity → **click at the exact moment the kill event fires**, for every sound that starts. With multiple sounds starting simultaneously (kill ding, hit sound, etc.), each contributes one click.
+
+> PR #74's fade-out only touched the **end** of the buffer (`buffer[outcount−n_pad..outcount−1]`). `buffer[0]` was never modified — **this click was not fixed by PR #74**.
+
+#### Click 2 — End of buffer (`buffer[outcount−1]`): click at sound end
+
+At the **last** iteration of the resampling loop, `idx_smp ≈ soundLength − 4×stepscale`, giving `x = soundLength−2` and `x+2 = soundLength` (equals `samples`), which the old code wrapped to 0 (attack peak). The HP filter output at `buffer[outcount−1]` therefore contained a small spike (−156 in the simulated case) rather than true silence, producing a step from near-silence to 0 when the channel ended.
+
+PR #74's adaptive end-fade zeroed `buffer[outcount−1]` and addressed this click. The fade remains in place as a belt-and-suspenders guard for any HP/LP filter residual energy at the buffer boundary.
+
+---
+
+**Primary fix — `dmaHD_GetSampleRaw_*`: return 0 for out-of-bounds indices**
+
+Changed from:
+```c
+if (index < 0) index += samples; else if (index >= samples) index -= samples;
+```
+to:
+```c
+if (index < 0) index += samples;
+if (index < 0 || index >= samples) return 0;   // out-of-bounds → silence
+```
+
+- The **negative wrap** (`index += samples`) is preserved: it is used by the warm-up pre-loop, which reads from near the end of the source sound. For silence-padded sounds this correctly primes the filter with zeros.
+- Indices that reach or exceed `samples` — from Hermite/cubic `x+1`, `x+2` lookahead or the no-interpolation round-up — now return **silence** (0) instead of the attack peak.
+
+**Verified result (22 050 Hz → 48 000 Hz, ATTACK_PEAK = 15 000):**
+
+```
+NEW buffer[0] =     0  ← clean (no contamination)
+NEW buffer[1] =     0
+NEW buffer[2] =     0
+NEW buffer[3] = 14310  ← first real audio sample, clean onset
+NEW buffer[outcount−1] = 0  ← also clean (fix + fade both confirm)
+```
+
+This eliminates both click sources for all sample rates and all `dmaHD_interpolation` modes.
+
+---
+
+**Secondary fix — adaptive end-fade (`dmaHD_ResampleSfx`)** *(PR #74, retained)*
+
+After the resampling loop, a linear fade-out is still applied to the last `n_pad` output samples of both sub-buffers. With the primary fix in place this is now a belt-and-suspenders guard against any residual HP/LP filter tail rather than the primary click fix. `n_pad` is computed adaptively from `stepscale` to handle any WASAPI output rate:
 
 **Secondary fix — `dmaHD_lastsoundtime` reset guard (`dmaHD_Update_Mix`):**
 

@@ -70,7 +70,8 @@ typedef struct {
 	unsigned int samples;				// mono samples in buffer
 	int			fullsamples;			// samples with all channels in buffer (samples divided by channels)
 	int			submission_chunk;		// don't mix less than this #
-	int			samplebits;
+	int			samplebits;				// container bit width (e.g. 32 for 24-in-32 PCM)
+	int			validbits;				// valid bit depth (e.g. 24 for 24-in-32 PCM); 0 = same as samplebits
 	int			isfloat;
 	int			speed;
 	byte		*buffer;

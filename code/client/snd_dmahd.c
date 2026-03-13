@@ -325,18 +325,28 @@ static float dmaHD_NormalizeSamplePosition(float t, int samples) {
 }
 static int dmaHD_GetSampleRaw_8bitMono(int index, int samples, byte* data)
 {
-    if (index < 0) index += samples; else if (index >= samples) index -= samples;
+    /* Negative indices arise from the warm-up pre-loop (idx_smp starts at
+     * -4*stepscale); wrap them up to the end of the source buffer so the
+     * filter primes from near-silence.  Indices that reach or exceed
+     * 'samples' — from the Hermite/cubic x+1,x+2 lookahead or the
+     * no-interpolation round-up — must NOT wrap back to sample[0] (the
+     * attack peak): that wraparound is the root cause of the click/pop at
+     * the boundary.  Return silence (0) instead. */
+    if (index < 0) index += samples;
+    if (index < 0 || index >= samples) return 0;
     return (int)(((byte)(data[index])-128)<<8);
 }
 static int dmaHD_GetSampleRaw_16bitMono(int index, int samples, byte* data)
 {
-    if (index < 0) index += samples; else if (index >= samples) index -= samples;
+    if (index < 0) index += samples;
+    if (index < 0 || index >= samples) return 0;
     return (int)LittleShort(((short*)data)[index]);
 }
 static int dmaHD_GetSampleRaw_8bitStereo(int index, int samples, byte* data)
 {
     int left, right;
-    if (index < 0) index += samples; else if (index >= samples) index -= samples;
+    if (index < 0) index += samples;
+    if (index < 0 || index >= samples) return 0;
     left = (int)(((byte)(data[index * 2])-128)<<8);
     right = (int)(((byte)(data[index * 2 + 1])-128)<<8);
     return (left + right) / 2;
@@ -344,7 +354,8 @@ static int dmaHD_GetSampleRaw_8bitStereo(int index, int samples, byte* data)
 static int dmaHD_GetSampleRaw_16bitStereo(int index, int samples, byte* data)
 {
     int left, right;
-    if (index < 0) index += samples; else if (index >= samples) index -= samples;
+    if (index < 0) index += samples;
+    if (index < 0 || index >= samples) return 0;
     left = (int)LittleShort(((short*)data)[index * 2]);
     right = (int)LittleShort(((short*)data)[index * 2 + 1]);
     return (left + right) / 2;
@@ -423,11 +434,9 @@ static int dmaHD_GetNoInterpolationSample(float t, int samples, byte *data,
     x = (int)t;
 
     // Round to nearest: if the fractional part is > 0.5, advance to the next
-    // sample.  At the last valid position (t ≈ samples - stepscale), this
-    // round-up makes x = samples, which dmaHD_GetSampleRaw wraps to 0 (the
-    // start of the sound).  This is the same modulo-wraparound that affects
-    // the Hermite/cubic/linear paths — setting dmaHD_interpolation 0 does
-    // NOT avoid it.  The end-of-buffer fade in dmaHD_ResampleSfx is the fix.
+    // sample.  If x reaches samples (i.e. the floor of t equals soundLength-1
+    // and the fractional part rounds up), dmaHD_GetSampleRaw now returns 0
+    // (silence) rather than wrapping to sample[0] (the attack peak).
     if (FLOAT_DECIMAL_PART(t) > 0.5) x++;
 
     return dmaHD_GetSampleRaw(x, samples, data);
@@ -512,45 +521,36 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
         lp_last = lp_data;
     }
 
-    /* --- End-of-buffer boundary fix -------------------------------------------
-     * ROOT CAUSE: dmaHD_GetSampleRaw (all four _16bitMono/_8bitMono/etc.
-     * variants) wraps out-of-bounds indices modulo soundLength:
+    /* --- End-of-buffer boundary — defensive fade ----------------------------
+     * ROOT CAUSE (now fixed in dmaHD_GetSampleRaw_*):
+     * Every GetSampleRaw_* variant previously wrapped out-of-bounds indices
+     * modulo soundLength (correct for seamless-loop sounds, wrong for non-
+     * looping ones).  Whenever any interpolation or rounding step read one
+     * or two indices past the end of the source buffer, it silently returned
+     * sample[0] (the attack peak) instead of silence.  This contaminated:
      *
-     *     if (index >= samples) index -= samples;  // wraps to 0
+     *   • buffer[0..3]  — the warm-up pre-loop reads from negative positions
+     *     that normalise to near soundLength; their Hermite x+2 lookahead
+     *     exceeded soundLength and wrapped to 0, injecting the attack peak
+     *     into the HP filter's initial state → click at the START of each
+     *     sound.
      *
-     * This is the correct behaviour for seamless-loop sounds, but for a
-     * non-looping sound it means that whenever any interpolation or rounding
-     * step reads one index past the end of the buffer, it silently returns
-     * the FIRST sample of the sound (the attack peak) instead of silence.
+     *   • buffer[outcount-1] — the last loop iteration's Hermite reads x+2
+     *     = soundLength, which wrapped to 0 → HP filter spike → click at
+     *     the END of each non-looping sound.
      *
-     * Every interpolation mode triggers this at the final output sample:
+     * FIXED: GetSampleRaw now returns 0 for index >= samples (silence) while
+     * preserving the negative-index wrap that is needed for the warm-up path.
      *
-     *   • Hermite (dmaHD_interpolation 1/default): kernel reads x+1 and x+2;
-     *     at the last position both exceed soundLength and wrap to 0 and 1.
-     *
-     *   • No-interpolation (dmaHD_interpolation 0): the round-up
-     *     `if (FLOAT_DECIMAL_PART(t) > 0.5) x++` advances x from
-     *     soundLength-1 to soundLength, which dmaHD_GetSampleRaw then wraps
-     *     to 0.  Setting dmaHD_interpolation 0 does NOT avoid the click.
-     *
-     *   • Linear (2): reads x+1, same wrap as Hermite (one sample).
-     *   • Cubic (3): reads x+1 and x+2, same as Hermite.
-     *
-     * The bass sub-buffer is always filled with dmaHD_GetNoInterpolationSample
-     * and has the same round-up wrap.
-     *
-     * IMPACT: worst on silence-padded WAV files (e.g. a 1.5 s ding stored in
-     * a 4 s file): the 2.5 s of trailing zeros keep the DMA buffer at silence,
-     * so the single spike at the last output sample — a step from 0 to
-     * ~attack_peak × hp_a — is immediately audible as a loud click/pop the
-     * instant playback ends.  Reproducible at exactly 3-4 s after the kill,
-     * in both channels, regardless of dmaHD_interpolation setting.
-     *
-     * FIX: after the resampling loop, linearly fade the last n_pad samples of
-     * both sub-buffers (high-freq and bass) to zero.  The last sample is
-     * forced to exactly 0, eliminating the spike at the buffer boundary for
-     * all interpolation modes.  n_pad is computed from stepscale to cover the
-     * full Hermite lookahead at any WASAPI output rate (see below).
+     * SECONDARY (belt-and-suspenders) fade:
+     * The linear fade below additionally zeroes the last n_pad output samples
+     * of both sub-buffers.  It guards against any residual HP/LP filter
+     * "tail" energy at the end of the buffer (the high-pass filter has
+     * an exponential decay that asymptotes to zero but never reaches it
+     * exactly), preventing a step discontinuity from the last non-zero
+     * sample to the silence that follows when playback ends.
+     * n_pad is adaptive so it covers the maximum HP filter decay at any
+     * WASAPI output rate (44100 – 192000 Hz).
      */
     {
         /* n_pad = ceilf(2 / stepscale) + 4 covers all interpolation modes.
@@ -1599,7 +1599,9 @@ void dmaHD_SoundInfo(void)
             case 21: Com_Printf(" dmaEX2 sound mixer with no reverb [21]\n"); break;
             case 30: Com_Printf(" dmaEX sound mixer [30]\n"); break;
         }
-        Com_Printf(" %d ch / %d Hz / %d bps\n", dma.channels, dma.speed, dma.samplebits);
+        Com_Printf(" %d ch / %d Hz / %d bps%s\n", dma.channels, dma.speed,
+            dma.validbits ? dma.validbits : dma.samplebits,
+            (dma.validbits && dma.validbits != dma.samplebits) ? " (24-in-32 PCM)" : "");
         if (s_numSfx > 0 || g_dmaHD_allocatedsoundmemory > 0)
         {
             Com_Printf(" %d sounds in %.2f MiB\n", s_numSfx, (float)g_dmaHD_allocatedsoundmemory / 1048576.0f);

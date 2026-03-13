@@ -611,6 +611,19 @@ static qboolean SNDDMA_InitWASAPI( void )
 	dma.speed = desiredFormat.Format.nSamplesPerSec;
 	dma.samplebits = desiredFormat.Format.wBitsPerSample;
 
+	/* For WAVEFORMATEXTENSIBLE the container width (wBitsPerSample) can
+	 * differ from the actual valid bits (wValidBitsPerSample), e.g. Windows
+	 * reports wBitsPerSample=32 and wValidBitsPerSample=24 when the device is
+	 * configured for 24-bit audio.  Store the valid bit depth separately so
+	 * s_info can display the correct value to the user while the transfer path
+	 * continues to use dma.samplebits (32) for its output-format switch. */
+	if ( desiredFormat.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+	     desiredFormat.Samples.wValidBitsPerSample != 0 &&
+	     desiredFormat.Samples.wValidBitsPerSample != desiredFormat.Format.wBitsPerSample )
+		dma.validbits = desiredFormat.Samples.wValidBitsPerSample;
+	else
+		dma.validbits = 0;
+
 	dma.fullsamples = log2pad( bufferFrameCount * 8, 1 );
 	while ( dma.fullsamples * desiredFormat.Format.nBlockAlign > sizeof( buffer ) )
 		dma.fullsamples >>= 1;
