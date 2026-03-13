@@ -214,6 +214,13 @@ static alSfxRec_t   s_al_sfx[S_AL_MAX_SFX];
 static int          s_al_numSfx   = 0;
 static alSfxRec_t  *s_al_sfxHash[S_AL_SFX_HASHSIZE];
 
+/* Volume category for per-group gain control (see s_alVolSelf/Other/Env) */
+typedef enum {
+    SRC_CAT_WORLD   = 0,  /* other entity / player sounds (default) */
+    SRC_CAT_LOCAL   = 1,  /* own player / weapon sounds */
+    SRC_CAT_AMBIENT = 2,  /* looping environmental / ambient sounds */
+} alSrcCat_t;
+
 /* Per-active-sound source */
 typedef struct {
     ALuint          source;
@@ -224,7 +231,8 @@ typedef struct {
     qboolean        fixed_origin;
     qboolean        loopSound;
     int             allocTime;
-    float           master_vol;
+    float           master_vol;     /* raw volume [0..255] before category scale */
+    alSrcCat_t      category;       /* volume group for s_alVolSelf/Other/Env */
     qboolean        isPlaying;
     qboolean        isLocal;        /* non-spatialized */
     float           occlusionGain;  /* [0..1] — 1.0 = unoccluded, 0.1 = fully blocked */
@@ -308,6 +316,14 @@ static alEfx_t s_al_efx;
 static cvar_t *s_alDevice;
 static cvar_t *s_alHRTF;
 static cvar_t *s_alMaxDist;
+static cvar_t *s_alReverb;       /* master EFX reverb toggle (0/1) */
+static cvar_t *s_alReverbGain;   /* wet-signal slot gain [0..1] */
+static cvar_t *s_alReverbDecay;  /* reverb decay time in seconds (LATCH) */
+static cvar_t *s_alOcclusion;    /* 0 = off, 1 = gain+direction correction */
+static cvar_t *s_alDynamicReverb;/* 0 = static EFX, 1 = ray-traced acoustic env */
+static cvar_t *s_alVolSelf;      /* own player/weapon volume multiplier [0..1.5] */
+static cvar_t *s_alVolOther;     /* other entity/player volume multiplier [0..1.0] */
+static cvar_t *s_alVolEnv;       /* looping ambient volume multiplier [0..1.0] */
 
 /* =========================================================================
  * Section 5 — Library loading helpers
@@ -635,6 +651,32 @@ static float S_AL_GetMasterVol( void )
     return s_volume ? s_volume->value * 255.0f : 200.0f;
 }
 
+/* Return the per-category volume scalar for a source, clamped to its
+ * allowed range.  Anti-cheat: s_alVolOther and s_alVolEnv are capped at
+ * 1.0 (can only be turned DOWN); s_alVolSelf allows a modest boost (1.5). */
+static float S_AL_GetCategoryVol( alSrcCat_t cat )
+{
+    float v;
+    switch (cat) {
+    case SRC_CAT_LOCAL:
+        v = s_alVolSelf ? s_alVolSelf->value : 1.0f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.5f) v = 1.5f;
+        return v;
+    case SRC_CAT_AMBIENT:
+        v = s_alVolEnv ? s_alVolEnv->value : 1.0f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        return v;
+    case SRC_CAT_WORLD:
+    default:
+        v = s_alVolOther ? s_alVolOther->value : 1.0f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        return v;
+    }
+}
+
 static int S_AL_FindSourceByChannel( int entnum, int entchannel )
 {
     int i;
@@ -674,36 +716,104 @@ static int S_AL_GetFreeSource( void )
     return -1;
 }
 
-/* Trace a ray from the listener to the source through solid BSP geometry.
- * Returns a gain multiplier: 1.0 = line-of-sight, 0.1 = fully occluded.
- * We include CONTENTS_PLAYERCLIP so that player-solid geometry (stairs,
- * clip brushes) also attenuates sound realistically. */
-static float S_AL_ComputeOcclusion( const vec3_t srcOrigin )
+/* Compute occlusion gain and find the best apparent source position for HRTF
+ * directional accuracy when the direct path is blocked.
+ *
+ * Algorithm (first-order diffraction approximation):
+ *   1. Cast one direct ray (listener → srcOrigin).
+ *      Clear LOS  → acousticPos = srcOrigin, return 1.0.
+ *   2. Blocked → build an orthonormal tangent frame perpendicular to the
+ *      listener→source axis and cast up to 8 probe rays displaced
+ *      ±SEARCH_RADIUS in that plane (cardinal + diagonal directions).
+ *      Pick the probe with the highest fraction (nearest audible gap).
+ *      Use that probe position as acousticPos so HRTF places the sound
+ *      from the gap direction rather than through the wall.
+ *   3. Fall back to srcOrigin if no better probe is found.
+ *
+ * Total traces: 1 (direct) + up to 8 (probes, early-break on clear path).
+ * Called every 4 frames per playing non-local source.
+ *
+ * Returns gain [0.1..1.0].  acousticPos receives the virtual AL_POSITION. */
+static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acousticPos )
 {
     trace_t tr;
-    vec3_t  listenerOrg;
+    float   directFrac;
+    float   bestFrac = 0.f; /* hoisted; assigned from directFrac before the probe loop */
 
-    VectorCopy(s_al_listener_origin, listenerOrg);
-    CM_BoxTrace(&tr, listenerOrg, srcOrigin,
+    VectorCopy(srcOrigin, acousticPos);
+
+    CM_BoxTrace(&tr, s_al_listener_origin, srcOrigin,
                 vec3_origin, vec3_origin,
                 0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
 
-    if (tr.fraction >= 1.0f)
-        return 1.0f;           /* clear line of sight */
+    directFrac = tr.fraction;
+    if (directFrac >= 1.0f)
+        return 1.0f;   /* clear LOS — use the real position as-is */
 
-    /* Linear blend: solid wall = 0.1 (muffled but audible), partial = blend */
-    return 0.1f + 0.9f * tr.fraction;
+    bestFrac = directFrac;
+
+    /* Occluded: search for the nearest gap in 8 tangent-plane directions. */
+    {
+        /* (right-scale, up-scale) pairs — cardinal then diagonal */
+        static const float dirs[8][2] = {
+            { 1.f,  0.f}, {-1.f,  0.f}, { 0.f,  1.f}, { 0.f, -1.f},
+            { 1.f,  1.f}, { 1.f, -1.f}, {-1.f,  1.f}, {-1.f, -1.f}
+        };
+        /* ~half a doorway width; large enough to reach around thin walls,
+         * small enough not to sample through unrelated geometry */
+        static const float SEARCH_RADIUS = 80.0f;
+
+        vec3_t fwd, right, upv;
+        int    k;
+
+        /* Orthonormal frame: fwd = listener→source, right/up = tangent plane */
+        VectorSubtract(srcOrigin, s_al_listener_origin, fwd);
+        VectorNormalize(fwd);
+
+        if (fabsf(fwd[2]) < 0.9f) {
+            vec3_t worldUp = {0.f, 0.f, 1.f};
+            CrossProduct(fwd, worldUp, right);
+        } else {
+            vec3_t worldFwd = {1.f, 0.f, 0.f};
+            CrossProduct(fwd, worldFwd, right);
+        }
+        VectorNormalize(right);
+        CrossProduct(right, fwd, upv);
+        VectorNormalize(upv);
+
+        for (k = 0; k < 8; k++) {
+            trace_t pr;
+            vec3_t  probe;
+
+            VectorMA(srcOrigin, dirs[k][0] * SEARCH_RADIUS, right, probe);
+            VectorMA(probe,     dirs[k][1] * SEARCH_RADIUS, upv,   probe);
+
+            CM_BoxTrace(&pr, s_al_listener_origin, probe,
+                        vec3_origin, vec3_origin,
+                        0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
+
+            if (pr.fraction > bestFrac) {
+                bestFrac = pr.fraction;
+                VectorCopy(probe, acousticPos);
+                if (bestFrac >= 1.0f)
+                    break;   /* clear path found — stop searching */
+            }
+        }
+    }
+
+    return 0.1f + 0.9f * bestFrac;
 }
 
 /* Configure a source for 3D or local playback. */
 static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                             const vec3_t origin, qboolean fixed_origin,
                             int entnum, int entchannel,
-                            float vol, qboolean isLocal )
+                            float vol, qboolean isLocal, qboolean isAmbient )
 {
-    alSfxRec_t *r  = &s_al_sfx[sfx];
-    alSrc_t    *src = &s_al_src[idx];
-    ALuint      sid = src->source;
+    alSfxRec_t *r   = &s_al_sfx[sfx];
+    alSrc_t    *src  = &s_al_src[idx];
+    ALuint      sid  = src->source;
+    float       catVol;
 
     src->sfx          = sfx;
     src->entnum       = entnum;
@@ -716,6 +826,16 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->occlusionGain = 1.0f;
     src->occlusionTick = 0;
 
+    /* Classify into volume category */
+    if (isLocal)
+        src->category = SRC_CAT_LOCAL;
+    else if (isAmbient)
+        src->category = SRC_CAT_AMBIENT;
+    else
+        src->category = SRC_CAT_WORLD;
+
+    catVol = S_AL_GetCategoryVol(src->category);
+
     if (origin)
         VectorCopy(origin, src->origin);
     else
@@ -723,7 +843,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->fixed_origin = fixed_origin;
 
     qalSourcei(sid,  AL_BUFFER,   r->buffer);
-    qalSourcef(sid,  AL_GAIN,     vol / 255.0f);
+    qalSourcef(sid,  AL_GAIN,     (vol / 255.0f) * catVol);
     qalSourcei(sid,  AL_LOOPING,  AL_FALSE);
 
     if (isLocal) {
@@ -739,9 +859,14 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         qalSourcef(sid, AL_REFERENCE_DISTANCE,  S_AL_SOUND_FULLVOLUME);
         qalSourcef(sid, AL_MAX_DISTANCE,        maxDist);
         if (s_al_efx.available) {
-            /* Reverb send (auxiliary send 0) */
-            qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
-                        (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
+            /* Reverb send (auxiliary send 0) — skip when reverb is disabled */
+            if (s_alReverb && s_alReverb->integer) {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
+            } else {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
+            }
             /* Occlusion direct filter (initially pass-through) */
             qalSourcei(sid, AL_DIRECT_FILTER,
                        (ALint)s_al_efx.occlusionFilter[idx]);
@@ -900,17 +1025,21 @@ static void S_AL_InitEFX( void )
     qalEffecti(s_al_efx.reverbEffect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
     if (qalGetError() == AL_NO_ERROR) {
         s_al_efx.hasEAXReverb = qtrue;
-        /* Medium-sized indoor room — sensible default for URT maps */
+        /* Medium-sized indoor room — sensible default for URT maps.
+         * Reflections gain is intentionally kept moderate so early
+         * reflections are audible but the late reverb tail does not
+         * drown out direct weapon / footstep sounds. */
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DENSITY,           0.5f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DIFFUSION,         0.85f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAIN,              0.32f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAIN,              0.20f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINHF,            0.89f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINLF,            1.0f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,        1.49f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,
+                   s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_HFRATIO,     0.83f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN,  0.05f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN,  0.15f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_DELAY, 0.007f);
-        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN,  1.26f);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN,  0.35f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_DELAY, 0.011f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_AIR_ABSORPTION_GAINHF, 0.994f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_ROOM_ROLLOFF_FACTOR,   0.0f);
@@ -921,17 +1050,25 @@ static void S_AL_InitEFX( void )
         qalGetError();
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DENSITY,    0.5f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DIFFUSION,  0.85f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAIN,       0.32f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAIN,       0.20f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAINHF,     0.89f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME, 1.49f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,  0.05f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME,
+                   s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,  0.15f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_DELAY, 0.007f);
-        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,  1.26f);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,  0.35f);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_DELAY, 0.011f);
     }
     qalGenAuxiliaryEffectSlots(1, &s_al_efx.reverbSlot);
     qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
                             (ALint)s_al_efx.reverbEffect);
+    /* Apply initial reverb slot gain from cvar */
+    {
+        float slotGain = s_alReverbGain ? s_alReverbGain->value : 0.20f;
+        if (slotGain < 0.0f) slotGain = 0.0f;
+        if (slotGain > 1.0f) slotGain = 1.0f;
+        qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot, AL_EFFECTSLOT_GAIN, slotGain);
+    }
 
     /* Underwater effect */
     qalGenEffects(1, &s_al_efx.underwaterEffect);
@@ -973,6 +1110,8 @@ static void S_AL_Shutdown( void )
 
     if (!s_al_started) return;
     s_al_started = qfalse;
+
+    Cmd_RemoveCommand("s_devices");
 
     /* Stop all sources */
     for (i = 0; i < s_al_numSrc; i++)
@@ -1078,7 +1217,8 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
      * use fixed_origin=false so that S_AL_UpdateEntityPosition can keep
      * moving the source as the entity moves each frame. */
     S_AL_SrcSetup(srcIdx, sfx, isLocal ? NULL : sndOrigin,
-                  (origin != NULL), entnum, entchannel, vol, isLocal);
+                  (origin != NULL), entnum, entchannel, vol, isLocal,
+                  qfalse /* one-shot entity sound, not ambient */);
 
     r->lastTimeUsed = Com_Milliseconds();
     qalSourcePlay(s_al_src[srcIdx].source);
@@ -1099,7 +1239,8 @@ static void S_AL_StartLocalSound( sfxHandle_t sfx, int channelNum )
 
     vol = S_AL_GetMasterVol();
     S_AL_SrcSetup(srcIdx, sfx, NULL, qfalse,
-                  0, channelNum, vol, qtrue /* local */);
+                  0, channelNum, vol, qtrue /* local */,
+                  qfalse /* not ambient */);
     r->lastTimeUsed = Com_Milliseconds();
     qalSourcePlay(s_al_src[srcIdx].source);
 }
@@ -1292,7 +1433,8 @@ static void S_AL_UpdateLoops( void )
             if (srcIdx < 0) continue;
             float vol = S_AL_GetMasterVol();
             S_AL_SrcSetup(srcIdx, lp->sfx, lp->origin, qtrue,
-                          i, CHAN_AUTO, vol, qfalse);
+                          i, CHAN_AUTO, vol, qfalse,
+                          qtrue /* looping ambient */);
             s_al_src[srcIdx].loopSound = qtrue;
             qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
             qalSourcePlay(s_al_src[srcIdx].source);
@@ -1358,6 +1500,187 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
     }
 }
 
+/* =========================================================================
+ * Dynamic acoustic environment detection
+ *
+ * Called from S_AL_Update every S_AL_ENV_RATE frames when s_alDynamicReverb
+ * is non-zero.  Casts 14 rays (8 horizontal, 4 diagonal-up, 1 up, 1 down)
+ * from the listener position to measure the surrounding space, then derives
+ * EFX reverb parameters that match the environment:
+ *
+ *   Small room  — short decay, modest late-gain, modest reflections
+ *   Corridor    — medium decay, stronger early reflections
+ *   Large hall / cave — long decay, loud late-reverb tail
+ *   Open outdoor      — very short decay, near-dry (slot gain → 0)
+ *
+ * Only CONTENTS_SOLID is tested (not PLAYERCLIP) to avoid player-clip
+ * brushes registering as acoustic surfaces.  Max ray length equals the
+ * sound attenuation distance so we never measure geometry beyond the
+ * audible range.
+ *
+ * Performance: 14 traces / S_AL_ENV_RATE frames ≈ 0.9 traces/frame average.
+ * ========================================================================= */
+
+#define S_AL_ENV_RAYS  14
+#define S_AL_ENV_RATE  16     /* update every N frames */
+
+/* World-space probe directions (normalised).
+ * 8 horizontal (every 45°), 4 diagonal-up, 1 up, 1 down. */
+static const float s_al_envDirs[S_AL_ENV_RAYS][3] = {
+    /* horizontal */
+    { 1.000f,  0.000f,  0.000f},
+    { 0.707f,  0.707f,  0.000f},
+    { 0.000f,  1.000f,  0.000f},
+    {-0.707f,  0.707f,  0.000f},
+    {-1.000f,  0.000f,  0.000f},
+    {-0.707f, -0.707f,  0.000f},
+    { 0.000f, -1.000f,  0.000f},
+    { 0.707f, -0.707f,  0.000f},
+    /* diagonal-up */
+    { 0.707f,  0.000f,  0.707f},
+    { 0.000f,  0.707f,  0.707f},
+    {-0.707f,  0.000f,  0.707f},
+    { 0.000f, -0.707f,  0.707f},
+    /* vertical */
+    { 0.000f,  0.000f,  1.000f},
+    { 0.000f,  0.000f, -1.000f},
+};
+
+static void S_AL_UpdateDynamicReverb( void )
+{
+    /* Smoothed current EFX values (negative = uninitialised, snap on first run) */
+    static float curDecay  = -1.f;
+    static float curLate   =  0.f;
+    static float curRefl   =  0.f;
+    static float curSlot   =  0.f;
+    static int   lastFrame = -(S_AL_ENV_RATE);
+
+    float totalDist, minHorizDist, maxHorizDist;
+    int   openCount, i;
+    float avgDist, openFrac, sizeFactor, corrFactor;
+    float targetDecay, targetLate, targetRefl, targetSlot;
+    float baseGain;
+    qboolean snap;
+
+    if (!s_al_efx.available)                                  return;
+    if (!s_alReverb        || !s_alReverb->integer)           return;
+    if (!s_alDynamicReverb || !s_alDynamicReverb->integer)    return;
+    if (s_al_inwater)                                         return;
+
+    /* Detect frame-counter reset (map load / StopAllSounds) */
+    snap = (s_al_loopFrame < lastFrame || curDecay < 0.f);
+    if (snap)
+        lastFrame = s_al_loopFrame - S_AL_ENV_RATE;
+
+    if ((s_al_loopFrame - lastFrame) < S_AL_ENV_RATE)
+        return;
+    lastFrame = s_al_loopFrame;
+
+    /* --- Cast 14 probes -------------------------------------------------- */
+    totalDist    = 0.f;
+    minHorizDist = S_AL_SOUND_MAXDIST;
+    maxHorizDist = 0.f;
+    openCount    = 0;
+
+    for (i = 0; i < S_AL_ENV_RAYS; i++) {
+        trace_t tr;
+        vec3_t  end;
+        float   dist;
+
+        end[0] = s_al_listener_origin[0] + s_al_envDirs[i][0] * S_AL_SOUND_MAXDIST;
+        end[1] = s_al_listener_origin[1] + s_al_envDirs[i][1] * S_AL_SOUND_MAXDIST;
+        end[2] = s_al_listener_origin[2] + s_al_envDirs[i][2] * S_AL_SOUND_MAXDIST;
+
+        CM_BoxTrace(&tr, s_al_listener_origin, end,
+                    vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse);
+
+        dist       = tr.fraction * S_AL_SOUND_MAXDIST;
+        totalDist += dist;
+        if (tr.fraction >= 1.f)
+            openCount++;
+
+        /* Collect horizontal range for corridor detection (rays 0-7) */
+        if (i < 8) {
+            if (dist < minHorizDist) minHorizDist = dist;
+            if (dist > maxHorizDist) maxHorizDist = dist;
+        }
+    }
+
+    avgDist  = totalDist / (float)S_AL_ENV_RAYS;
+    openFrac = (float)openCount / (float)S_AL_ENV_RAYS;
+
+    /* sizeFactor: 0 = tight room (≤80 units), 1 = large/open (≥600 units) */
+    sizeFactor = (avgDist - S_AL_SOUND_FULLVOLUME) /
+                 (600.f  - S_AL_SOUND_FULLVOLUME);
+    if (sizeFactor < 0.f) sizeFactor = 0.f;
+    if (sizeFactor > 1.f) sizeFactor = 1.f;
+
+    /* corrFactor: high when one horizontal dimension is much tighter than
+     * another — characteristic of corridors.  Only fires when a close wall
+     * (< 200 units) exists alongside a long dimension (> 200 units). */
+    if (minHorizDist < 200.f && maxHorizDist > minHorizDist) {
+        corrFactor = (maxHorizDist - minHorizDist) / maxHorizDist;
+        if (corrFactor > 1.f) corrFactor = 1.f;
+    } else {
+        corrFactor = 0.f;
+    }
+
+    /* --- Derive target EFX parameters ------------------------------------ */
+    baseGain = (s_alReverbGain && s_alReverbGain->value > 0.f)
+               ? s_alReverbGain->value : 0.20f;
+
+    /* Decay: short room (0.4 s) up to large cave (4.0 s), killed outdoors */
+    targetDecay = 0.4f + sizeFactor * 3.6f;
+    targetDecay *= (1.f - openFrac * 0.9f);
+    if (targetDecay < 0.1f) targetDecay = 0.1f;
+
+    /* Late reverb tail: near-silent in small/outdoor, louder in large enclosed */
+    targetLate = 0.10f + sizeFactor * 0.80f;
+    targetLate *= (1.f - openFrac * 0.90f);
+    if (targetLate < 0.f) targetLate = 0.f;
+    if (targetLate > 1.f) targetLate = 1.f;
+
+    /* Early reflections: stronger in corridors and enclosed spaces */
+    targetRefl = 0.05f + corrFactor * 0.55f;
+    targetRefl *= (1.f - openFrac * 0.80f);
+    if (targetRefl < 0.f) targetRefl = 0.f;
+    if (targetRefl > 1.f) targetRefl = 1.f;
+
+    /* Slot gain: scales with enclosure; outdoor → near-dry */
+    targetSlot = baseGain * (1.f - openFrac * 0.90f);
+    if (targetSlot < 0.f) targetSlot = 0.f;
+    if (targetSlot > 1.f) targetSlot = 1.f;
+
+    /* --- Smooth blend or snap -------------------------------------------- */
+    if (snap) {
+        curDecay = targetDecay;
+        curLate  = targetLate;
+        curRefl  = targetRefl;
+        curSlot  = targetSlot;
+    } else {
+        /* Pole 0.85 → ~2 s half-transition at 16-frame update rate / 30 fps */
+        curDecay = curDecay * 0.85f + targetDecay * 0.15f;
+        curLate  = curLate  * 0.85f + targetLate  * 0.15f;
+        curRefl  = curRefl  * 0.85f + targetRefl  * 0.15f;
+        curSlot  = curSlot  * 0.85f + targetSlot  * 0.15f;
+    }
+
+    /* --- Push to EFX effect and re-upload to slot ------------------------- */
+    if (s_al_efx.hasEAXReverb) {
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,       curDecay);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN, curLate);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN, curRefl);
+    } else {
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME,          curDecay);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,    curLate);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,    curRefl);
+    }
+    /* Re-attach effect to slot so parameter changes take effect */
+    qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
+                            (ALint)s_al_efx.reverbEffect);
+    qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot, AL_EFFECTSLOT_GAIN, curSlot);
+}
+
 static void S_AL_Update( int msec )
 {
     int   i;
@@ -1378,14 +1701,60 @@ static void S_AL_Update( int msec )
         S_AL_MusicUpdate();
     }
 
-    /* Switch all non-local sources between normal reverb and underwater effect */
+    /* Live-update reverb slot gain and water-transition routing */
     if (s_al_efx.available) {
         static qboolean lastInwater = qfalse;
+        static float    lastReverbGain = -1.0f;
+
+        /* s_alReverbGain can be changed at any time — push to AL slot.
+         * Skip when dynamic reverb is active; it manages the slot gain. */
+        if (s_alReverbGain && !(s_alDynamicReverb && s_alDynamicReverb->integer)) {
+            float rg = s_alReverbGain->value;
+            if (rg < 0.0f) rg = 0.0f;
+            if (rg > 1.0f) rg = 1.0f;
+            if (rg != lastReverbGain) {
+                float slotGain = (s_alReverb && s_alReverb->integer) ? rg : 0.0f;
+                qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot,
+                                        AL_EFFECTSLOT_GAIN, slotGain);
+                lastReverbGain = rg;
+            }
+        }
+
+        /* Dynamic acoustic environment: updates EFX params + slot gain */
+        S_AL_UpdateDynamicReverb();
+
+        /* Live-update per-category volume when s_alVolSelf/Other/Env change.
+         * master_vol is stored pre-category so we can always recompute cleanly. */
+        {
+            static float lastVolSelf  = -1.f;
+            static float lastVolOther = -1.f;
+            static float lastVolEnv   = -1.f;
+            float vSelf  = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
+            float vOther = S_AL_GetCategoryVol(SRC_CAT_WORLD);
+            float vEnv   = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
+
+            if (vSelf != lastVolSelf || vOther != lastVolOther || vEnv != lastVolEnv) {
+                int j;
+                for (j = 0; j < s_al_numSrc; j++) {
+                    if (!s_al_src[j].isPlaying) continue;
+                    qalSourcef(s_al_src[j].source, AL_GAIN,
+                        (s_al_src[j].master_vol / 255.f) *
+                        S_AL_GetCategoryVol(s_al_src[j].category));
+                }
+                lastVolSelf  = vSelf;
+                lastVolOther = vOther;
+                lastVolEnv   = vEnv;
+            }
+        }
+
+        /* Switch all non-local sources between normal reverb and underwater effect */
         if (s_al_inwater != lastInwater) {
             int j;
             ALuint slot = s_al_inwater ? s_al_efx.underwaterSlot : s_al_efx.reverbSlot;
             for (j = 0; j < s_al_numSrc; j++) {
                 if (!s_al_src[j].isPlaying || s_al_src[j].isLocal) continue;
+                if (s_alReverb && !s_alReverb->integer)
+                    slot = (ALuint)AL_EFFECTSLOT_NULL;
                 qalSource3i(s_al_src[j].source, AL_AUXILIARY_SEND_FILTER,
                             (ALint)slot, 0, (ALint)AL_FILTER_NULL);
             }
@@ -1402,23 +1771,99 @@ static void S_AL_Update( int msec )
             s_al_src[i].isPlaying = qfalse;
             continue;
         }
-        /* Occlusion: update every 4 frames to amortise CM_BoxTrace cost */
+        /* Occlusion + direction correction with distance-adaptive update cadence.
+         *
+         * Update interval is based on source distance to the listener so that
+         * nearby entities (other players) get per-frame precision while distant
+         * sources are updated less often, keeping CM_BoxTrace cost proportional
+         * to where positional accuracy actually matters:
+         *
+         *   < S_AL_SOUND_FULLVOLUME (80 u) : full-vol zone — skip occlusion,
+         *                                    snap to real position each frame.
+         *   80 – 300 u  (close / player)   : every frame  — super-accurate.
+         *   300 – 600 u (medium range)      : every 4 frames.
+         *   > 600 u     (far range)         : every 8 frames.
+         *
+         * When s_alOcclusion is disabled all sources use real position with a
+         * pass-through filter, matching vanilla dma behaviour.
+         */
         if (!s_al_src[i].isLocal) {
-            if ((s_al_loopFrame - s_al_src[i].occlusionTick) >= 4) {
-                float occ = S_AL_ComputeOcclusion(s_al_src[i].origin);
-                s_al_src[i].occlusionGain = occ;
-                s_al_src[i].occlusionTick = s_al_loopFrame;
+            vec3_t diff;
+            float  distSq;
+            int    interval;
 
+            VectorSubtract(s_al_src[i].origin, s_al_listener_origin, diff);
+            distSq = DotProduct(diff, diff);
+
+            if (distSq < (S_AL_SOUND_FULLVOLUME * S_AL_SOUND_FULLVOLUME)) {
+                /* Full-volume zone: always at max gain, exact HRTF position.
+                 * No wall can separate source from listener at this range; any
+                 * filter attenuation here would be wrong. */
+                interval = 0;
+            } else if (distSq < (300.f * 300.f)) {
+                interval = 1;   /* close — per-frame, e.g. nearby players */
+            } else if (distSq < (600.f * 600.f)) {
+                interval = 4;   /* medium */
+            } else {
+                interval = 8;   /* far — distance model handles audibility */
+            }
+
+            if (interval == 0) {
+                /* Snap to real position; ensure pass-through filter */
+                s_al_src[i].occlusionGain = 1.0f;
+                s_al_src[i].occlusionTick = s_al_loopFrame;
+                qalSource3f(s_al_src[i].source, AL_POSITION,
+                            s_al_src[i].origin[0],
+                            s_al_src[i].origin[1],
+                            s_al_src[i].origin[2]);
                 if (s_al_efx.available) {
-                    qalFilterf(s_al_efx.occlusionFilter[i],
-                               AL_LOWPASS_GAIN,   0.25f + 0.75f * occ);
-                    qalFilterf(s_al_efx.occlusionFilter[i],
-                               AL_LOWPASS_GAINHF, occ * occ);
+                    qalFilterf(s_al_efx.occlusionFilter[i], AL_LOWPASS_GAIN,   1.0f);
+                    qalFilterf(s_al_efx.occlusionFilter[i], AL_LOWPASS_GAINHF, 1.0f);
                     qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
                                (ALint)s_al_efx.occlusionFilter[i]);
+                }
+            } else if ((s_al_loopFrame - s_al_src[i].occlusionTick) >= interval) {
+                s_al_src[i].occlusionTick = s_al_loopFrame;
+
+                if (s_alOcclusion && s_alOcclusion->integer) {
+                    vec3_t acousticPos;
+                    float  occ = S_AL_ComputeAcousticPosition(
+                                     s_al_src[i].origin, acousticPos);
+                    s_al_src[i].occlusionGain = occ;
+
+                    /* Push the virtual position so HRTF aims from the gap */
+                    qalSource3f(s_al_src[i].source, AL_POSITION,
+                                acousticPos[0], acousticPos[1], acousticPos[2]);
+
+                    if (s_al_efx.available) {
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAIN,   0.25f + 0.75f * occ);
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAINHF, occ * occ);
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)s_al_efx.occlusionFilter[i]);
+                    } else {
+                        qalSourcef(s_al_src[i].source, AL_GAIN,
+                            (s_al_src[i].master_vol / 255.0f) *
+                            S_AL_GetCategoryVol(s_al_src[i].category) *
+                            occ * masterGain);
+                    }
                 } else {
-                    qalSourcef(s_al_src[i].source, AL_GAIN,
-                        (s_al_src[i].master_vol / 255.0f) * occ * masterGain);
+                    /* Occlusion off — vanilla dma behaviour: real position,
+                     * no extra gain attenuation, pass-through filter. */
+                    s_al_src[i].occlusionGain = 1.0f;
+                    qalSource3f(s_al_src[i].source, AL_POSITION,
+                                s_al_src[i].origin[0],
+                                s_al_src[i].origin[1],
+                                s_al_src[i].origin[2]);
+                    if (s_al_efx.available) {
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAIN,   1.0f);
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAINHF, 1.0f);
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)s_al_efx.occlusionFilter[i]);
+                    }
                 }
             }
         }
@@ -1464,6 +1909,78 @@ static void S_AL_ClearSoundBuffer( void )
     }
 }
 
+/* Print a clean numbered list of available OpenAL output devices so that
+ * players can easily identify the value to put in s_alDevice.
+ *
+ *   >*  1.  Realtek High Definition Audio    <- system default, currently active
+ *       2.  Razer Kraken 7.1 Chroma
+ *       3.  HDMI Output (LG Monitor)
+ *
+ * Legend: '>' = currently active   '*' = system default
+ *
+ * Device names form a contiguous multi-string: each entry is NUL-terminated
+ * and the list ends with an empty entry (double NUL). */
+static void S_AL_PrintDevices( void )
+{
+    const ALCchar *devList;
+    const ALCchar *defDev;
+    const ALCchar *curDev;
+    const ALCchar *p;
+    int            total, n;
+    qboolean       hasEnumAll;
+
+    hasEnumAll = qalcIsExtensionPresent(NULL, "ALC_ENUMERATE_ALL_EXT");
+
+    if (hasEnumAll) {
+        devList = qalcGetString(NULL, ALC_ALL_DEVICES_SPECIFIER);
+        defDev  = qalcGetString(NULL, ALC_DEFAULT_ALL_DEVICES_SPECIFIER);
+    } else {
+        devList = qalcGetString(NULL, ALC_DEVICE_SPECIFIER);
+        defDev  = qalcGetString(NULL, ALC_DEFAULT_DEVICE_SPECIFIER);
+    }
+
+    curDev = s_al_device
+             ? qalcGetString(s_al_device, ALC_DEVICE_SPECIFIER) : NULL;
+
+    if (!devList || !devList[0]) {
+        Com_Printf("  S_AL: no audio devices enumerated by OpenAL.\n");
+        return;
+    }
+
+    /* Count devices first for the header */
+    total = 0;
+    for (p = devList; *p; p += strlen(p) + 1)
+        total++;
+
+    Com_Printf("  Audio output devices  (> = active  * = system default):\n");
+
+    for (p = devList, n = 1; *p; p += strlen(p) + 1, n++) {
+        qboolean isDefault = (defDev && defDev[0] && !Q_stricmp(defDev, p));
+        qboolean isActive  = (curDev && curDev[0] && !Q_stricmp(curDev, p));
+
+        Com_Printf("    %c%c %2d.  %s\n",
+            isActive  ? '>' : ' ',
+            isDefault ? '*' : ' ',
+            n, p);
+    }
+
+    Com_Printf("  Usage: set s_alDevice <name-or-number> ; vid_restart\n");
+    Com_Printf("         (empty string restores the system default)\n");
+}
+
+/* Console command: /s_devices — prints the device list without any other
+ * sndinfo output, making it easy to find the right s_alDevice value. */
+static void S_AL_ListDevicesCmd( void )
+{
+    if (!s_al_started) {
+        Com_Printf("S_AL: OpenAL backend not active\n");
+        return;
+    }
+    Com_Printf("\n");
+    S_AL_PrintDevices();
+    Com_Printf("\n");
+}
+
 static void S_AL_SoundInfo( void )
 {
     ALCint hrtfStatus = 0;
@@ -1492,13 +2009,43 @@ static void S_AL_SoundInfo( void )
         s_al_efx.available ? "enabled" : "not available",
         s_al_efx.hasEAXReverb ? "EAX" : "standard");
 
+    Com_Printf("  Mix CVars:\n");
+    Com_Printf("    s_alReverb        %d  (EFX reverb %s)\n",
+        s_alReverb     ? s_alReverb->integer       : 0,
+        (s_alReverb && s_alReverb->integer) ? "on" : "off");
+    Com_Printf("    s_alReverbGain    %.2f  (wet slot gain)\n",
+        s_alReverbGain  ? s_alReverbGain->value  : 0.20f);
+    Com_Printf("    s_alReverbDecay   %.2f  (decay s, LATCH)\n",
+        s_alReverbDecay ? s_alReverbDecay->value : 1.49f);
+    Com_Printf("    s_alDynamicReverb %d  (ray-traced env %s)\n",
+        s_alDynamicReverb ? s_alDynamicReverb->integer : 0,
+        (s_alDynamicReverb && s_alDynamicReverb->integer) ? "on" : "off");
+    Com_Printf("    s_alOcclusion     %d  (occlusion+direction %s)\n",
+        s_alOcclusion   ? s_alOcclusion->integer : 1,
+        (s_alOcclusion && s_alOcclusion->integer) ? "on" : "off");
+    Com_Printf("    s_alMaxDist       %.0f  (attenuation distance)\n",
+        s_alMaxDist     ? s_alMaxDist->value     : 1330.f);
+
+    Com_Printf("  Volume groups (1.0 = default; capped values prevent amplification):\n");
+    Com_Printf("    s_alVolSelf   %.2f  (own player/weapon,  max 1.5)\n",
+        s_alVolSelf  ? s_alVolSelf->value  : 1.0f);
+    Com_Printf("    s_alVolOther  %.2f  (other players/ents, max 1.0)\n",
+        s_alVolOther ? s_alVolOther->value : 1.0f);
+    Com_Printf("    s_alVolEnv    %.2f  (ambient/looping,    max 1.0)\n",
+        s_alVolEnv   ? s_alVolEnv->value   : 1.0f);
+    Com_Printf("    s_musicVolume %.2f  (map background music)\n",
+        s_musicVolume ? s_musicVolume->value : 0.25f);
+
     {
         ALCint ambiOrder = 0;
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode"))
             qalcGetIntegerv(s_al_device, ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &ambiOrder);
         if (ambiOrder > 0)
-            Com_Printf("  Ambisonics: max order %d supported\n", ambiOrder);
+            Com_Printf("  Ambisonics: max order %d supported (not used)\n", ambiOrder);
     }
+
+    /* Device list — shows valid values for s_alDevice */
+    S_AL_PrintDevices();
 }
 
 static void S_AL_SoundList( void )
@@ -1539,17 +2086,69 @@ qboolean S_AL_Init( soundInterface_t *si )
 
     /* Register cvars */
     s_alDevice  = Cvar_Get("s_alDevice",  "",    CVAR_ARCHIVE_ND | CVAR_LATCH);
-    Cvar_SetDescription(s_alDevice, "OpenAL output device name. Empty = system default.");
+    Cvar_SetDescription(s_alDevice, "OpenAL output device. Empty = system default. Type /s_devices for a numbered list of available devices. (LATCH — requires vid_restart to take effect)");
     s_alHRTF    = Cvar_Get("s_alHRTF",   "1",   CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alHRTF, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alHRTF, "Enable HRTF (Head-Related Transfer Function) 3D audio via OpenAL Soft. Requires headphones for best effect.");
-    s_alMaxDist = Cvar_Get("s_alMaxDist", "1024", CVAR_ARCHIVE_ND);
-    Cvar_CheckRange(s_alMaxDist, "128", "4096", CV_FLOAT);
-    Cvar_SetDescription(s_alMaxDist, "Maximum attenuation distance for OpenAL sound sources.");
+    /* s_alMaxDist: default matches the vanilla dma max-audible distance.
+     * Values below 1330 are clamped to 1330 by the distance-model setup. */
+    s_alMaxDist = Cvar_Get("s_alMaxDist", "1330", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alMaxDist, "1330", "4096", CV_FLOAT);
+    Cvar_SetDescription(s_alMaxDist, "Maximum attenuation distance for OpenAL sound sources (game units). Matches vanilla dma range of 1330 at default.");
+    /* Reverb is OFF by default to match vanilla dma (no reverb). */
+    s_alReverb = Cvar_Get("s_alReverb", "0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alReverb, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alReverb, "Enable EFX environmental reverb (requires ALC_EXT_EFX). Default 0 matches vanilla dma behaviour.");
+    s_alReverbGain = Cvar_Get("s_alReverbGain", "0.20", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alReverbGain, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alReverbGain, "EFX reverb auxiliary slot gain (wet level). Lower values reduce echo relative to direct sound. Acts as the ceiling when s_alDynamicReverb is on.");
+    s_alReverbDecay = Cvar_Get("s_alReverbDecay", "1.49", CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alReverbDecay, "0.1", "10.0", CV_FLOAT);
+    Cvar_SetDescription(s_alReverbDecay, "EFX reverb decay time in seconds. Used when s_alDynamicReverb 0. Requires map reload (LATCH).");
+    /* Dynamic reverb is OFF by default (opt-in feature, not vanilla). */
+    s_alDynamicReverb = Cvar_Get("s_alDynamicReverb", "0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alDynamicReverb, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alDynamicReverb, "Ray-traced acoustic environment detection. Casts 14 probes from the listener every 16 frames to measure room size, corridor shape, and openness, then adjusts EFX reverb decay/reflections accordingly. Default 0.");
+    s_alOcclusion = Cvar_Get("s_alOcclusion", "1", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOcclusion, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alOcclusion, "Per-source occlusion tracing. Sounds behind walls are gain-attenuated and their apparent HRTF direction is corrected to the nearest audible gap. Close sources (<300 u) update every frame; distant sources update less often. Default 1.");
+    /* Volume group controls.  s_alVolOther and s_alVolEnv are hard-capped at
+     * 1.0 (you can only turn them DOWN, not amplify other players/ambience
+     * beyond their default level — anti-cheat / anti-wallhack measure).
+     * s_alVolSelf allows a modest boost to 1.5 since that only affects the
+     * local player's own sounds. */
+    s_alVolSelf = Cvar_Get("s_alVolSelf", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alVolSelf, "0", "1.5", CV_FLOAT);
+    Cvar_SetDescription(s_alVolSelf, "Own player / weapon volume multiplier [0.0-1.5]. Default 1.0. Modest boost allowed since this only affects your own sounds.");
+    s_alVolOther = Cvar_Get("s_alVolOther", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alVolOther, "0", "1.0", CV_FLOAT);
+    Cvar_SetDescription(s_alVolOther, "Other player / entity one-shot volume multiplier [0.0-1.0]. Capped at 1.0 — can turn down but not amplify (anti-cheat).");
+    s_alVolEnv = Cvar_Get("s_alVolEnv", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alVolEnv, "0", "1.0", CV_FLOAT);
+    Cvar_SetDescription(s_alVolEnv, "Looping ambient / environmental sound volume multiplier [0.0-1.0]. Capped at 1.0.");
 
     /* Load library */
     if (!S_AL_LoadLibrary())
         return qfalse;
+
+    /* Now the library is loaded — query the real default device name and
+     * embed it in the s_alDevice cvar description so players see it when
+     * they tab-complete or type the cvar name in the console. */
+    {
+        char           desc[512];
+        const ALCchar *defDev;
+
+        if (qalcIsExtensionPresent(NULL, "ALC_ENUMERATE_ALL_EXT"))
+            defDev = qalcGetString(NULL, ALC_DEFAULT_ALL_DEVICES_SPECIFIER);
+        else
+            defDev = qalcGetString(NULL, ALC_DEFAULT_DEVICE_SPECIFIER);
+
+        Com_sprintf(desc, sizeof(desc),
+            "OpenAL output device. Empty = system default (\"%s\"). "
+            "Type /s_devices for a numbered list. (LATCH — requires vid_restart)",
+            (defDev && defDev[0]) ? defDev : "unknown");
+        Cvar_SetDescription(s_alDevice, desc);
+    }
 
     /* Open device */
     device = s_alDevice->string[0] ? s_alDevice->string : NULL;
@@ -1579,6 +2178,16 @@ qboolean S_AL_Init( soundInterface_t *si )
      *   If HRTF still reports disabled after context creation (e.g. OpenAL
      *   implementation switched it off based on device type), call
      *   alcResetDeviceSoft with ALC_HRTF_SOFT = ALC_TRUE to force it.
+     *
+     * NOTE: ALC_AMBISONIC_ORDER_SOFT is intentionally NOT requested here.
+     *   In OpenAL Soft, setting ALC_AMBISONIC_ORDER_SOFT in the context
+     *   attributes forces Ambisonic output mode, silently overriding
+     *   ALC_STEREO_HRTF_SOFT.  Standard mono/stereo game sources are then
+     *   routed through an intermediate Ambisonic encode/decode path which
+     *   introduces positional errors (own sounds appear to come from the
+     *   wrong direction, panning is ambiguous near the listener).  Stereo
+     *   HRTF without Ambisonics applies the HRIR directly per-source, which
+     *   gives accurate positional audio for a first-person shooter.
      * ----------------------------------------------------------------------- */
     nAttribs = 0;
     if (s_alHRTF->integer) {
@@ -1591,18 +2200,6 @@ qboolean S_AL_Init( soundInterface_t *si )
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
             ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
             ctxAttribs[nAttribs++] = ALC_TRUE;
-        }
-    }
-    /* Ambisonic panning: request highest Ambisonic order the device supports. */
-    if (s_alHRTF->integer &&
-        qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
-        ALCint maxOrder = 1;
-        qalcGetIntegerv(s_al_device, ALC_MAX_AMBISONIC_ORDER_SOFT, 1, &maxOrder);
-        if (maxOrder > 3) maxOrder = 3;
-        if (maxOrder >= 1) {
-            ctxAttribs[nAttribs++] = ALC_AMBISONIC_ORDER_SOFT;
-            ctxAttribs[nAttribs++] = maxOrder;
-            Com_DPrintf("S_AL: requesting Ambisonic order %d for HRTF rendering\n", maxOrder);
         }
     }
     ctxAttribs[nAttribs] = 0; /* sentinel */
@@ -1704,6 +2301,8 @@ qboolean S_AL_Init( soundInterface_t *si )
 
     s_al_started = qtrue;
     s_al_muted   = qfalse;
+
+    Cmd_AddCommand("s_devices", S_AL_ListDevicesCmd);
 
     /* Populate the soundInterface_t */
     si->Shutdown             = S_AL_Shutdown;
