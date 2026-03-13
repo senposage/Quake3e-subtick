@@ -200,12 +200,14 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_SOUND_MAXDIST      1330.0f   /* 80 + 1/0.0008 */
 
 /* Target RMS level for ambient-sound loudness normalisation.
- * -18 dBFS gives a comfortable background-ambiance level; individual
- * sounds are scaled so their measured RMS matches this reference before
- * s_alVolEnv is applied on top.  Only ambient/looping sources use this
- * — one-shot world and local sounds are deliberately left un-normalised
- * so weapon impacts, footstep ticks, etc. retain their designed levels. */
-#define S_AL_AMBIENT_TARGET_RMS  0.125f   /* ≈ -18 dBFS */
+ * -21 dBFS gives a comfortable background-ambiance level that doesn't
+ * drown weapon, footstep, or voice sounds on maps with loud ambient
+ * loops (e.g. ut4_turnpike traffic).  Individual sounds are scaled so
+ * their measured RMS matches this reference before s_alVolEnv is applied.
+ * Only ambient/looping sources use this — one-shot world and local sounds
+ * are deliberately left un-normalised so weapon impacts, footstep ticks,
+ * etc. retain their designed levels. */
+#define S_AL_AMBIENT_TARGET_RMS  0.085f   /* ≈ -21 dBFS (was 0.125 / -18 dBFS) */
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
@@ -223,11 +225,15 @@ static alSfxRec_t   s_al_sfx[S_AL_MAX_SFX];
 static int          s_al_numSfx   = 0;
 static alSfxRec_t  *s_al_sfxHash[S_AL_SFX_HASHSIZE];
 
-/* Volume category for per-group gain control (see s_alVolSelf/Other/Env) */
+/* Volume category for per-group gain control */
 typedef enum {
     SRC_CAT_WORLD   = 0,  /* other entity / player sounds (default) */
-    SRC_CAT_LOCAL   = 1,  /* own player / weapon sounds */
+    SRC_CAT_LOCAL   = 1,  /* own player / weapon / breath sounds */
     SRC_CAT_AMBIENT = 2,  /* looping environmental / ambient sounds */
+    SRC_CAT_UI      = 3,  /* non-positional local sounds: hit markers, kill
+                           * confirmations, menu beeps (entnum == 0 + isLocal).
+                           * Separate from SRC_CAT_LOCAL so hit/kill sounds
+                           * can be tuned independently of weapon volume. */
 } alSrcCat_t;
 
 /* Per-active-sound source */
@@ -330,9 +336,11 @@ static cvar_t *s_alReverbGain;   /* wet-signal slot gain [0..1] */
 static cvar_t *s_alReverbDecay;  /* reverb decay time in seconds (LATCH) */
 static cvar_t *s_alOcclusion;    /* 0 = off, 1 = gain+direction correction */
 static cvar_t *s_alDynamicReverb;/* 0 = static EFX, 1 = ray-traced acoustic env */
+static cvar_t *s_alDebugReverb;  /* 0 = off, 1 = params per probe, 2 = + raw probe data */
 static cvar_t *s_alVolSelf;      /* own player/weapon volume multiplier [0..1.5] */
 static cvar_t *s_alVolOther;     /* other entity/player volume multiplier [0..1.0] */
 static cvar_t *s_alVolEnv;       /* looping ambient volume multiplier [0..1.0] */
+static cvar_t *s_alVolUI;        /* hit/kill/UI sound multiplier [0..1.0] */
 static cvar_t *s_alLocalSelf;    /* force own-entity sounds local even with explicit origin */
 
 /* =========================================================================
@@ -622,9 +630,12 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     if (rms < 1e-6f) return 1.0f;   /* silent — don't amplify noise floor */
 
     normGain = S_AL_AMBIENT_TARGET_RMS / rms;
-    /* Clamp to ±12 dB so outliers stay sane */
+    /* Clamp: boost quiet sounds up to 4× (+12 dB), cut loud sounds by up to
+     * 10× (−20 dB).  The wider reduction range prevents very loud ambient WAVs
+     * (e.g. ut4_turnpike traffic) from overwhelming other sounds even after the
+     * lower TARGET_RMS ceiling is applied. */
     if (normGain > 4.0f)   normGain = 4.0f;
-    if (normGain < 0.25f)  normGain = 0.25f;
+    if (normGain < 0.10f)  normGain = 0.10f;
 
     return normGain;
 }
@@ -747,14 +758,19 @@ static float S_AL_GetCategoryVol( alSrcCat_t cat )
         if (v < 0.0f) v = 0.0f;
         if (v > 1.5f) v = 1.5f;
         return v;
+    case SRC_CAT_UI:
+        v = s_alVolUI ? s_alVolUI->value : 0.8f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        return v;
     case SRC_CAT_AMBIENT:
-        v = s_alVolEnv ? s_alVolEnv->value : 1.0f;
+        v = s_alVolEnv ? s_alVolEnv->value : 0.3f;
         if (v < 0.0f) v = 0.0f;
         if (v > 1.0f) v = 1.0f;
         return v;
     case SRC_CAT_WORLD:
     default:
-        v = s_alVolOther ? s_alVolOther->value : 1.0f;
+        v = s_alVolOther ? s_alVolOther->value : 0.7f;
         if (v < 0.0f) v = 0.0f;
         if (v > 1.0f) v = 1.0f;
         return v;
@@ -791,9 +807,17 @@ static int S_AL_GetFreeSource( void )
         }
     }
 
-    /* Steal oldest non-loop source */
+    /* Steal oldest non-loop source.
+     * Explicitly detach the buffer (AL_BUFFER = 0) after stopping so the
+     * slot is in a fully clean state before S_AL_SrcSetup attaches a new
+     * buffer.  Skipping this step leaves the old buffer attached; some AL
+     * implementations start playback from the wrong offset or silently fail
+     * to play the new buffer when the new alSourcei(AL_BUFFER) call is made
+     * on a still-attached stopped source — observed as a missing layer in
+     * multi-sample weapon events (e.g. the DE-50's 5-sample fire profile). */
     if (oldestIdx >= 0) {
         qalSourceStop(s_al_src[oldestIdx].source);
+        qalSourcei(s_al_src[oldestIdx].source, AL_BUFFER, 0);
         s_al_src[oldestIdx].isPlaying = qfalse;
         return oldestIdx;
     }
@@ -914,8 +938,13 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->occlusionGain = 1.0f;
     src->occlusionTick = 0;
 
-    /* Classify into volume category */
-    if (isLocal)
+    /* Classify into volume category.
+     * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
+     * menu audio) — give these their own SRC_CAT_UI knob so they can be tuned
+     * independently of own-weapon / breath sounds (SRC_CAT_LOCAL). */
+    if (isLocal && entnum == 0)
+        src->category = SRC_CAT_UI;
+    else if (isLocal)
         src->category = SRC_CAT_LOCAL;
     else if (isAmbient)
         src->category = SRC_CAT_AMBIENT;
@@ -943,6 +972,16 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         qalSourcei(sid, AL_SOURCE_RELATIVE, AL_TRUE);
         qalSource3f(sid, AL_POSITION, 0.0f, 0.0f, 0.0f);
         qalSourcef(sid, AL_ROLLOFF_FACTOR, 0.0f);
+        /* Explicitly clear any direct filter left from a previous 3-D use of
+         * this source slot.  A stale low-pass (e.g. from a fully-occluded
+         * world sound) would otherwise muffle own-player / weapon sounds for
+         * the first few frames until the occlusion update tick resets it —
+         * the sporadic "suppressor" effect heard on weapons like the DE-50. */
+        if (s_al_efx.available) {
+            qalSourcei(sid, AL_DIRECT_FILTER, (ALint)AL_FILTER_NULL);
+            if (s_alDebugReverb && s_alDebugReverb->integer >= 2)
+                Com_Printf(S_COLOR_CYAN "[alfilter] src#%d local: cleared stale filter\n", idx);
+        }
     } else {
         float maxDist = s_alMaxDist ? s_alMaxDist->value : S_AL_SOUND_MAXDIST;
         if (maxDist < S_AL_SOUND_MAXDIST) maxDist = S_AL_SOUND_MAXDIST;
@@ -960,7 +999,21 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
             }
-            /* Occlusion direct filter (initially pass-through) */
+            /* Reset the occlusion filter to pass-through before attaching it.
+             * A previous sound on this slot may have left the filter at a
+             * heavily-attenuated state (e.g. a fully-occluded source), which
+             * would make the new sound appear muffled or suppressed until the
+             * occlusion tick resets it on the next update cycle. */
+            if (s_alDebugReverb && s_alDebugReverb->integer >= 2
+                    && src->occlusionGain < 0.99f) {
+                Com_Printf(S_COLOR_CYAN "[alfilter] src#%d 3D: reset stale filter"
+                           " (prev occ=%.2f  GAIN≈%.2f  GAINHF≈%.2f)\n",
+                           idx, src->occlusionGain,
+                           0.25f + 0.75f * src->occlusionGain,
+                           src->occlusionGain * src->occlusionGain);
+            }
+            qalFilterf(s_al_efx.occlusionFilter[idx], AL_LOWPASS_GAIN,   1.0f);
+            qalFilterf(s_al_efx.occlusionFilter[idx], AL_LOWPASS_GAINHF, 1.0f);
             qalSourcei(sid, AL_DIRECT_FILTER,
                        (ALint)s_al_efx.occlusionFilter[idx]);
             qalSourcei(sid, AL_AUXILIARY_SEND_FILTER_GAIN_AUTO,   AL_TRUE);
@@ -1611,21 +1664,45 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
  * from the listener position to measure the surrounding space, then derives
  * EFX reverb parameters that match the environment:
  *
- *   Small room  — short decay, modest late-gain, modest reflections
- *   Corridor    — medium decay, stronger early reflections
- *   Large hall / cave — long decay, loud late-reverb tail
- *   Open outdoor      — very short decay, near-dry (slot gain → 0)
+ *   Small room        — short decay, modest late-gain, modest reflections
+ *   Corridor          — medium decay, stronger early reflections
+ *   Large hall / cave — longer decay, moderate late-reverb tail
+ *   Open outdoor      — very short decay, near-dry (slot gain → low)
  *
  * Only CONTENTS_SOLID is tested (not PLAYERCLIP) to avoid player-clip
  * brushes registering as acoustic surfaces.  Max ray length equals the
  * sound attenuation distance so we never measure geometry beyond the
  * audible range.
  *
- * Performance: 14 traces / S_AL_ENV_RATE frames ≈ 0.9 traces/frame average.
+ * Each ray group uses a calibrated maximum distance (see s_al_envDists[]):
+ *   Horizontal 0–7  : S_AL_SOUND_MAXDIST (1330 u) — room-scale openness
+ *   Diagonal-up 8–11: S_AL_ENV_VERT_DIST (400 u)  — ceiling up to ~283 u
+ *   Straight up   12: S_AL_ENV_VERT_DIST (400 u)  — ceiling up to 400 u
+ *   Straight down 13: S_AL_ENV_DOWN_DIST (160 u)  — floor / pit context
+ * Using a single global max for all rays made ceilings appear nearly open
+ * (a 200-unit ceiling gave fr ≈ 0.15 at 1330-unit scale) and made overhangs
+ * invisible to the vertical openness metric.
+ *
+ * A rolling history buffer (S_AL_ENV_HISTORY slots) averages the last N probe
+ * sets.  A single "confused" reading — caused by complex geometry, thin walls,
+ * windows, or straddling a doorway threshold — only shifts the average by 1/N,
+ * preventing transient wrong classifications from audibly changing the reverb.
+ *
+ * A movement cache skips re-tracing when the listener hasn't moved more than
+ * S_AL_ENV_MOVE_THRESH units, saving CM traces for stationary players.
+ *
+ * EFX parameter targets are intentionally conservative (late-gain max 0.35,
+ * decay max 2.5 s) so the reverb colours the space without drowning the direct
+ * signal or causing layered weapon sounds to sound muffled.
+ *
+ * Performance: 14 traces / S_AL_ENV_RATE frames ≈ 0.9 traces/frame average
+ *              (zero traces when movement cache is active).
  * ========================================================================= */
 
-#define S_AL_ENV_RAYS  14
-#define S_AL_ENV_RATE  16     /* update every N frames */
+#define S_AL_ENV_RAYS        14
+#define S_AL_ENV_RATE        16    /* update every N frames */
+#define S_AL_ENV_HISTORY      3    /* rolling average window — damps spurious reads */
+#define S_AL_ENV_MOVE_THRESH 32.0f /* units; skip re-cast when barely moved */
 
 /* World-space probe directions (normalised).
  * 8 horizontal (every 45°), 4 diagonal-up, 1 up, 1 down. */
@@ -1649,6 +1726,65 @@ static const float s_al_envDirs[S_AL_ENV_RAYS][3] = {
     { 0.000f,  0.000f, -1.000f},
 };
 
+/* Per-ray trace distance (game units).
+ *
+ * Using a single global max-distance for all rays caused two problems:
+ *   1. Vertical / diagonal-up rays at 1330 units made a normal 200-unit
+ *      indoor ceiling appear nearly "open" (fr ≈ 0.15), so the classifier
+ *      failed to distinguish low-ceiling corridors from open sky.
+ *   2. An overhead overhang at, say, 120 units only pulled fr down to 0.09,
+ *      barely affecting vertOpenFrac, so the 70/30 horizontal/vertical
+ *      weighting could not fully compensate.
+ *
+ * Solution: calibrate each ray group to the geometry scale it is measuring.
+ *
+ *  Horizontal 0–7 : S_AL_SOUND_MAXDIST (1330 u)
+ *      Full attenuation range — needed for room-scale openness and corridor
+ *      detection.  A wall 600 units away gives fr = 0.45 (clearly enclosed);
+ *      an open street gives fr ≈ 1.0 (clearly open).
+ *
+ *  Diagonal-up 8–11 : S_AL_ENV_VERT_DIST (400 u)
+ *      A 45° diagonal ray of 400 units detects ceilings up to
+ *      400 × sin 45° ≈ 283 units high.  This covers the full range of URT
+ *      indoor ceilings (typically 160–280 u) while treating anything taller
+ *      (large atria, outdoor sky) as fully open (fr = 1.0).
+ *
+ *  Straight up 12 : S_AL_ENV_VERT_DIST (400 u)
+ *      Direct ceiling height up to 400 units.  A 200-unit ceiling gives
+ *      fr = 0.50 (half blocked — correctly "indoor").  Sky → fr = 1.0.
+ *
+ *  Straight down 13 : S_AL_ENV_DOWN_DIST (160 u)
+ *      Floor / pit context within a normal drop height.  Normal standing
+ *      gives fr ≈ 0.25 (floor close below — as expected).  A large pit or
+ *      open void below gives fr = 1.0 (contributes some openness). */
+#define S_AL_ENV_VERT_DIST  400.0f   /* diagonal-up + straight-up max (units) */
+#define S_AL_ENV_DOWN_DIST  160.0f   /* straight-down max (units) */
+
+static const float s_al_envDists[S_AL_ENV_RAYS] = {
+    /* horizontal (0–7): full sound-attenuation range */
+    S_AL_SOUND_MAXDIST,   /* 0: +X */
+    S_AL_SOUND_MAXDIST,   /* 1: +X+Y diagonal */
+    S_AL_SOUND_MAXDIST,   /* 2: +Y */
+    S_AL_SOUND_MAXDIST,   /* 3: -X+Y diagonal */
+    S_AL_SOUND_MAXDIST,   /* 4: -X */
+    S_AL_SOUND_MAXDIST,   /* 5: -X-Y diagonal */
+    S_AL_SOUND_MAXDIST,   /* 6: -Y */
+    S_AL_SOUND_MAXDIST,   /* 7: +X-Y diagonal */
+    /* diagonal-up (8–11): ceiling/overhang sensitivity */
+    S_AL_ENV_VERT_DIST,   /* 8:  +X up */
+    S_AL_ENV_VERT_DIST,   /* 9:  +Y up */
+    S_AL_ENV_VERT_DIST,   /* 10: -X up */
+    S_AL_ENV_VERT_DIST,   /* 11: -Y up */
+    /* straight up (12): direct ceiling height */
+    S_AL_ENV_VERT_DIST,   /* 12: +Z */
+    /* straight down (13): floor / pit context */
+    S_AL_ENV_DOWN_DIST,   /* 13: -Z */
+};
+/* Compile-time guard: every entry in s_al_envDirs must have a matching
+ * entry in s_al_envDists.  A mismatch causes a division-by-zero-size error. */
+typedef char s_al_envDists_size_assert[
+    (sizeof(s_al_envDists)/sizeof(s_al_envDists[0]) == S_AL_ENV_RAYS) ? 1 : -1];
+
 static void S_AL_UpdateDynamicReverb( void )
 {
     /* Smoothed current EFX values (negative = uninitialised, snap on first run) */
@@ -1658,9 +1794,30 @@ static void S_AL_UpdateDynamicReverb( void )
     static float curSlot   =  0.f;
     static int   lastFrame = -(S_AL_ENV_RATE);
 
-    float totalDist, minHorizDist, maxHorizDist;
-    int   openCount, i;
-    float avgDist, openFrac, sizeFactor, corrFactor;
+    /* Rolling environment history — averages the last S_AL_ENV_HISTORY probe
+     * sets so that a single "confused" reading (thin wall, window, doorway
+     * straddling) only moves the average by 1/N rather than flipping the
+     * whole classification. */
+    static float histSize[S_AL_ENV_HISTORY];
+    static float histOpen[S_AL_ENV_HISTORY];
+    static float histCorr[S_AL_ENV_HISTORY];
+    static int   histIdx   = 0;
+    static int   histCount = 0;
+
+    /* Movement cache — skip expensive traces when the listener hasn't moved
+     * far enough for new geometry to produce meaningfully different results. */
+    static vec3_t lastProbeOrigin;
+    static float  cachedSize       = 0.f;
+    static float  cachedOpen       = 0.f;
+    static float  cachedCorr       = 0.f;
+    static float  cachedHorizOpen  = 0.f;  /* for debug verbose split display */
+    static float  cachedVertOpen   = 0.f;
+    static qboolean haveCache = qfalse;
+
+    float horizDists[8];            /* per-ray horizontal distances, original order */
+    float horizTotalFrac, vertTotalFrac;
+    int   i;
+    float horizOpenFrac, vertOpenFrac, openFrac, sizeFactor, corrFactor;
     float targetDecay, targetLate, targetRefl, targetSlot;
     float baseGain;
     qboolean snap;
@@ -1675,85 +1832,210 @@ static void S_AL_UpdateDynamicReverb( void )
 
     /* Detect frame-counter reset (map load / StopAllSounds) */
     snap = (s_al_loopFrame < lastFrame || curDecay < 0.f);
-    if (snap)
-        lastFrame = s_al_loopFrame - S_AL_ENV_RATE;
+    if (snap) {
+        lastFrame  = s_al_loopFrame - S_AL_ENV_RATE;
+        /* Invalidate history and movement cache so the first post-load probe
+         * snaps immediately rather than blending stale data from the old map. */
+        histCount  = 0;
+        histIdx    = 0;
+        haveCache  = qfalse;
+    }
 
     if ((s_al_loopFrame - lastFrame) < S_AL_ENV_RATE)
         return;
     lastFrame = s_al_loopFrame;
 
-    /* --- Cast 14 probes -------------------------------------------------- */
-    totalDist    = 0.f;
-    minHorizDist = S_AL_SOUND_MAXDIST;
-    maxHorizDist = 0.f;
-    openCount    = 0;
+    /* --- Probe the environment (or reuse movement cache) ----------------- */
+    {
+        vec3_t  moveDelta;
+        float   moveDist;
+        VectorSubtract(s_al_listener_origin, lastProbeOrigin, moveDelta);
+        moveDist = VectorLength(moveDelta);
 
-    for (i = 0; i < S_AL_ENV_RAYS; i++) {
-        trace_t tr;
-        vec3_t  end;
-        float   dist;
+        if (haveCache && moveDist < S_AL_ENV_MOVE_THRESH) {
+            /* Listener hasn't moved enough to justify re-tracing; reuse the
+             * cached metrics from the last probe run. */
+            sizeFactor    = cachedSize;
+            openFrac      = cachedOpen;
+            corrFactor    = cachedCorr;
+            horizOpenFrac = cachedHorizOpen;
+            vertOpenFrac  = cachedVertOpen;
+        } else {
+            VectorCopy(s_al_listener_origin, lastProbeOrigin);
 
-        end[0] = s_al_listener_origin[0] + s_al_envDirs[i][0] * S_AL_SOUND_MAXDIST;
-        end[1] = s_al_listener_origin[1] + s_al_envDirs[i][1] * S_AL_SOUND_MAXDIST;
-        end[2] = s_al_listener_origin[2] + s_al_envDirs[i][2] * S_AL_SOUND_MAXDIST;
+            horizTotalFrac = 0.f;
+            vertTotalFrac  = 0.f;
 
-        CM_BoxTrace(&tr, s_al_listener_origin, end,
-                    vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse);
+            for (i = 0; i < S_AL_ENV_RAYS; i++) {
+                trace_t tr;
+                vec3_t  end;
 
-        dist       = tr.fraction * S_AL_SOUND_MAXDIST;
-        totalDist += dist;
-        if (tr.fraction >= 1.f)
-            openCount++;
+                end[0] = s_al_listener_origin[0] + s_al_envDirs[i][0] * s_al_envDists[i];
+                end[1] = s_al_listener_origin[1] + s_al_envDirs[i][1] * s_al_envDists[i];
+                end[2] = s_al_listener_origin[2] + s_al_envDirs[i][2] * s_al_envDists[i];
 
-        /* Collect horizontal range for corridor detection (rays 0-7) */
-        if (i < 8) {
-            if (dist < minHorizDist) minHorizDist = dist;
-            if (dist > maxHorizDist) maxHorizDist = dist;
+                CM_BoxTrace(&tr, s_al_listener_origin, end,
+                            vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse);
+
+                if (i < 8) {
+                    horizDists[i]   = tr.fraction * s_al_envDists[i];
+                    horizTotalFrac += tr.fraction;
+                } else {
+                    /* Vertical / diagonal-up rays: shorter calibrated distances
+                     * (S_AL_ENV_VERT_DIST / DOWN_DIST) make tr.fraction sensitive
+                     * to realistic URT ceiling heights rather than comparing
+                     * against the full 1330-unit horizontal range. */
+                    vertTotalFrac += tr.fraction;
+                }
+            }
+
+            /* ---- Horizontal metrics ----------------------------------------
+             *
+             * openFrac: plain average of all 8 ray fractions.  Gives a smooth
+             * gradient between enclosed (0) and fully open (1).
+             *
+             * sizeFactor: average of the LONGEST 4 (upper-half) horizontal
+             * distances.  This ignores nearby obstacles such as pillars —
+             * even if the player is surrounded by pillars wider than the
+             * player model, the diagonal rays that slip through the gaps
+             * still reach the actual acoustic boundary (cavern walls, open
+             * street) and correctly represent the size of the space.
+             * Using the global mean would let 4 close-hitting pillar rays
+             * drag the apparent room size down to "small room" level.
+             *
+             * corrFactor: axis-pair analysis on the 4 opposite-ray pairs
+             * (rays 0↔4, 1↔5, 2↔6, 3↔7).  A TRUE corridor has exactly ONE
+             * pair of opposite walls both close while all other pairs are
+             * open.  Pillars create MULTIPLE close axis-pairs — explicitly
+             * excluded so they do not trigger false corridor reverb.
+             * -------------------------------------------------------------- */
+            {
+                float sorted[8];
+                int   a, b;
+
+                horizOpenFrac = horizTotalFrac / 8.f;
+
+                /* Copy into sort buffer, insertion-sort ascending */
+                for (a = 0; a < 8; a++) sorted[a] = horizDists[a];
+                for (a = 1; a < 8; a++) {
+                    float key = sorted[a];
+                    for (b = a - 1; b >= 0 && sorted[b] > key; b--)
+                        sorted[b + 1] = sorted[b];
+                    sorted[b + 1] = key;
+                }
+                /* Top-4 (sorted[4..7]) = 4 longest rays */
+                {
+                    float top4Avg = (sorted[4] + sorted[5] + sorted[6] + sorted[7]) * 0.25f;
+                    sizeFactor = (top4Avg - S_AL_SOUND_FULLVOLUME) /
+                                 (600.f   - S_AL_SOUND_FULLVOLUME);
+                    if (sizeFactor < 0.f) sizeFactor = 0.f;
+                    if (sizeFactor > 1.f) sizeFactor = 1.f;
+                }
+
+                /* Axis-pair corridor detection */
+                {
+                    float axisDist[4];
+                    int   closeAxes = 0;
+                    float minClose  = S_AL_SOUND_MAXDIST;
+                    float maxOpen   = 0.f;
+
+                    /* Rays i and i+4 are exact geometric opposites */
+                    for (a = 0; a < 4; a++) {
+                        float d0 = horizDists[a];
+                        float d1 = horizDists[a + 4];
+                        axisDist[a] = (d0 < d1) ? d0 : d1;
+                        if (axisDist[a] < 200.f) {
+                            closeAxes++;
+                            if (axisDist[a] < minClose) minClose = axisDist[a];
+                        } else {
+                            if (axisDist[a] > maxOpen) maxOpen = axisDist[a];
+                        }
+                    }
+                    /* Corridor = exactly one close axis pair with open perpendicular */
+                    if (closeAxes == 1 && maxOpen > minClose * 1.5f) {
+                        corrFactor = (maxOpen - minClose) / maxOpen;
+                        if (corrFactor > 1.f) corrFactor = 1.f;
+                    } else {
+                        corrFactor = 0.f;
+                    }
+                }
+            }
+
+            vertOpenFrac = vertTotalFrac / 6.f;  /* 14 − 8 = 6 vertical rays */
+
+            /* Combined openness: 70 % horizontal, 30 % vertical.
+             * Overhead obstructions (overhangs, low bridges) affect only
+             * the vertical component so they cannot alone flip an outdoor
+             * classification to ENCLOSED. */
+            openFrac = horizOpenFrac * 0.70f + vertOpenFrac * 0.30f;
+
+            cachedSize      = sizeFactor;
+            cachedOpen      = openFrac;
+            cachedCorr      = corrFactor;
+            cachedHorizOpen = horizOpenFrac;
+            cachedVertOpen  = vertOpenFrac;
+            haveCache       = qtrue;
         }
     }
 
-    avgDist  = totalDist / (float)S_AL_ENV_RAYS;
-    openFrac = (float)openCount / (float)S_AL_ENV_RAYS;
+    /* --- Rolling history: average last S_AL_ENV_HISTORY measurements -----
+     * Smooths transient confusing reads caused by doorways, arches, windows,
+     * or other threshold geometry where a single probe set straddles two
+     * environment types.  Also damps classifier confusion that persists even
+     * when standing still in spaces with unusual geometry (e.g. a room with
+     * a large window or a doorway to the side of the probe grid). */
+    histSize[histIdx] = sizeFactor;
+    histOpen[histIdx] = openFrac;
+    histCorr[histIdx] = corrFactor;
+    histIdx = (histIdx + 1) % S_AL_ENV_HISTORY;
+    if (histCount < S_AL_ENV_HISTORY) histCount++;
 
-    /* sizeFactor: 0 = tight room (≤80 units), 1 = large/open (≥600 units) */
-    sizeFactor = (avgDist - S_AL_SOUND_FULLVOLUME) /
-                 (600.f  - S_AL_SOUND_FULLVOLUME);
-    if (sizeFactor < 0.f) sizeFactor = 0.f;
-    if (sizeFactor > 1.f) sizeFactor = 1.f;
-
-    /* corrFactor: high when one horizontal dimension is much tighter than
-     * another — characteristic of corridors.  Only fires when a close wall
-     * (< 200 units) exists alongside a long dimension (> 200 units). */
-    if (minHorizDist < 200.f && maxHorizDist > minHorizDist) {
-        corrFactor = (maxHorizDist - minHorizDist) / maxHorizDist;
-        if (corrFactor > 1.f) corrFactor = 1.f;
-    } else {
-        corrFactor = 0.f;
+    if (histCount > 1) {
+        float sumSize = 0.f, sumOpen = 0.f, sumCorr = 0.f;
+        for (i = 0; i < histCount; i++) {
+            sumSize += histSize[i];
+            sumOpen += histOpen[i];
+            sumCorr += histCorr[i];
+        }
+        sizeFactor = sumSize / (float)histCount;
+        openFrac   = sumOpen / (float)histCount;
+        corrFactor = sumCorr / (float)histCount;
     }
 
     /* --- Derive target EFX parameters ------------------------------------ */
     baseGain = (s_alReverbGain && s_alReverbGain->value > 0.f)
                ? s_alReverbGain->value : 0.20f;
 
-    /* Decay: short room (0.4 s) up to large cave (4.0 s), killed outdoors */
-    targetDecay = 0.4f + sizeFactor * 3.6f;
-    targetDecay *= (1.f - openFrac * 0.9f);
+    /* Decay: short room (0.4 s) up to medium-large space (2.5 s), killed
+     * outdoors.  Max reduced from 4.0 s to 2.5 s — the longer decay was the
+     * main contributor to the "muffled / smeared" complaints, especially in
+     * the reverb send shared by all simultaneous layers of a compound sound. */
+    targetDecay = 0.4f + sizeFactor * 2.1f;
+    targetDecay *= (1.f - openFrac * 0.85f);
     if (targetDecay < 0.1f) targetDecay = 0.1f;
 
-    /* Late reverb tail: near-silent in small/outdoor, louder in large enclosed */
-    targetLate = 0.10f + sizeFactor * 0.80f;
-    targetLate *= (1.f - openFrac * 0.90f);
+    /* Late reverb tail: scaled way back so it colours the space rather than
+     * drowning the direct signal.  Max 0.35 (was 0.90).  Lower ceiling is
+     * especially important when multiple WAV layers share the same reverb
+     * slot — the tail compounds across all simultaneous sources. */
+    targetLate = 0.05f + sizeFactor * 0.30f;
+    targetLate *= (1.f - openFrac * 0.85f);
     if (targetLate < 0.f) targetLate = 0.f;
     if (targetLate > 1.f) targetLate = 1.f;
 
-    /* Early reflections: stronger in corridors and enclosed spaces */
-    targetRefl = 0.05f + corrFactor * 0.55f;
-    targetRefl *= (1.f - openFrac * 0.80f);
+    /* Early reflections: corridor-boosted but overall reduced.
+     * Max 0.28 (was 0.60) to avoid masking the direct signal.
+     * Corridor threshold tightened (< 150 u, ratio ≥ 1.5×) so doorways
+     * and arches no longer trigger full corridor reflection levels. */
+    targetRefl = 0.03f + corrFactor * 0.25f;
+    targetRefl *= (1.f - openFrac * 0.75f);
     if (targetRefl < 0.f) targetRefl = 0.f;
     if (targetRefl > 1.f) targetRefl = 1.f;
 
-    /* Slot gain: scales with enclosure; outdoor → near-dry */
-    targetSlot = baseGain * (1.f - openFrac * 0.90f);
+    /* Slot gain: scales with enclosure; outdoor → near-dry.
+     * Kill factor reduced from 0.90 to 0.80 — less aggressive zero-out in
+     * semi-open areas so the transition feels gradual, not switched. */
+    targetSlot = baseGain * (1.f - openFrac * 0.80f);
     if (targetSlot < 0.f) targetSlot = 0.f;
     if (targetSlot > 1.f) targetSlot = 1.f;
 
@@ -1764,11 +2046,16 @@ static void S_AL_UpdateDynamicReverb( void )
         curRefl  = targetRefl;
         curSlot  = targetSlot;
     } else {
-        /* Pole 0.85 → ~2 s half-transition at 16-frame update rate / 30 fps */
-        curDecay = curDecay * 0.85f + targetDecay * 0.15f;
-        curLate  = curLate  * 0.85f + targetLate  * 0.15f;
-        curRefl  = curRefl  * 0.85f + targetRefl  * 0.15f;
-        curSlot  = curSlot  * 0.85f + targetSlot  * 0.15f;
+        /* Pole 0.92 — substantially slower than the previous 0.85, giving
+         * roughly twice the half-transition time (~3.5 s at 60 fps).
+         * Combined with the rolling history buffer this eliminates the
+         * instant-apply / un-apply / re-apply flicker on doorway thresholds
+         * (observed on maps such as ut4_sanc) and keeps multi-layer weapon
+         * events from sounding different depending on reverb timing. */
+        curDecay = curDecay * 0.92f + targetDecay * 0.08f;
+        curLate  = curLate  * 0.92f + targetLate  * 0.08f;
+        curRefl  = curRefl  * 0.92f + targetRefl  * 0.08f;
+        curSlot  = curSlot  * 0.92f + targetSlot  * 0.08f;
     }
 
     /* --- Push to EFX effect and re-upload to slot ------------------------- */
@@ -1785,6 +2072,38 @@ static void S_AL_UpdateDynamicReverb( void )
     qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
                             (ALint)s_al_efx.reverbEffect);
     qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot, AL_EFFECTSLOT_GAIN, curSlot);
+
+    /* --- Debug output ---------------------------------------------------- */
+    if (s_alDebugReverb && s_alDebugReverb->integer >= 1) {
+        /* Classify the averaged environment into a human-readable label. */
+        const char *envLabel;
+        if      (openFrac   > 0.55f)  envLabel = "OUTDOOR";
+        else if (openFrac   > 0.30f)  envLabel = "TRANSITION";
+        else if (corrFactor > 0.40f)  envLabel = "CORRIDOR";
+        else if (sizeFactor > 0.65f)  envLabel = "LARGE_ROOM";
+        else if (sizeFactor > 0.30f)  envLabel = "MEDIUM_ROOM";
+        else                          envLabel = "SMALL_ROOM";
+
+        Com_Printf(S_COLOR_CYAN "[dynreverb] env=%-11s"
+                   "  size=%.2f  open=%.2f  corr=%.2f"
+                   "  |  tgt: dec=%.2f lat=%.2f ref=%.2f slot=%.2f"
+                   "  |  cur: dec=%.2f lat=%.2f ref=%.2f slot=%.2f\n",
+                   envLabel,
+                   sizeFactor, openFrac, corrFactor,
+                   targetDecay, targetLate, targetRefl, targetSlot,
+                   curDecay,   curLate,   curRefl,   curSlot);
+
+        if (s_alDebugReverb->integer >= 2) {
+            /* Extra line: show raw (pre-history) metrics and cache state.
+             * horizOpen / vertOpen split reveals overhang / low-ceiling effects:
+             * a large horizOpen with low vertOpen means overhead obstruction. */
+            Com_Printf(S_COLOR_CYAN "             raw: size=%.2f  horizOpen=%.2f  vertOpen=%.2f  corr=%.2f"
+                       "  |  hist=%d/%d  cache=%s\n",
+                       cachedSize, horizOpenFrac, vertOpenFrac, cachedCorr,
+                       histCount, S_AL_ENV_HISTORY,
+                       haveCache ? "hit" : "miss");
+        }
+    }
 }
 
 static void S_AL_Update( int msec )
@@ -1829,17 +2148,20 @@ static void S_AL_Update( int msec )
         /* Dynamic acoustic environment: updates EFX params + slot gain */
         S_AL_UpdateDynamicReverb();
 
-        /* Live-update per-category volume when s_alVolSelf/Other/Env change.
+        /* Live-update per-category volume when s_alVolSelf/Other/Env/UI change.
          * master_vol is stored pre-category so we can always recompute cleanly. */
         {
             static float lastVolSelf  = -1.f;
             static float lastVolOther = -1.f;
             static float lastVolEnv   = -1.f;
+            static float lastVolUI    = -1.f;
             float vSelf  = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
             float vOther = S_AL_GetCategoryVol(SRC_CAT_WORLD);
             float vEnv   = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
+            float vUI    = S_AL_GetCategoryVol(SRC_CAT_UI);
 
-            if (vSelf != lastVolSelf || vOther != lastVolOther || vEnv != lastVolEnv) {
+            if (vSelf != lastVolSelf || vOther != lastVolOther ||
+                vEnv  != lastVolEnv  || vUI    != lastVolUI) {
                 int j;
                 for (j = 0; j < s_al_numSrc; j++) {
                     float catGain;
@@ -1855,6 +2177,7 @@ static void S_AL_Update( int msec )
                 lastVolSelf  = vSelf;
                 lastVolOther = vOther;
                 lastVolEnv   = vEnv;
+                lastVolUI    = vUI;
             }
         }
 
@@ -2131,19 +2454,23 @@ static void S_AL_SoundInfo( void )
     Com_Printf("    s_alDynamicReverb %d  (ray-traced env %s)\n",
         s_alDynamicReverb ? s_alDynamicReverb->integer : 0,
         (s_alDynamicReverb && s_alDynamicReverb->integer) ? "on" : "off");
+    Com_Printf("    s_alDebugReverb   %d  (debug output: 0=off 1=params 2=verbose)\n",
+        s_alDebugReverb ? s_alDebugReverb->integer : 0);
     Com_Printf("    s_alOcclusion     %d  (occlusion+direction %s)\n",
         s_alOcclusion   ? s_alOcclusion->integer : 1,
         (s_alOcclusion && s_alOcclusion->integer) ? "on" : "off");
     Com_Printf("    s_alMaxDist       %.0f  (attenuation distance)\n",
         s_alMaxDist     ? s_alMaxDist->value     : 1330.f);
 
-    Com_Printf("  Volume groups (1.0 = default; capped values prevent amplification):\n");
-    Com_Printf("    s_alVolSelf   %.2f  (own player/weapon,  max 1.5)\n",
+    Com_Printf("  Volume groups (defaults balance well across most maps):\n");
+    Com_Printf("    s_alVolSelf   %.2f  (own player/weapon/breath, max 1.5)\n",
         s_alVolSelf  ? s_alVolSelf->value  : 1.0f);
-    Com_Printf("    s_alVolOther  %.2f  (other players/ents, max 1.0)\n",
-        s_alVolOther ? s_alVolOther->value : 1.0f);
-    Com_Printf("    s_alVolEnv    %.2f  (ambient/looping,    max 1.0)\n",
-        s_alVolEnv   ? s_alVolEnv->value   : 1.0f);
+    Com_Printf("    s_alVolOther  %.2f  (other players/ents,       max 1.0)\n",
+        s_alVolOther ? s_alVolOther->value : 0.7f);
+    Com_Printf("    s_alVolEnv    %.2f  (ambient/looping,          max 1.0)\n",
+        s_alVolEnv   ? s_alVolEnv->value   : 0.3f);
+    Com_Printf("    s_alVolUI     %.2f  (hit/kill/UI sounds,       max 1.0)\n",
+        s_alVolUI    ? s_alVolUI->value    : 0.8f);
     Com_Printf("    s_musicVolume %.2f  (map background music)\n",
         s_musicVolume ? s_musicVolume->value : 0.25f);
 
@@ -2220,6 +2547,9 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alDynamicReverb = Cvar_Get("s_alDynamicReverb", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alDynamicReverb, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alDynamicReverb, "Ray-traced acoustic environment detection. Casts 14 probes from the listener every 16 frames to measure room size, corridor shape, and openness, then adjusts EFX reverb decay/reflections accordingly. Default 0.");
+    s_alDebugReverb = Cvar_Get("s_alDebugReverb", "0", CVAR_TEMP);
+    Cvar_CheckRange(s_alDebugReverb, "0", "2", CV_INTEGER);
+    Cvar_SetDescription(s_alDebugReverb, "Dynamic reverb debug output. 1 = print env label + smoothed EFX params every probe cycle. 2 = also print raw probe metrics and filter-reset events. Default 0 (off). Not archived.");
     s_alOcclusion = Cvar_Get("s_alOcclusion", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOcclusion, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alOcclusion, "Per-source occlusion tracing. Sounds behind walls are gain-attenuated and their apparent HRTF direction is corrected to the nearest audible gap. Close sources (<300 u) update every frame; distant sources update less often. Default 1.");
@@ -2230,13 +2560,16 @@ qboolean S_AL_Init( soundInterface_t *si )
      * local player's own sounds. */
     s_alVolSelf = Cvar_Get("s_alVolSelf", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolSelf, "0", "1.5", CV_FLOAT);
-    Cvar_SetDescription(s_alVolSelf, "Own player / weapon volume multiplier [0.0-1.5]. Default 1.0. Modest boost allowed since this only affects your own sounds.");
-    s_alVolOther = Cvar_Get("s_alVolOther", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alVolSelf, "Own player / weapon / breath volume multiplier [0.0-1.5]. Default 1.0. Modest boost allowed since this only affects your own sounds.");
+    s_alVolOther = Cvar_Get("s_alVolOther", "0.7", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolOther, "0", "1.0", CV_FLOAT);
-    Cvar_SetDescription(s_alVolOther, "Other player / entity one-shot volume multiplier [0.0-1.0]. Capped at 1.0 — can turn down but not amplify (anti-cheat).");
-    s_alVolEnv = Cvar_Get("s_alVolEnv", "0.5", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alVolOther, "Other player / entity one-shot volume multiplier [0.0-1.0]. Default 0.7. Capped at 1.0 — can turn down but not amplify (anti-cheat). Reduce further on maps with very loud triggered sounds.");
+    s_alVolEnv = Cvar_Get("s_alVolEnv", "0.3", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolEnv, "0", "1.0", CV_FLOAT);
-    Cvar_SetDescription(s_alVolEnv, "Looping ambient / environmental sound volume multiplier [0.0-1.0]. Default 0.5. Per-sample RMS normalisation is applied automatically so different map environments have consistent loudness. Capped at 1.0.");
+    Cvar_SetDescription(s_alVolEnv, "Looping ambient / environmental sound volume multiplier [0.0-1.0]. Default 0.3. Per-sample RMS normalisation is applied automatically. Reduce further on maps with particularly loud ambient loops (e.g. ut4_turnpike).");
+    s_alVolUI = Cvar_Get("s_alVolUI", "0.8", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alVolUI, "0", "1.0", CV_FLOAT);
+    Cvar_SetDescription(s_alVolUI, "Hit-marker / kill-confirmation / UI sound volume multiplier [0.0-1.0]. Default 0.8. Controls non-positional local sounds (StartLocalSound) independently of own-weapon volume (s_alVolSelf).");
     s_alLocalSelf = Cvar_Get("s_alLocalSelf", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alLocalSelf, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alLocalSelf, "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized regardless of any world-space origin supplied by the game. Prevents stale-position artefacts caused by URT jumping/sliding physics. Default 1.");

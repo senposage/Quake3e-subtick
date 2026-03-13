@@ -171,17 +171,23 @@ All EFX entry points are loaded via `alcGetProcAddress(device, ...)` at runtime 
 - Density 0.5, Diffusion 0.85, Gain 0.32, Decay 1.49s, HF ratio 0.83
 - Reflections delay 7ms, Late reverb delay 11ms, Air absorption 0.994
 
-**Per-source occlusion filters**: One `AL_FILTER_LOWPASS` is allocated per source slot at init. The filter is updated by the occlusion trace and attached via `AL_DIRECT_FILTER`.
+**Per-source occlusion filters**: One `AL_FILTER_LOWPASS` is allocated per source slot at init. The filter is updated by the occlusion trace and attached via `AL_DIRECT_FILTER`.  When a source slot is reused, the filter is **explicitly reset to pass-through** before being attached so that stale attenuation from a previous (possibly occluded) sound never bleeds into the new sound — this was the cause of the sporadic "suppressor" effect on multi-layer weapon events.
 
 **Underwater mode**: When `S_AL_Respatialize` reports `inwater != 0`, all active 3D sources are switched from the reverb slot to the underwater slot in the next `S_AL_Update` tick.
 
-**EFX source wiring** (set in `S_AL_SrcSetup` for non-local sources):
+**EFX source wiring** (set in `S_AL_SrcSetup`):
 ```c
+/* Non-local (3-D) sources: */
+alFilterf(occlusionFilter[idx], AL_LOWPASS_GAIN,   1.0f);  /* reset to pass-through */
+alFilterf(occlusionFilter[idx], AL_LOWPASS_GAINHF, 1.0f);
 alSource3i(src, AL_AUXILIARY_SEND_FILTER, reverbSlot, 0, AL_FILTER_NULL);
 alSourcei(src,  AL_DIRECT_FILTER, occlusionFilter[idx]);
 alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAIN_AUTO,   AL_TRUE);
 alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO, AL_TRUE);
 alSourcei(src,  AL_DIRECT_FILTER_GAINHF_AUTO,         AL_FALSE);
+
+/* Local (own-player / weapon) sources: */
+alSourcei(src, AL_DIRECT_FILTER, AL_FILTER_NULL);  /* clear any inherited filter */
 ```
 
 ### Ambisonic Panning
@@ -224,10 +230,12 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | `s_alReverbGain` | `0.20` | EFX wet slot gain [0–1]. Ceiling when `s_alDynamicReverb 1` |
 | `s_alReverbDecay` | `1.49` | Reverb decay in seconds; used when `s_alDynamicReverb 0` (LATCH) |
 | `s_alDynamicReverb` | `0` | Ray-traced acoustic environment. **Default 0 = opt-in** |
+| `s_alDebugReverb` | `0` | Debug output for dynamic reverb. `1` = env label + smoothed params every probe cycle. `2` = also raw probe data and filter-reset events. Not archived. |
 | `s_alOcclusion` | `1` | Wall-occlusion tracing with HRTF direction correction |
-| `s_alVolSelf` | `1.0` | Own player/weapon volume multiplier **[0–1.5]** |
-| `s_alVolOther` | `1.0` | Other player/entity volume multiplier **[0–1.0]** — capped, anti-cheat |
-| `s_alVolEnv` | `1.0` | Looping ambient/environmental volume multiplier **[0–1.0]** — capped |
+| `s_alVolSelf` | `1.0` | Own player/weapon/breath volume multiplier **[0–1.5]** |
+| `s_alVolOther` | `0.7` | Other player/entity volume multiplier **[0–1.0]** — capped, anti-cheat |
+| `s_alVolEnv` | `0.3` | Looping ambient/environmental volume multiplier **[0–1.0]** — capped |
+| `s_alVolUI` | `0.8` | Hit-marker/kill-confirmation/UI sound multiplier **[0–1.0]** — `StartLocalSound` (entnum=0) only, independent of weapon volume |
 
 #### Selecting an output device (`/s_devices`)
 
@@ -278,22 +286,61 @@ s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 
 #### Dynamic acoustic environment (`s_alDynamicReverb 1`)
 
-Casts **14 world-space rays** from the listener every **16 frames** (≈ 0.9 traces/frame average):
-- 8 horizontal (every 45°)
-- 4 diagonal-up (45° elevation, N/E/S/W)
-- 1 straight up, 1 straight down
+Casts **14 world-space rays** from the listener every **16 frames** (≈ 0.9 traces/frame average, zero when the movement cache is active):
+- 8 horizontal (every 45°) — max **1330 u** (full attenuation range)
+- 4 diagonal-up (45° elevation, N/E/S/W) — max **400 u** (ceiling sensitivity up to ~283 u height)
+- 1 straight up — max **400 u** (ceiling up to 400 u)
+- 1 straight down — max **160 u** (floor / pit context)
 
-Metrics derived: `avgDist` (room size), `openFrac` (outdoor indicator), `corrFactor` (corridor asymmetry).
+Per-ray distances are calibrated to the geometry scale each group is measuring. Using a single global max (1330 u) for all rays made a 200-unit indoor ceiling appear nearly open (fr ≈ 0.15) and made overhangs invisible to the vertical metric. Shorter vertical distances give the classifier appropriate sensitivity to real URT ceiling heights.
+
+**openFrac** is a *weighted average of horizontal and vertical ray escape fractions*: **70 % horizontal (rays 0–7) + 30 % vertical (rays 8–13)**. Horizontal rays are the primary acoustic indicator — walls around you drive reverb far more than a ceiling above you. Giving vertical rays only 30 % weight prevents overhead obstructions — a leaning pillar, a low bridge, a covered colonnade, an archway ceiling — from falsely reclassifying an open outdoor area as enclosed and triggering heavy reverb as the player walks beneath them.
+
+**sizeFactor** likewise uses horizontal-only average distance so a low ceiling or overhang cannot shrink the perceived acoustic room size.
+
+Both metrics still use continuous ray fractions (not binary hit/miss) — a ray travelling 1 000 / 1 330 units contributes 0.75 rather than 0, giving a smooth spatial gradient instead of a hard classification jump at doorway and arch thresholds.
+
+A **rolling history buffer** (3 slots) averages the last three probe sets. A single confused reading — caused by doorway geometry, windows, or thin walls — only shifts the average by ⅓, preventing transient wrong classifications from audibly changing reverb. This also suppresses the "instant-apply / un-apply / re-apply" flicker observed at doorway thresholds on maps like ut4_sanc.
+
+A **movement cache** reuses metrics when the listener has moved < 32 units since the last probe, saving CM traces for stationary players.
+
+Metrics derived: `avgDist` (room size), `openFrac` (openness, continuous), `corrFactor` (corridor asymmetry).
 
 | Environment | `avgDist` | `openFrac` | Target `decayTime` | Target late-gain |
 |---|---|---|---|---|
-| Tight room | < 80 u | low | ~0.4 s | low |
-| Normal indoor | ~200 u | low | ~1.5 s | moderate |
-| Large hall/cave | > 400 u | low | ~3–4 s | high |
-| Corridor | asymmetric | low | medium | low; high reflections |
-| Open outdoor | any | > 0.5 | < 0.5 s | near-zero |
+| Tight room | < 80 u | low | ~0.4 s | very low |
+| Normal indoor | ~200 u | low | ~1.2 s | low |
+| Large hall/cave | > 400 u | low | ~2.0–2.5 s | moderate |
+| Corridor | asymmetric (< 150 u short side, ≥ 1.5× ratio) | low | medium | low; moderate reflections |
+| Semi-open / urban | any | ~0.4–0.6 | ~0.6–1.0 s | low |
+| Open outdoor | any | > 0.7 | < 0.4 s | near-zero |
 
-Parameters blend smoothly (pole 0.85, ~2 s half-transition) so room changes sound natural.
+Parameters blend smoothly (pole 0.92, ~3.5 s half-transition at 60 fps) so room changes sound natural. EFX targets are intentionally conservative (late-gain max 0.35, decay max 2.5 s) so reverb colours the space without drowning layered weapon sounds.
+
+#### Comparison with dmaHD
+
+`snd_dmahd.c` uses no environmental detection or reverb at all — it applies only per-frame binaural HRTF panning (distance + ear-delay model). Transitions between areas are "smooth" in dmaHD purely because the PCM mixer runs every frame and continuously recomputes left/right volumes from the listener position with no state machine involved. The lesson applied here: keep the EFX state machine lightweight, bias heavily toward stability over accuracy, and ensure the IIR smoother (pole 0.92) always prevents any single confused probe from producing an audible jump.
+
+#### Debug workflow (`s_alDebugReverb`)
+
+```
+s_alReverb 1 ; s_alDynamicReverb 1 ; s_alDebugReverb 1
+```
+Prints one line per probe cycle (every 16 frames):
+```
+[dynreverb] env=MEDIUM_ROOM  size=0.42  open=0.18  corr=0.12  |  tgt: dec=1.24 lat=0.11 ref=0.04 slot=0.16  |  cur: dec=1.18 lat=0.10 ref=0.04 slot=0.16
+```
+
+```
+s_alDebugReverb 2
+```
+Also prints raw pre-history probe values (with the horizontal/vertical openness split) and filter-reset events:
+```
+             raw: size=0.44  horizOpen=0.21  vertOpen=0.08  corr=0.15  |  hist=3/3  cache=miss
+[alfilter] src#7 3D: reset stale filter (prev occ=0.23  GAIN≈0.42  GAINHF≈0.05)
+[alfilter] src#2 local: cleared stale filter
+```
+The `horizOpen` / `vertOpen` split is especially useful for diagnosing the **overhang edge case**: a large `horizOpen` with a small `vertOpen` means an overhead obstruction (pillar, bridge, archway) is blocking vertical rays — the 70/30 weighting ensures this does not inflate reverb. Use these lines to diagnose doorway flicker (rapid `env=` label changes), over-aggressive corridor detection (`corr` spikes), and stale-filter weapon muting (filter lines appear when a weapon fires).
 
 ### snd_openal.h — Public API
 
