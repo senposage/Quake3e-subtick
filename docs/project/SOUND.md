@@ -1188,22 +1188,43 @@ frame above the silence threshold (≈ −54 dB for 16-bit).  This value,
 **`S_AL_StartSound`** applies the following logic when a new sound arrives on
 an occupied named channel:
 
-1. **Same sfx, recent re-submission** (`allocTime` age ≤ `WEAPON_FIRE_LOOP_-
-   TIMEOUT_MS`) → engage `AL_LOOPING = AL_TRUE` for a seamless fire loop;
-   refresh `lastFireMs`; return without allocating a new source.
+1. **Same sfx, fire-loop window** — age measured against `lastFireMs` when
+   `weaponLoop` is already active (else `allocTime`); if age ≤
+   `WEAPON_FIRE_LOOP_TIMEOUT_MS` (250 ms):
+   - Engage `AL_LOOPING = AL_TRUE` (first time only).
+   - **Seek `AL_SAMPLE_OFFSET` to 0** so the attack transient is heard at
+     the weapon's actual fire cadence.  Without the seek the source would
+     continue mid-buffer; if the sample is longer than the inter-shot
+     interval the crack is only heard at each full sample-length boundary
+     instead of at each animation frame.
+   - Refresh `lastFireMs`; return without allocating a new source.
 
-2. **Different sfx — preemption guard:**
+   `lastFireMs` (not `allocTime`) is used for the age check once the loop
+   is active because `allocTime` is set once at source creation and grows
+   stale during sustained automatic fire — after `WEAPON_FIRE_LOOP_-
+   TIMEOUT_MS` from the first shot, every subsequent fire event would fall
+   through and be silently blocked.  `lastFireMs` resets on every shot and
+   keeps the loop alive indefinitely while the trigger is held.
+
+2. **Same sfx beyond the loop window** (new burst after a pause): fall
+   through to the stop + re-alloc path immediately, bypassing the
+   preemption guard.  A looping source has `AL_SAMPLE_OFFSET ≈ 0` right
+   after its buffer boundary restarts; without this bypass the guard would
+   see a near-zero offset and falsely treat the source as "fresh",
+   blocking the incoming shot.
+
+3. **Different sfx — preemption guard:**
    - Query `AL_SOURCE_STATE`; skip guard entirely if `AL_STOPPED` (offset
      resets to 0 on a stopped source and would falsely re-engage the guard).
    - Read `AL_SAMPLE_OFFSET`; if `offset < contentSamples`, drop the request.
    - **`CHAN_WEAPON` cap**: `contentSamples` is clamped to
      `WEAPON_GUARD_CAP_MS` (150 ms) before the comparison so that long fire
-     sounds (`de_out.wav`, ~2.5 s) cannot silence rapid-fire events for their
+     sounds (`de_out.wav`, ~2.5 s) cannot silence cycle sounds for their
      full content duration.  Non-weapon channels (ambient, impacts) use the
      full `contentSamples` so they play to their audible end.
    - Guard expires → stop old source → start new source with gain fade-in.
 
-3. **Gain fade-in** (`SRC_FADE_IN_MS` = 15 ms): newly-started local sources
+4. **Gain fade-in** (`SRC_FADE_IN_MS` = 15 ms): newly-started local sources
    begin at `AL_GAIN = 0` and ramp to full gain in `S_AL_Update`, masking the
    hard cut of the predecessor.
 
@@ -1217,15 +1238,16 @@ an occupied named channel:
 
 ### Behaviour by scenario
 
-| Scenario | Before | After |
-|----------|--------|-------|
-| DE-50 — fire once, wait | ✓ worked | ✓ works |
-| DE-50 — spam trigger | Silent after first shot (2.5 s guard) | Each shot plays; 150 ms cap lets cycle sounds through |
-| MAC-11 — hold trigger | Re-submission gap every 150 ms | `AL_LOOPING` seamless loop |
-| MAC-11 — burst then re-fire | Blocked by previous sound's tail | Loop times out, plays out, restarts cleanly |
-| Pistol rapid-fire | Blocked by `cock.wav` still playing | 150 ms cap; cycle sound preemptable after its own guard |
-| Ambient pass-by | Cut mid-file by retrigger | Full content guard; completes audible length |
-| Impacts / brass | Pool exhaustion | Existing world-entity cap + dedup window |
+| Scenario | Before (PR #93) | After |
+|----------|-----------------|-------|
+| DE-50 — fire once, wait | ✓ works | ✓ works |
+| DE-50 — spam trigger | Each shot plays; 150 ms cap | ✓ same — crack heard on every shot |
+| LR-300 — hold trigger (sample > cadence) | Silent after ~3 shots (allocTime expires) | Attack transient at every fire event; loop never breaks |
+| MAC-11 — hold trigger | Seamless loop but attack only at sample boundary | Attack restarted at every fire cadence via seek-to-0 |
+| MAC-11 — burst then re-fire | Blocked briefly by looping source offset ≈ 0 | Same-sfx bypass: immediate preemption, clean restart |
+| Pistol rapid-fire | Cycle sound could block next shot | Same-sfx loop: each re-submit restarts from 0 within window |
+| Ambient pass-by | Cut mid-file by retrigger | ✓ unchanged — full content guard; completes audible length |
+| Impacts / brass | Pool exhaustion | ✓ unchanged — world-entity cap + dedup window |
 
 ### Future work — DMA-style improvements
 

@@ -1612,41 +1612,77 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             /* Weapon-fire loop: same sfx re-submitted on the same named
              * channel while still playing.  This is the game driving a
              * continuous fire sound (automatic fire or rapid semi-auto).
-             * Switch the source to AL_LOOPING so the buffer repeats
-             * seamlessly with no gap at the loop boundary; just refresh
-             * the inactivity timestamp and return — no new source needed.
-             * S_AL_Update clears AL_LOOPING once events stop arriving
-             * (trigger released / burst ended), letting the current buffer
-             * iteration play out to its natural end. */
-            if (s_al_src[srcIdx].sfx == sfx &&
-                    (Com_Milliseconds() - s_al_src[srcIdx].allocTime)
-                    <= WEAPON_FIRE_LOOP_TIMEOUT_MS) {
-                if (!s_al_src[srcIdx].weaponLoop) {
-                    qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
-                    s_al_src[srcIdx].weaponLoop = qtrue;
+             *
+             * Three things happen on each fire event within the window:
+             *   1. AL_LOOPING is enabled (first time only) so that the
+             *      buffer repeats seamlessly when the trigger is held.
+             *   2. AL_SAMPLE_OFFSET is reset to 0 so the attack transient
+             *      is heard at the weapon's actual fire cadence even when
+             *      the sample is longer than the inter-shot interval.
+             *      Without the seek, the source would continue mid-buffer
+             *      and the crack would only be heard at each full sample-
+             *      length cycle rather than at each animation frame.
+             *   3. lastFireMs is refreshed so S_AL_Update keeps the loop
+             *      alive while the trigger is held.
+             *
+             * Age is measured against lastFireMs (not allocTime) once the
+             * loop is active.  Using allocTime breaks sustained automatic
+             * fire: the source is created once at shot 1, so after
+             * WEAPON_FIRE_LOOP_TIMEOUT_MS from that moment every subsequent
+             * fire event falls through and is either blocked by the guard
+             * or silently dropped.  lastFireMs reflects the most recent
+             * EV_FIRE_WEAPON and resets with every shot, keeping the loop
+             * alive for as long as the trigger is held.
+             *
+             * S_AL_Update clears AL_LOOPING once no event arrives within
+             * WEAPON_FIRE_LOOP_TIMEOUT_MS (trigger released / burst ended),
+             * letting the current buffer iteration play to its natural end.
+             */
+            {
+                int nowMs   = Com_Milliseconds();
+                int loopAge = (s_al_src[srcIdx].weaponLoop &&
+                               s_al_src[srcIdx].lastFireMs > 0)
+                              ? (nowMs - s_al_src[srcIdx].lastFireMs)
+                              : (nowMs - s_al_src[srcIdx].allocTime);
+                if (s_al_src[srcIdx].sfx == sfx &&
+                        loopAge <= WEAPON_FIRE_LOOP_TIMEOUT_MS) {
+                    if (!s_al_src[srcIdx].weaponLoop) {
+                        qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
+                        s_al_src[srcIdx].weaponLoop = qtrue;
+                    }
+                    /* Seek to frame 0: attack transient at every fire cadence. */
+                    qalSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, 0);
+                    s_al_src[srcIdx].lastFireMs = nowMs;
+                    return;
                 }
-                s_al_src[srcIdx].lastFireMs = Com_Milliseconds();
-                return;
             }
 
             /* Preemption guard — protects the initial attack transient of
              * the current sound from being immediately cut by a new one.
              *
+             * The guard is only applied when the incoming sfx DIFFERS from
+             * the current one (e.g. a cycle sound arriving while a fire
+             * sound is playing).  Same-sfx re-fires that fall outside the
+             * loop window above represent a new burst after a pause; they
+             * bypass the guard and preempt immediately.  Without this
+             * bypass, a looping source whose AL_SAMPLE_OFFSET just reset to
+             * 0 at the loop boundary would look like a "fresh" sound to the
+             * guard and block the incoming shot indefinitely.
+             *
              * For CHAN_WEAPON the guard is capped at WEAPON_GUARD_CAP_MS
              * (150 ms) so that a long fire sound (e.g. de_out.wav with
              * ~2.5 s of audible content) cannot silence rapid-fire events
              * for its full content duration.  The cap covers the crack /
-             * transient of every URT weapon while allowing the next shot
-             * and cycle sounds through at any fire cadence.
+             * transient of every URT weapon while allowing cycle sounds
+             * through at any realistic fire cadence.
              *
-             * For all other channels the full contentSamples is used so
-             * that ambient loops, impact sounds, etc. play to their audible
-             * end before being replaced.
+             * Non-weapon channels (ambient, impacts) use the full
+             * contentSamples so they play to their audible end.
              *
              * AL_SOURCE_STATE is checked first: an AL_STOPPED source has
              * its AL_SAMPLE_OFFSET reset to 0 which would falsely hold the
              * guard open — skip the guard entirely when the source is done. */
-            {
+            if (s_al_src[srcIdx].sfx != sfx) {
                 int curSfx = s_al_src[srcIdx].sfx;
                 if (curSfx >= 0 && curSfx < s_al_numSfx) {
                     int content = s_al_sfx[curSfx].contentSamples;
