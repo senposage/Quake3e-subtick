@@ -236,6 +236,7 @@ typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
     char                name[MAX_QPATH];
     int                 soundLength;            /* in samples */
+    int                 fileRate;               /* original sample rate from the file (Hz) */
     qboolean            defaultSound;           /* buzz on load failure */
     qboolean            inMemory;
     int                 lastTimeUsed;           /* Com_Milliseconds() */
@@ -326,6 +327,7 @@ static alRaw_t s_al_raw;
 /* Global OpenAL context */
 static ALCdevice  *s_al_device  = NULL;
 static ALCcontext *s_al_context = NULL;
+static ALCint      s_al_deviceFreq = 0;    /* device mixing frequency (Hz), queried at init */
 
 static qboolean s_al_started  = qfalse;
 static qboolean s_al_muted    = qfalse;
@@ -389,6 +391,7 @@ static cvar_t *s_alOccGainFloor;   /* floor of AL_LOWPASS_GAIN for fully-blocked
 static cvar_t *s_alOccHFFloor;     /* floor of AL_LOWPASS_GAINHF (HF content) through walls */
 static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest gap [0-1] */
 static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each frame */
+static cvar_t *s_alDebugPlayback;  /* 0=off 1=rate-mismatch+preemption 2=+natural-stop */
 
 /* Set to qtrue by the s_alReset command; cleared on the next probe cycle. */
 static qboolean s_al_reverbReset = qfalse;
@@ -769,12 +772,25 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     }
 
     r->soundLength  = info.samples;
+    r->fileRate     = info.rate;
     r->inMemory     = qtrue;
     r->lastTimeUsed = Com_Milliseconds();
 
     idx = (int)(r - s_al_sfx);
     Com_DPrintf("S_AL: loaded %s (%d Hz, %d ch, %d smp)\n",
         sample, info.rate, info.channels, info.samples);
+
+    /* Playback debug: warn when the file's sample rate doesn't match the
+     * device's mixing rate — this is the condition that forces the internal
+     * resampler to run and is the root cause of the Gaussian-filter quality
+     * loss described in kcat/openal-soft#985. */
+    if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1 &&
+            s_al_deviceFreq > 0 && info.rate != (int)s_al_deviceFreq) {
+        Com_Printf(S_COLOR_YELLOW
+            "[alDbg] rate mismatch: %s  file=%d Hz  device=%d Hz"
+            "  — resampler will run\n",
+            sample, info.rate, (int)s_al_deviceFreq);
+    }
 
     return (sfxHandle_t)idx;
 }
@@ -1133,15 +1149,44 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     }
 }
 
-/* Stop a source and mark it free. */
+/* Stop a source and mark it free.
+ *
+ * preempted: qtrue when a new sound on the same channel is cutting this one
+ *   short; qfalse when called from StopAllSounds / ClearSoundBuffer.
+ *   When s_alDebugPlayback >= 1, log how much of the buffer was consumed so
+ *   it is visible whether the DE boom is being truncated by a later sound. */
 static void S_AL_StopSource( int idx )
 {
-    if (s_al_src[idx].isPlaying) {
-        qalSourceStop(s_al_src[idx].source);
-        qalSourcei(s_al_src[idx].source, AL_BUFFER, 0);
-        s_al_src[idx].isPlaying  = qfalse;
-        s_al_src[idx].loopSound  = qfalse;
+    if (!s_al_src[idx].isPlaying)
+        return;
+
+    if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1) {
+        alSrc_t    *src = &s_al_src[idx];
+        ALint       offset = 0;
+        const char *name   = "(unknown)";
+        int         total  = 0;
+        int         fileHz = 0;
+
+        qalGetSourcei(src->source, AL_SAMPLE_OFFSET, &offset);
+
+        if (src->sfx >= 0 && src->sfx < s_al_numSfx) {
+            name   = s_al_sfx[src->sfx].name;
+            total  = s_al_sfx[src->sfx].soundLength;
+            fileHz = s_al_sfx[src->sfx].fileRate;
+        }
+
+        Com_Printf(S_COLOR_CYAN
+            "[alDbg] stop  %-40s  played %d / %d smp (%.0f%%)  "
+            "file=%d Hz  device=%d Hz\n",
+            name, offset, total,
+            (total > 0) ? (100.0f * offset / total) : 0.0f,
+            fileHz, (int)s_al_deviceFreq);
     }
+
+    qalSourceStop(s_al_src[idx].source);
+    qalSourcei(s_al_src[idx].source, AL_BUFFER, 0);
+    s_al_src[idx].isPlaying  = qfalse;
+    s_al_src[idx].loopSound  = qfalse;
 }
 
 /* =========================================================================
@@ -1474,8 +1519,33 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     /* Reuse/override same (entnum, entchannel) if not CHAN_AUTO */
     if (entchannel != CHAN_AUTO) {
         srcIdx = S_AL_FindSourceByChannel(entnum, entchannel);
-        if (srcIdx >= 0)
+        if (srcIdx >= 0) {
+            /* Level 1: label preemptions so they are visually distinct from
+             * natural completions in the playback log. */
+            if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1) {
+                alSrc_t    *old   = &s_al_src[srcIdx];
+                ALint       offset = 0;
+                const char *oldName = "(unknown)";
+                const char *newName = "(unknown)";
+                int         total   = 0;
+
+                qalGetSourcei(old->source, AL_SAMPLE_OFFSET, &offset);
+                if (old->sfx >= 0 && old->sfx < s_al_numSfx) {
+                    oldName = s_al_sfx[old->sfx].name;
+                    total   = s_al_sfx[old->sfx].soundLength;
+                }
+                if (sfx >= 0 && sfx < s_al_numSfx)
+                    newName = s_al_sfx[sfx].name;
+
+                Com_Printf(S_COLOR_RED
+                    "[alDbg] PREEMPT  %-40s  played %d / %d smp (%.0f%%)  "
+                    "chan=%d  by: %s\n",
+                    oldName, offset, total,
+                    (total > 0) ? (100.0f * offset / total) : 0.0f,
+                    entchannel, newName);
+            }
             S_AL_StopSource(srcIdx);
+        }
     }
 
     srcIdx = S_AL_GetFreeSource();
@@ -2567,6 +2637,27 @@ static void S_AL_Update( int msec )
         if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
         qalGetSourcei(s_al_src[i].source, AL_SOURCE_STATE, &state);
         if (state == AL_STOPPED) {
+            /* Level 2: log every natural completion so we can confirm the full
+             * buffer was consumed (offset should equal soundLength). */
+            if (s_alDebugPlayback && s_alDebugPlayback->integer >= 2) {
+                ALint       offset = 0;
+                const char *name   = "(unknown)";
+                int         total  = 0;
+                int         fileHz = 0;
+
+                qalGetSourcei(s_al_src[i].source, AL_SAMPLE_OFFSET, &offset);
+                if (s_al_src[i].sfx >= 0 && s_al_src[i].sfx < s_al_numSfx) {
+                    name   = s_al_sfx[s_al_src[i].sfx].name;
+                    total  = s_al_sfx[s_al_src[i].sfx].soundLength;
+                    fileHz = s_al_sfx[s_al_src[i].sfx].fileRate;
+                }
+                Com_Printf(S_COLOR_GREEN
+                    "[alDbg] done  %-40s  played %d / %d smp (%.0f%%)  "
+                    "file=%d Hz  device=%d Hz\n",
+                    name, offset, total,
+                    (total > 0) ? (100.0f * offset / total) : 0.0f,
+                    fileHz, (int)s_al_deviceFreq);
+            }
             qalSourcei(s_al_src[i].source, AL_BUFFER, 0);
             s_al_src[i].isPlaying = qfalse;
             continue;
@@ -3146,6 +3237,17 @@ qboolean S_AL_Init( soundInterface_t *si )
         "entity number, listener distance, trace target, smoothed gain, LOWPASS_GAIN, LOWPASS_GAINHF. "
         "Use this to isolate whether a specific sound is being filtered and by how much. "
         "Not archived.");
+    s_alDebugPlayback = Cvar_Get("s_alDebugPlayback", "0", CVAR_TEMP);
+    Cvar_CheckRange(s_alDebugPlayback, "0", "2", CV_INTEGER);
+    Cvar_SetDescription(s_alDebugPlayback,
+        "Playback diagnostics. "
+        "1 = log every PREEMPT event (sound cut short by a new sound on the same channel) "
+        "and every rate-mismatch at load time (file Hz != device Hz, forces the resampler). "
+        "2 = also log every natural completion. "
+        "Each line shows: sound name, samples played vs total, % consumed, file rate, device rate. "
+        "Use this to determine whether the DE-50 boom is being truncated (preempt) "
+        "or degraded by the resampler (rate mismatch). "
+        "Not archived. Set before loading a map to catch registration warnings.");
 
     /* Load library */
     if (!S_AL_LoadLibrary())
@@ -3234,6 +3336,13 @@ qboolean S_AL_Init( soundInterface_t *si )
         return qfalse;
     }
     qalcMakeContextCurrent(s_al_context);
+
+    /* Query the device's actual mixing frequency.  This is the rate OpenAL
+     * will resample every buffer to internally.  Any sound file whose rate
+     * differs from this value will go through the internal resampler.
+     * We log this at startup and use it in the playback-debug output. */
+    qalcGetIntegerv(s_al_device, ALC_FREQUENCY, 1, &s_al_deviceFreq);
+    Com_Printf("S_AL: device mixing frequency: %d Hz\n", (int)s_al_deviceFreq);
 
     /* Query actual HRTF status */
     if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
