@@ -284,6 +284,13 @@ static qboolean s_al_hrtf     = qfalse; /* ALC_HRTF_SOFT active */
 static qboolean s_al_inwater  = qfalse;
 
 static vec3_t s_al_listener_origin;   /* updated in S_AL_Respatialize */
+static int    s_al_listener_entnum = -1; /* entity number of the listener */
+
+/* Per-entity origin cache — updated by S_AL_UpdateEntityPosition and
+ * S_AL_Respatialize.  Used by S_AL_StartSound when origin is NULL so that
+ * entity-following sounds start at the right place instead of the world
+ * origin.  Indexed by entity number. */
+static vec3_t s_al_entity_origins[MAX_GENTITIES];
 
 typedef struct {
     qboolean available;       /* ALC_EXT_EFX present and procs loaded */
@@ -765,8 +772,22 @@ static void S_AL_StopSource( int idx )
 
 static void S_AL_MusicStop( void )
 {
-    if (!s_al_music.active) return;
+    ALint  queued;
+    ALuint buf;
+
+    /* Stop the source unconditionally so that all queued buffers transition
+     * to the "processed" state and can be unqueued.  We do this even when
+     * active==qfalse because MusicUpdate may have set active=qfalse on EOF
+     * while the source still had buffers in its queue.  Leaving those buffers
+     * attached prevents alBufferData from being called on them later, which
+     * would make the next StartBackgroundTrack call fail silently. */
     qalSourceStop(s_al_music.source);
+
+    /* Detach every buffer from the source queue so they can be reused. */
+    qalGetSourcei(s_al_music.source, AL_BUFFERS_QUEUED, &queued);
+    while (queued-- > 0)
+        qalSourceUnqueueBuffers(s_al_music.source, 1, &buf);
+
     if (s_al_music.stream) {
         S_CodecCloseStream(s_al_music.stream);
         s_al_music.stream = NULL;
@@ -1011,6 +1032,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     int         srcIdx;
     float       vol;
     vec3_t      sndOrigin;
+    qboolean    isLocal;
 
     if (!s_al_started || sfx < 0 || sfx >= s_al_numSfx) return;
     r = &s_al_sfx[sfx];
@@ -1027,15 +1049,36 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     if (srcIdx < 0) return;
 
     if (origin) {
+        /* Caller supplied a world-space origin — use it as-is. */
         VectorCopy(origin, sndOrigin);
-    } else {
-        /* Fetch entity origin from client game */
+        isLocal = qfalse;
+    } else if (entnum == s_al_listener_entnum) {
+        /* Sound from the local player's own entity: non-spatialized so that
+         * weapon fire, footsteps, etc. are heard at full volume regardless of
+         * HRTF positioning.  This mirrors the base snd_dma.c behaviour where
+         * listener-entity sounds are treated as local. */
         VectorClear(sndOrigin);
+        isLocal = qtrue;
+    } else {
+        /* No origin given but it is a world entity: look up its last known
+         * position from the per-entity cache (filled by UpdateEntityPosition
+         * and Respatialize).  If the cache is still zero the sound will be
+         * placed at the world origin; UpdateEntityPosition will correct the
+         * AL source position on the very next frame. */
+        if (entnum >= 0 && entnum < MAX_GENTITIES)
+            VectorCopy(s_al_entity_origins[entnum], sndOrigin);
+        else
+            VectorClear(sndOrigin);
+        isLocal = qfalse;
     }
 
     vol = S_AL_GetMasterVol();
-    S_AL_SrcSetup(srcIdx, sfx, origin ? sndOrigin : NULL,
-                  (origin != NULL), entnum, entchannel, vol, qfalse);
+    /* fixed_origin=true only when the caller supplied an explicit world-space
+     * position.  Entity-cache positions (origin==NULL, non-listener entity)
+     * use fixed_origin=false so that S_AL_UpdateEntityPosition can keep
+     * moving the source as the entity moves each frame. */
+    S_AL_SrcSetup(srcIdx, sfx, isLocal ? NULL : sndOrigin,
+                  (origin != NULL), entnum, entchannel, vol, isLocal);
 
     r->lastTimeUsed = Com_Milliseconds();
     qalSourcePlay(s_al_src[srcIdx].source);
@@ -1119,13 +1162,25 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
 {
     ALenum  fmt;
     ALuint  buf;
-    ALint   state;
+    ALint   state, processed;
     int     size;
 
     if (!s_al_started) return;
 
     fmt  = S_AL_Format(width, channels);
     size = samples * width * channels;
+
+    /* Reclaim any AL buffers that the source has already finished playing.
+     * In OpenAL, a buffer stays "attached" to the source queue (and cannot
+     * be written to with alBufferData) until it is explicitly unqueued, even
+     * after it has been played.  Without this drain step the round-robin pool
+     * would attempt alBufferData on still-attached buffers after 8 calls and
+     * silently fail, causing raw-samples audio (cinematics, VoIP) to stop. */
+    qalGetSourcei(s_al_raw.source, AL_BUFFERS_PROCESSED, &processed);
+    while (processed-- > 0) {
+        ALuint tmp;
+        qalSourceUnqueueBuffers(s_al_raw.source, 1, &tmp);
+    }
 
     /* Grab one buffer from our small pool (round-robin). */
     buf = s_al_raw.buffers[s_al_raw.nextBuf];
@@ -1159,7 +1214,15 @@ static void S_AL_StopAllSounds( void )
     }
 
     Com_Memset(s_al_loops, 0, sizeof(s_al_loops));
+    /* srcIdx must start at -1 (not 0) so UpdateLoops knows no source is
+     * assigned yet.  Com_Memset above zeroed everything to 0. */
+    for (i = 0; i < MAX_GENTITIES; i++)
+        s_al_loops[i].srcIdx = -1;
     s_al_loopFrame = 0;
+
+    /* Reset entity-origin cache so stale positions don't bleed in. */
+    Com_Memset(s_al_entity_origins, 0, sizeof(s_al_entity_origins));
+    s_al_listener_entnum = -1;
 }
 
 static void S_AL_ClearLoopingSounds( qboolean killall )
@@ -1251,6 +1314,15 @@ static void S_AL_Respatialize( int entityNum, const vec3_t origin,
 
     if (!s_al_started) return;
 
+    /* Track which entity is the listener so StartSound can treat that
+     * entity's sounds as non-spatialized (local). */
+    s_al_listener_entnum = entityNum;
+
+    /* Update the listener entity's cached origin so that any look-up
+     * through s_al_entity_origins also returns the correct position. */
+    if (entityNum >= 0 && entityNum < MAX_GENTITIES)
+        VectorCopy(origin, s_al_entity_origins[entityNum]);
+
     /* Listener position */
     qalListener3f(AL_POSITION, origin[0], origin[1], origin[2]);
     VectorCopy(origin, s_al_listener_origin);
@@ -1269,6 +1341,12 @@ static void S_AL_Respatialize( int entityNum, const vec3_t origin,
 static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
 {
     int i;
+
+    /* Keep the per-entity origin cache current so that StartSound can place
+     * new one-shot sounds at the right position when origin is NULL. */
+    if (entityNum >= 0 && entityNum < MAX_GENTITIES)
+        VectorCopy(origin, s_al_entity_origins[entityNum]);
+
     /* Move any active source attached to this entity */
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying) continue;
@@ -1287,8 +1365,6 @@ static void S_AL_Update( int msec )
     float masterGain, musicGain;
 
     if (!s_al_started) return;
-
-    ++s_al_loopFrame;
 
     /* Handle mute */
     masterGain = s_al_muted ? 0.0f : (s_volume ? s_volume->value : 0.8f);
@@ -1348,13 +1424,16 @@ static void S_AL_Update( int msec )
         }
     }
 
-    /* Update looping sounds */
+    /* Update looping sounds.
+     *
+     * IMPORTANT: s_al_loopFrame is incremented AFTER UpdateLoops so that
+     * the frame number stored by AddLoopingSound (called from cgame before
+     * S_Update) matches the frame number checked inside UpdateLoops.
+     * Incrementing before UpdateLoops caused every looping sound to fail
+     * the "lp->framenum != s_al_loopFrame" staleness check and be killed
+     * on every single frame. */
     S_AL_UpdateLoops();
-
-    /* Mute when window focus changes */
-    if (s_al_muted != qfalse && masterGain > 0.0f) {
-        s_al_muted = qfalse;
-    }
+    ++s_al_loopFrame;
 }
 
 static void S_AL_DisableSounds( void )
@@ -1611,6 +1690,10 @@ qboolean S_AL_Init( soundInterface_t *si )
     for (i = 0; i < MAX_GENTITIES; i++)
         s_al_loops[i].srcIdx = -1;
     s_al_loopFrame = 0;
+
+    /* Entity origin cache */
+    Com_Memset(s_al_entity_origins, 0, sizeof(s_al_entity_origins));
+    s_al_listener_entnum = -1;
 
     s_al_started = qtrue;
     s_al_muted   = qfalse;
