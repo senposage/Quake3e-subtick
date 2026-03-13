@@ -1139,207 +1139,80 @@ Three mechanisms keep DMA from drowning in its own events:
 
 That's it.  No content awareness, no looping, no fade.  It works because
 weapon sounds are **different files** (`de_out.wav`, `back.wav`, `cock.wav`),
-so each can play concurrently rather than fighting for the same slot.  The
-dedup window prevents the same file from firing twice in one frame.
+so each can play concurrently rather than fighting for the same slot.  Vanilla
+URT has double-start issues all the time and nobody notices.
 
-### Why OpenAL needed more
+### Why the previous OpenAL implementation needed guards
 
-OpenAL maps each `(entnum, entchannel)` pair to a **single source**.  When a
-new sound arrives on an occupied slot the existing source must be stopped and
-the buffer replaced — a hard cut.  Under URT's weapon-animation event burst
-(all three DE-50 sounds arrive within ~30 ms) every sound immediately evicted
-its predecessor, making the fire boom completely inaudible.
+OpenAL originally mapped each `(entnum, entchannel)` pair to a **single source**.
+When a new sound arrived on an occupied slot the existing source was hard-stopped.
+Under URT's weapon-animation event burst (all three DE-50 sounds arrive within
+~30 ms) every sound immediately evicted its predecessor, making the fire boom
+completely inaudible.
 
-DMA avoids this because its channel pool is larger and the three sounds land on
-**separate** channels (no `(entnum, entchannel)` constraint).
+The complex preemption guard (content-samples scan, weapon-loop looping model,
+fade-in ramp) was built to paper over this constraint.  It introduced its own
+bugs: loop restarts mid-fire-sequence, cycle sounds blocked by long guards.
 
-### URT weapon audio model
+### Current implementation — slot-based model
 
-URT builds weapon audio by continuously re-submitting the fire sound while the
-trigger is held.  The game fires `EV_FIRE_WEAPON` every server frame; each
-event attempts to restart the same buffer on the same channel.
+**Core principle**: source slots are cheap on modern hardware.  A 32–38 player
+URT server needs at most ~250 simultaneous sources (38 players × ~5–6 sounds
+each + world impacts).  With OpenAL Soft's default 256 mix voices, and a 512-
+slot upper bound, there is no reason to refuse any sound request.
 
-- **Automatic fire**: re-submissions arrive at the weapon's fire cadence
-  (e.g. 150 ms for MAC-11).  The OpenAL source should loop seamlessly rather
-  than restart from frame 0 each time.
-- **Semi-auto / single shot**: one `EV_FIRE_WEAPON` per trigger pull, followed
-  immediately by cycle sounds (`back.wav`, `cock.wav`) on the same channel.
-- **Trigger released**: events stop; the current buffer iteration should play
-  out to its natural end — not be hard-stopped.
+**`S_AL_StartSound`** applies three checks, in order:
 
-Sounds that need special handling are not limited to `CHAN_WEAPON`:
+1. **Distance rejection**: if the sound origin is beyond `s_alMaxDist` from the
+   listener (default 1330 u — already inaudible in the distance model), skip
+   it.  No slot wasted on a sound nobody can hear.
 
-| Sound class | Channel | Problem without guards | Guard needed |
-|-------------|---------|----------------------|--------------|
-| Fire boom (DE-50 `de_out.wav`) | CHAN_WEAPON | Cut by cycle sounds at 30 ms | Transient protection (≤ 150 ms) |
-| Fire loop (MAC-11) | CHAN_WEAPON | Restart gap every 150 ms | `AL_LOOPING` seamless loop |
-| Cycle sounds (`back.wav`, `cock.wav`) | CHAN_WEAPON | Silenced by long fire guard | Cap lets them through after 150 ms |
-| Brass / shell casings | CHAN_AUTO / world | Pool exhaustion at high sv_fps | World-entity cap + dedup window |
-| Bullet impacts / ricochets | CHAN_AUTO / world | Same as above | Same caps |
-| Ambient pass-bys (`truckpassby`) | CHAN_AUTO | Cut mid-file by retrigger | Full content guard (no cap) |
-| Impact cracks (`concrete1`, `ric1`) | CHAN_AUTO / world | Cut by casing within 5 ms | Full content guard (no cap) |
+2. **Get slot**: call `S_AL_GetFreeSource` — three passes:
+   - Pass 1: find a stopped (free) slot immediately.  `S_AL_Update` reaps
+     finished sources every frame, so free slots are always available first.
+   - Pass 2: grow the pool dynamically (`qalGenSources`) up to `s_alMaxSrc`.
+   - Pass 3: steal by priority (see below).
 
-### Current implementation
+3. **Setup and play**: no channel-based lookup, no preemption guard, no
+   looping model.  Each submission gets its own independent slot, exactly like
+   DMA.  Voice, body, and footstep sounds naturally overlap (multiple slots per
+   entity/channel) — this is correct behaviour and matches DMA.
 
-**`S_AL_RegisterSound`** scans the decoded PCM backward to find the last
-frame above the silence threshold (≈ −54 dB for 16-bit).  This value,
-`contentSamples`, is stored in `alSfxRec_t` once at load time.
+**`S_AL_GetFreeSource` steal priority** (used only when pool is truly full):
 
-**`S_AL_StartSound`** applies the following logic when a new sound arrives on
-an occupied named channel:
+| Tier | Target | Rationale |
+|------|--------|-----------|
+| 1 | ENTITYNUM_WORLD sources — farthest first | Brass casings 2000 u away are expendable; player shots never are |
+| 2 | Non-local other-entity 3D sources — farthest first | Distant sounds already faded; nearby teammates stay alive |
+| 3 | Any non-local non-loop source — oldest first | Age-based fallback |
+| 4 | Any non-loop source — oldest first | Last resort; own-player sounds almost never reach here |
 
-1. **Same sfx, fire-loop window** — age measured against `lastFireMs` when
-   `weaponLoop` is already active (else `allocTime`); if age ≤
-   `WEAPON_FIRE_LOOP_TIMEOUT_MS` (250 ms):
-   - Engage `AL_LOOPING = AL_TRUE` (first time only).
-   - **Seek `AL_SAMPLE_OFFSET` to 0** so the attack transient is heard at
-     the weapon's actual fire cadence.  Without the seek the source would
-     continue mid-buffer; if the sample is longer than the inter-shot
-     interval the crack is only heard at each full sample-length boundary
-     instead of at each animation frame.
-   - Refresh `lastFireMs`; return without allocating a new source.
-
-   `lastFireMs` (not `allocTime`) is used for the age check once the loop
-   is active because `allocTime` is set once at source creation and grows
-   stale during sustained automatic fire — after `WEAPON_FIRE_LOOP_-
-   TIMEOUT_MS` from the first shot, every subsequent fire event would fall
-   through and be silently blocked.  `lastFireMs` resets on every shot and
-   keeps the loop alive indefinitely while the trigger is held.
-
-2. **Same sfx beyond the loop window** (new burst after a pause): fall
-   through to the stop + re-alloc path immediately, bypassing the
-   preemption guard.  A looping source has `AL_SAMPLE_OFFSET ≈ 0` right
-   after its buffer boundary restarts; without this bypass the guard would
-   see a near-zero offset and falsely treat the source as "fresh",
-   blocking the incoming shot.
-
-3. **Different sfx — preemption guard:**
-   - Query `AL_SOURCE_STATE`; skip guard entirely if `AL_STOPPED` (offset
-     resets to 0 on a stopped source and would falsely re-engage the guard).
-   - Read `AL_SAMPLE_OFFSET`; if `offset < contentSamples`, drop the request.
-   - **`CHAN_WEAPON` cap**: `contentSamples` is clamped to
-     `WEAPON_GUARD_CAP_MS` (150 ms) before the comparison so that long fire
-     sounds (`de_out.wav`, ~2.5 s) cannot silence cycle sounds for their
-     full content duration.  Non-weapon channels (ambient, impacts) use the
-     full `contentSamples` so they play to their audible end.
-   - Guard expires → stop old source → start new source with gain fade-in.
-
-4. **Gain fade-in** (`SRC_FADE_IN_MS` = 15 ms): newly-started local sources
-   begin at `AL_GAIN = 0` and ramp to full gain in `S_AL_Update`, masking the
-   hard cut of the predecessor.
+Loop (ambient) sources are never stolen — they have their own lifecycle.
 
 **`S_AL_Update`** (every frame):
-- **Loop timeout**: if `weaponLoop` is set and `(now − lastFireMs) >
-  WEAPON_FIRE_LOOP_TIMEOUT_MS` (250 ms), set `AL_LOOPING = AL_FALSE` —
-  OpenAL finishes the current buffer iteration and stops naturally (trigger-
-  released "plays out" behaviour).
-- **Fade-in ramp**: advance gain on local sources that are still within their
-  `SRC_FADE_IN_MS` window.
+- **Reap stopped sources**: poll `AL_SOURCE_STATE`; any `AL_STOPPED` source
+  immediately has its buffer detached and `isPlaying` cleared so Pass 1 of
+  `S_AL_GetFreeSource` finds it on the next frame.
+
+**Culling philosophy**: sounds are dropped by **distance** (rejection at start)
+and by **age/distance** (eviction when stealing) — never by hitting an arbitrary
+slot count.  If a surplus of sources ever causes issues, reduce `s_alMaxSrc`
+(default 512) or lower `s_alDedupMs` from its default of 0 (disabled) to add
+a light same-entity dedup window.
 
 ### Behaviour by scenario
 
-| Scenario | Before (PR #93) | After |
-|----------|-----------------|-------|
-| DE-50 — fire once, wait | ✓ works | ✓ works |
-| DE-50 — spam trigger | Each shot plays; 150 ms cap | ✓ same — crack heard on every shot |
-| LR-300 — hold trigger (sample > cadence) | Silent after ~3 shots (allocTime expires) | Attack transient at every fire event; loop never breaks |
-| MAC-11 — hold trigger | Seamless loop but attack only at sample boundary | Attack restarted at every fire cadence via seek-to-0 |
-| MAC-11 — burst then re-fire | Blocked briefly by looping source offset ≈ 0 | Same-sfx bypass: immediate preemption, clean restart |
-| Pistol rapid-fire | Cycle sound could block next shot | Same-sfx loop: each re-submit restarts from 0 within window |
-| Ambient pass-by | Cut mid-file by retrigger | ✓ unchanged — full content guard; completes audible length |
-| Impacts / brass | Pool exhaustion | ✓ unchanged — world-entity cap + dedup window |
-
-### Future work — DMA-style improvements
-
-The DMA backend's simplicity is its strength: no per-sound guards, just three
-blunt mechanisms (dedup window, concurrency cap, world-entity cap) and a large
-channel pool.  The OpenAL backend can replicate that model cleanly now that the
-preemption root cause is fixed.
-
-#### 1. True crossfade on preemption
-
-**Problem**: the current implementation hard-stops the evicted source then
-starts the new one at zero gain and ramps up over 15 ms.  There is a brief
-discontinuity on the evicted sound.
-
-**DMA-style solution**: maintain a small "orphan fade-out" list alongside the
-source pool.  When a source is preempted, move it to the orphan list with a
-20 ms gain ramp-down (`AL_GAIN 1→0`) rather than calling `qalSourceStop`
-immediately.  The incoming source starts its own 15 ms ramp-up at the same
-time.  The two ramps overlap — a true crossfade.  Cost: up to N orphan sources
-active simultaneously (N = max concurrently-preempted slots; in practice 1–2
-for weapons).
-
-#### 2. Explicit sound priority tags
-
-**Problem**: the content-magnitude comparison (`incoming.contentSamples >
-current.contentSamples`) is a heuristic — it works for URT's weapon files
-but could misfire on unusual sound designs.
-
-**DMA-style solution**: add a `soundPriority` field to `alSfxRec_t`, set at
-load time from the file path:
-
-```c
-/* Path-prefix priority table (checked in order): */
-"sound/weapons/"   → PRIORITY_WEAPON_FIRE    (highest — never dropped)
-"sound/player/"    → PRIORITY_PLAYER
-"sound/world/"     → PRIORITY_WORLD
-"sound/ambient/"   → PRIORITY_AMBIENT        (lowest — always preemptable)
-```
-
-Use `soundPriority` instead of (or alongside) `contentSamples` in the
-preemption guard.  Matches DMA's implicit priority (CHAN_ANNOUNCER protected,
-listener sounds evicted last).
-
-#### 3. Per-class dedup window and concurrency cap
-
-**Problem**: brass casings, bullet impacts, and ricochets all share
-`ENTITYNUM_WORLD` and are governed by the same blunt pool/8 hard cap.  A burst
-of rifle fire can still flood the cap with one sound class, starving others.
-
-**DMA-style solution**: assign each sound a class tag at load time (same
-path-prefix table as above).  Keep a per-class active-source counter updated in
-`S_AL_Update`.  Apply independent caps:
-
-| Class | Dedup window | Concurrent cap |
-|-------|-------------|----------------|
-| Brass / casings | 100 ms | 4 |
-| Bullet impacts | 50 ms | 6 |
-| Ricochets | 50 ms | 4 |
-| Player weapon fire | 20 ms | 2 (per player) |
-| Ambient pass-bys | 500 ms | 2 |
-
-This mirrors DMA's per-sound `allowed` variable (16 / 8 / 2 depending on
-entity) but applied per sound class, giving fine-grained control without the
-blunt world-entity hard cap.
-
-#### 4. `AL_LOOPING` looping model for all repeating sounds
-
-**Problem**: the current weapon-fire loop is driven by EV_FIRE_WEAPON
-re-submissions.  Other sounds that repeat at high rates (e.g. minigun spin,
-chainsaw) would benefit from the same treatment.
-
-**DMA-style solution**: generalise `weaponLoop`/`lastFireMs` into a
-`loopClass` field.  Any sound that re-fires at the same `(entnum, entchannel,
-sfx)` within the loop timeout becomes an `AL_LOOPING` source.  The timeout
-clears `AL_LOOPING` when events stop, letting the buffer play out naturally
-regardless of which sound class triggered it.
-
-### Design note — why no cache for `contentSamples`
-
-The PCM scan is ≈ 0.04 ms per file.  Across a full session (≤ 1 000 sounds
-loaded lazily on first use), total cost is under 50 ms spread across the whole
-session.  A persistent cache file would add file-I/O overhead, staleness risk
-on pk3 updates, and ~100 extra lines of code in exchange for an imperceptible
-saving.  The value is computed inline at load time and stored in the existing
-`alSfxRec_t` pool.
-
-The PCM scan is ≈ 0.04 ms per file.  Across a full session (≤ 1 000 sounds
-loaded lazily on first use), total cost is under 50 ms spread across the whole
-session.  A persistent cache file would add file-I/O overhead, staleness risk
-on pk3 updates, and ~100 extra lines of code in exchange for an imperceptible
-saving.  The value is computed inline at load time and stored in the existing
-`alSfxRec_t` pool.
+| Scenario | Before (PR #93) | Now |
+|----------|-----------------|-----|
+| DE-50 — fire once, wait | ✓ | ✓ — own independent slot |
+| DE-50 — spam trigger | 150 ms cap | ✓ — every shot gets a slot |
+| DE-50 + back.wav + cock.wav burst | Two sounds killed | ✓ — three separate slots |
+| LR-300 — hold trigger | Silent after ~3 shots | ✓ — each re-fire its own slot |
+| MAC-11 — hold trigger | Seeked to 0 on each event | ✓ — each event its own slot |
+| Voice / body / footstep overlap | Single slot per channel | ✓ — naturally concurrent |
+| Brass / impacts — nearby | Pool exhaustion | ✓ — always heard within range |
+| Brass / impacts — far away | Counted against pool cap | Rejected before allocation |
+| 38-player server peak | Guards & caps active | Pool grows dynamically; steal world-entity first |
 
 ---
 
