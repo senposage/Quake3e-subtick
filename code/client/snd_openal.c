@@ -356,6 +356,7 @@ static alEfx_t s_al_efx;
 /* Cvars */
 static cvar_t *s_alDevice;
 static cvar_t *s_alHRTF;
+static cvar_t *s_alEFX;          /* 0 = skip EFX init entirely (test/debug) */
 static cvar_t *s_alMaxDist;
 static cvar_t *s_alReverb;       /* master EFX reverb toggle (0/1) */
 static cvar_t *s_alReverbGain;   /* wet-signal slot gain [0..1] */
@@ -799,7 +800,12 @@ static void S_AL_FreeSfx( void )
 /* Find an existing source for (entnum, entchannel), or -1. */
 static float S_AL_GetMasterVol( void )
 {
-    return s_volume ? s_volume->value * 255.0f : 200.0f;
+    /* Return a fixed full-scale value (255).  The listener gain set every
+     * frame in S_AL_Update already applies s_volume as the master volume
+     * control.  Including s_volume here as well would cause it to be applied
+     * twice (source gain × listener gain = s_volume²), making all sounds
+     * significantly quieter than the equivalent dmaHD output. */
+    return 255.0f;
 }
 
 /* Return the per-category volume scalar for a source, clamped to its
@@ -1243,6 +1249,12 @@ static void S_AL_InitEFX( void )
     ALint maxSends = 0;
 
     Com_Memset(&s_al_efx, 0, sizeof(s_al_efx));
+
+    /* Allow the user to skip EFX entirely for testing/diagnostics. */
+    if (s_alEFX && !s_alEFX->integer) {
+        Com_Printf("S_AL: EFX disabled by s_alEFX 0\n");
+        return;
+    }
 
     if (!qalcIsExtensionPresent(s_al_device, "ALC_EXT_EFX"))
         return;
@@ -2691,11 +2703,13 @@ static void S_AL_Update( int msec )
                                    (ALint)s_al_efx.occlusionFilter[i]);
                     }
                 } else {
-                    /* No EFX: approximate occlusion by direct gain reduction */
+                    /* No EFX: approximate occlusion by direct gain reduction.
+                     * Do NOT multiply by masterGain here — the listener AL_GAIN
+                     * already applies s_volume; including it again would double it. */
                     qalSourcef(s_al_src[i].source, AL_GAIN,
                         (s_al_src[i].master_vol / 255.0f) *
                         S_AL_GetCategoryVol(s_al_src[i].category) *
-                        occ * masterGain);
+                        occ);
                 }
 
                 if (s_alDebugOcc && s_alDebugOcc->integer && occ < 0.99f) {
@@ -2847,9 +2861,10 @@ static void S_AL_SoundInfo( void )
     Com_Printf("  Sources:  %d / %d active\n", s_al_numSrc, S_AL_MAX_SRC);
     Com_Printf("  Sfx:      %d loaded\n", s_al_numSfx);
 
-    Com_Printf("  EFX:      %s (%s reverb)\n",
+    Com_Printf("  EFX:      %s (%s reverb)  [s_alEFX %d]\n",
         s_al_efx.available ? "enabled" : "not available",
-        s_al_efx.hasEAXReverb ? "EAX" : "standard");
+        s_al_efx.hasEAXReverb ? "EAX" : "standard",
+        s_alEFX ? s_alEFX->integer : 1);
 
     Com_Printf("  Mix CVars:\n");
     Com_Printf("    s_alReverb        %d  (EFX reverb %s)\n",
@@ -2933,9 +2948,16 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* Register cvars */
     s_alDevice  = Cvar_Get("s_alDevice",  "",    CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_SetDescription(s_alDevice, "OpenAL output device. Empty = system default. Type /s_devices for a numbered list of available devices. (LATCH — requires vid_restart to take effect)");
-    s_alHRTF    = Cvar_Get("s_alHRTF",   "1",   CVAR_ARCHIVE_ND | CVAR_LATCH);
+    s_alHRTF    = Cvar_Get("s_alHRTF",   "0",   CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alHRTF, "0", "1", CV_INTEGER);
-    Cvar_SetDescription(s_alHRTF, "Enable HRTF (Head-Related Transfer Function) 3D audio via OpenAL Soft. Requires headphones for best effect.");
+    Cvar_SetDescription(s_alHRTF, "Enable HRTF (Head-Related Transfer Function) 3D audio via OpenAL Soft. Default 0 (off). Only enable when using headphones — on speakers HRTF smears weapon transients into a muffled pop via the centre-HRIR convolution. Requires vid_restart (LATCH).");
+    s_alEFX = Cvar_Get("s_alEFX", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alEFX, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alEFX, "Enable ALC_EXT_EFX (occlusion filters, reverb slots). "
+        "Set to 0 to skip EFX initialisation entirely — disables all filter objects and "
+        "auxiliary sends so the source signal path is completely unprocessed. "
+        "Use for isolating whether EFX is contributing to audio quality issues. "
+        "Requires vid_restart (LATCH). Default 1.");
     /* s_alMaxDist: default matches the vanilla dma max-audible distance.
      * Values below 1330 are clamped to 1330 by the distance-model setup. */
     s_alMaxDist = Cvar_Get("s_alMaxDist", "1330", CVAR_ARCHIVE_ND);
@@ -3084,30 +3106,19 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* -----------------------------------------------------------------------
      * HRTF / headphone stereo setup
      *
-     * We apply three layers to ensure HRTF is active without requiring the
-     * user to run alsoft-config.exe or edit alsoft.conf manually.
+     * s_alHRTF 1 (opt-in): request HRTF convolution for headphone users.
+     *   Layer 1 — ALC_SOFT_output_mode: ALC_STEREO_HRTF_SOFT
+     *   Layer 2 — ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_TRUE
+     *   Layer 3 — alcResetDeviceSoft:   belt-and-suspenders if still disabled
      *
-     * Layer 1 — ALC_SOFT_output_mode (OpenAL Soft 1.20+, most forceful):
-     *   ALC_STEREO_HRTF_SOFT requests stereo headphone rendering.  OpenAL
-     *   Soft will always honour this value; it overrides any device default.
-     *
-     * Layer 2 — ALC_SOFT_HRTF (classic request, all OpenAL Soft versions):
-     *   ALC_HRTF_SOFT = ALC_TRUE in the context creation attributes.
-     *
-     * Layer 3 — alcResetDeviceSoft (belt-and-suspenders):
-     *   If HRTF still reports disabled after context creation (e.g. OpenAL
-     *   implementation switched it off based on device type), call
-     *   alcResetDeviceSoft with ALC_HRTF_SOFT = ALC_TRUE to force it.
-     *
-     * NOTE: ALC_AMBISONIC_ORDER_SOFT is intentionally NOT requested here.
-     *   In OpenAL Soft, setting ALC_AMBISONIC_ORDER_SOFT in the context
-     *   attributes forces Ambisonic output mode, silently overriding
-     *   ALC_STEREO_HRTF_SOFT.  Standard mono/stereo game sources are then
-     *   routed through an intermediate Ambisonic encode/decode path which
-     *   introduces positional errors (own sounds appear to come from the
-     *   wrong direction, panning is ambiguous near the listener).  Stereo
-     *   HRTF without Ambisonics applies the HRIR directly per-source, which
-     *   gives accurate positional audio for a first-person shooter.
+     * s_alHRTF 0 (default): explicitly DISABLE HRTF so that alsoft.conf or
+     *   driver defaults cannot silently re-enable it.  Without the explicit
+     *   ALC_HRTF_SOFT=ALC_FALSE request, OpenAL Soft may honour a system-wide
+     *   "hrtf = true" in alsoft.conf and run the centre-HRIR convolution on
+     *   own-player weapon sources even when the user sets s_alHRTF 0.  That
+     *   convolution is what produces the "muffled pop" on speaker setups.
+     *   ALC_STEREO_BASIC_SOFT requests plain stereo panning with no HRTF and
+     *   no surround upmix — the correct output mode for a speaker game session.
      * ----------------------------------------------------------------------- */
     nAttribs = 0;
     if (s_alHRTF->integer) {
@@ -3120,6 +3131,18 @@ qboolean S_AL_Init( soundInterface_t *si )
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
             ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
             ctxAttribs[nAttribs++] = ALC_TRUE;
+        }
+    } else {
+        /* Explicitly disable HRTF and request plain stereo output.
+         * This overrides alsoft.conf and device defaults so the user can
+         * be certain HRTF is truly off after a vid_restart. */
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
+            ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
+            ctxAttribs[nAttribs++] = ALC_STEREO_BASIC_SOFT;
+        }
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
+            ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
+            ctxAttribs[nAttribs++] = ALC_FALSE;
         }
     }
     ctxAttribs[nAttribs] = 0; /* sentinel */
