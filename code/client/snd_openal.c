@@ -231,6 +231,27 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_WEAPON_SOUND_PREFIX        "sound/weapons/"
 #define S_AL_WEAPON_SOUND_PREFIX_LEN    14  /* strlen("sound/weapons/") */
 
+/* Minimum time (ms) a CHAN_WEAPON sound must play before it can be preempted
+ * by another sound on the same channel.
+ *
+ * Without this guard, weapon fire-animation sequences submit multiple sounds
+ * on CHAN_WEAPON in rapid succession (e.g. DE-50: de_out.wav → back.wav →
+ * cock.wav) and each one preempts the previous after only ~30 ms (1 % of the
+ * 3.74 s shot sound), making the gunshot completely inaudible.  This affects
+ * ALL weapons to varying degrees — longer samples tolerate preemption less
+ * (DE-50 de_out.wav is most severe) while shorter samples are less impacted,
+ * but all CHAN_WEAPON sounds benefit from the protection.
+ *
+ * 100 ms is chosen to:
+ *   • protect the initial crack/transient of semi-auto shots before mechanical
+ *     cycling sounds (slide back, hammer cock) take over the channel
+ *   • not block full-auto weapons: the Negev fires negev_sil.wav every ~100 ms
+ *     so the guard (elapsed < 100 ms) expires at the same cadence as fire rate
+ *   • semi-auto weapons cannot physically fire faster than ~100 ms/round, so
+ *     no legitimate cross-shot preemption is blocked
+ */
+#define CHAN_WEAPON_MIN_PLAY_MS  100
+
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
@@ -1520,6 +1541,13 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     if (entchannel != CHAN_AUTO) {
         srcIdx = S_AL_FindSourceByChannel(entnum, entchannel);
         if (srcIdx >= 0) {
+            /* Minimum play-time guard for CHAN_WEAPON — see CHAN_WEAPON_MIN_PLAY_MS. */
+            if (entchannel == CHAN_WEAPON) {
+                int elapsed = Com_Milliseconds() - s_al_src[srcIdx].allocTime;
+                if (elapsed < CHAN_WEAPON_MIN_PLAY_MS)
+                    return;
+            }
+
             /* Level 1: label preemptions so they are visually distinct from
              * natural completions in the playback log. */
             if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1) {

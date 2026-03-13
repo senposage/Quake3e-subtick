@@ -304,6 +304,28 @@ s_alReverb 1  s_alOcclusion 1  →  + static EFX reverb room
 s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 ```
 
+#### CHAN_WEAPON minimum play-time guard
+
+The root cause of the DE-50 "no sound" regression was confirmed by
+`s_alDebugPlayback 1`: all three DE-50 fire-animation sounds (`de_out.wav`,
+`back.wav`, `cock.wav`) were submitted on `CHAN_WEAPON` in rapid succession.
+Each one preempted the previous after only **~30 ms (1 % of the 3.74 s shot
+sound)**, making the gunshot completely inaudible.
+
+Fix (in `S_AL_StartSound`): before preempting a sound on `CHAN_WEAPON`, check
+how long the current sound has been playing using `allocTime`.  If less than
+`CHAN_WEAPON_MIN_PLAY_MS` (100 ms), the new request is silently dropped and
+the engine retries naturally on the next frame.
+
+| Why 100 ms |
+|---|
+| Covers the initial crack/transient of the DE-50 shot before mechanical cycling sounds (slide back, hammer cock) take over |
+| Does **not** block the Negev, which fires `negev_sil.wav` every ~100 ms — the guard expires at the same cadence as the fire rate |
+| Semi-auto weapons physically cannot fire faster than 100 ms/round, so no legitimate preemption is blocked |
+
+With the guard in place the heard sequence becomes:  
+**crack (100 ms+) → back.wav (~196 ms) → cock.wav (~370 ms)** — matching the intended animation audio.
+
 #### Vanilla-behaviour notes
 
 - **`s_alReverb 0` (default)**: no EFX reverb, matches plain dma/Q3 audio.
