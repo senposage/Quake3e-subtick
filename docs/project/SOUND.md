@@ -213,13 +213,87 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 
 `S_RawSamples` (cinematics, VoIP) queues PCM data through a dedicated streaming source with `S_AL_RAW_BUFFERS` (8) rotating buffers.
 
-### Key New Cvars
+### Key CVars
 
-| Cvar | Default | Notes |
-|------|---------|-------|
-| `s_alDevice` | `""` | OpenAL output device name; empty = system default |
-| `s_alHRTF` | `1` | Enable HRTF + Ambisonic HRTF rendering (all three layers) |
-| `s_alMaxDist` | `1024` | Override max attenuation distance (never less than 1330) |
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `s_alDevice` | `""` | OpenAL output device; empty = system default. Type `/s_devices` for a numbered pick-list. (LATCH) |
+| `s_alHRTF` | `1` | Enable HRTF binaural rendering via OpenAL Soft (LATCH) |
+| `s_alMaxDist` | `1330` | Max attenuation distance in game units; matches vanilla dma range |
+| `s_alReverb` | `0` | Master EFX reverb toggle. **Default 0 = vanilla dma behaviour** |
+| `s_alReverbGain` | `0.20` | EFX wet slot gain [0–1]. Ceiling when `s_alDynamicReverb 1` |
+| `s_alReverbDecay` | `1.49` | Reverb decay in seconds; used when `s_alDynamicReverb 0` (LATCH) |
+| `s_alDynamicReverb` | `0` | Ray-traced acoustic environment. **Default 0 = opt-in** |
+| `s_alOcclusion` | `1` | Wall-occlusion tracing with HRTF direction correction |
+| `s_alVolSelf` | `1.0` | Own player/weapon volume multiplier **[0–1.5]** |
+| `s_alVolOther` | `1.0` | Other player/entity volume multiplier **[0–1.0]** — capped, anti-cheat |
+| `s_alVolEnv` | `1.0` | Looping ambient/environmental volume multiplier **[0–1.0]** — capped |
+
+#### Selecting an output device (`/s_devices`)
+
+Type `/s_devices` in the console for a numbered pick-list:
+
+```
+Audio output devices  (> = active  * = system default):
+  >*  1.  Realtek High Definition Audio
+      2.  Razer Kraken 7.1 Chroma
+      3.  HDMI Output (LG Monitor)
+
+Usage: set s_alDevice "Razer Kraken 7.1 Chroma" ; vid_restart
+       (empty string restores the system default)
+```
+
+The cvar description shown when you query `s_alDevice` also embeds the actual
+system-default device name (resolved at runtime after the library loads).
+`sndinfo` includes the same device list at the bottom of its output.
+
+#### Audio enhancement ladder
+
+```
+s_alReverb 0  s_alOcclusion 0  →  vanilla dma: distance-only, no wall effects
+s_alReverb 0  s_alOcclusion 1  →  occlusion + HRTF direction fix (default)
+s_alReverb 1  s_alOcclusion 1  →  + static EFX reverb room
+s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
+```
+
+#### Vanilla-behaviour notes
+
+- **`s_alReverb 0` (default)**: no EFX reverb, matches plain dma/Q3 audio.
+- **`s_alOcclusion 1` (default)**: sources behind walls are muffled and their
+  apparent HRTF direction is redirected to the nearest audible gap.  This is
+  _less_ of a positional wallhack than raw HRTF (which reveals exact 3-D source
+  direction through walls) while keeping the "you can hear them if close enough"
+  vanilla expectation via the standard distance-attenuation model.
+- `s_alMaxDist 1330` is the vanilla dma maximum audible radius; sounds beyond
+  this distance are inaudible regardless of wall status.
+
+#### Occlusion update cadence (distance-adaptive)
+
+| Source distance | Update interval | Rationale |
+|---|---|---|
+| < 80 u (full-vol zone) | every frame — no trace | Wall impossible at this range; real position used |
+| 80 – 300 u | every frame | Nearby players — maximum HRTF precision |
+| 300 – 600 u | every 4 frames | Medium range |
+| > 600 u | every 8 frames | Far — distance model dominates |
+
+#### Dynamic acoustic environment (`s_alDynamicReverb 1`)
+
+Casts **14 world-space rays** from the listener every **16 frames** (≈ 0.9 traces/frame average):
+- 8 horizontal (every 45°)
+- 4 diagonal-up (45° elevation, N/E/S/W)
+- 1 straight up, 1 straight down
+
+Metrics derived: `avgDist` (room size), `openFrac` (outdoor indicator), `corrFactor` (corridor asymmetry).
+
+| Environment | `avgDist` | `openFrac` | Target `decayTime` | Target late-gain |
+|---|---|---|---|---|
+| Tight room | < 80 u | low | ~0.4 s | low |
+| Normal indoor | ~200 u | low | ~1.5 s | moderate |
+| Large hall/cave | > 400 u | low | ~3–4 s | high |
+| Corridor | asymmetric | low | medium | low; high reflections |
+| Open outdoor | any | > 0.5 | < 0.5 s | near-zero |
+
+Parameters blend smoothly (pole 0.85, ~2 s half-transition) so room changes sound natural.
 
 ### snd_openal.h — Public API
 
