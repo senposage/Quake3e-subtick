@@ -1611,10 +1611,20 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                 if ( curSfx >= 0 && curSfx < s_al_numSfx ) {
                     int content = s_al_sfx[curSfx].contentSamples;
                     if ( content > 0 ) {
-                        ALint offset = 0;
-                        qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
-                        if ( offset < content )
-                            return;
+                        /* Only apply the guard when the source is actually
+                         * playing.  If the source has reached AL_STOPPED
+                         * (sound finished but isPlaying not yet cleared by
+                         * S_AL_Update), AL_SAMPLE_OFFSET resets to 0 and
+                         * would falsely satisfy offset < content, silencing
+                         * rapid-fire and back-to-back sounds. */
+                        ALint state = AL_STOPPED;
+                        qalGetSourcei(s_al_src[srcIdx].source, AL_SOURCE_STATE, &state);
+                        if ( state == AL_PLAYING ) {
+                            ALint offset = 0;
+                            qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
+                            if ( offset < content )
+                                return;
+                        }
                     }
                 }
             }

@@ -1161,10 +1161,14 @@ frame above the silence threshold (≈ −54 dB for 16-bit).  This value,
 is an O(N) integer comparison loop — microseconds per file — done once while
 the PCM is already in RAM before being handed to OpenAL.
 
-`S_AL_StartSound` uses `AL_SAMPLE_OFFSET` to query how many frames the current
-source has played.  If `offset < contentSamples`, the incoming request is
-dropped.  If the current sound has consumed its audible content (or the file is
-all-silent, `contentSamples == 0`), preemption proceeds normally.
+`S_AL_StartSound` first queries `AL_SOURCE_STATE`.  If the source is
+`AL_STOPPED` (the sound finished playing but `isPlaying` has not yet been
+cleared by `S_AL_Update`), the guard is skipped — preemption proceeds
+immediately so that rapid-fire and back-to-back requests are never silenced.
+If the source is `AL_PLAYING`, `AL_SAMPLE_OFFSET` is read; if
+`offset < contentSamples`, the incoming request is dropped.  If the current
+sound has consumed its audible content (or the file is all-silent,
+`contentSamples == 0`), preemption proceeds normally.
 
 This single rule handles every case without any channel-specific constants:
 
