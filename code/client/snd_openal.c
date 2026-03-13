@@ -231,29 +231,19 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_WEAPON_SOUND_PREFIX        "sound/weapons/"
 #define S_AL_WEAPON_SOUND_PREFIX_LEN    14  /* strlen("sound/weapons/") */
 
-/* Minimum time (ms) a CHAN_WEAPON sound must play before the SAME sound can
- * restart it (rapid-fire / full-auto).
- *
- * Cross-sound preemption (a different sfxHandle cutting the current one short)
- * is blocked entirely in S_AL_StartSound — this constant only governs same-sfx
- * restarts, i.e. a rapid-fire or full-auto weapon re-firing the identical
- * sample.
- *
- * Purpose: swallow duplicate submissions of the same fire event that arrive on
- * consecutive render frames (≤ 16 ms apart at 60 fps) due to client-side
- * prediction.  50 ms is 3× that window — enough to suppress all per-frame
- * duplicates — while staying well below the cadence of the fastest full-auto
- * weapon in URT (ZM300 ≈ 120 ms/shot, Negev ≈ 200 ms/shot), so real rapid-
- * fire restarts are never blocked.
- */
-#define CHAN_WEAPON_MIN_PLAY_MS  50
+/* No fixed preemption guard constants needed: see S_AL_ContentSamples() and
+ * S_AL_StartSound() for the content-based adaptive approach that replaced all
+ * channel-specific guards. */
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
     char                name[MAX_QPATH];
-    int                 soundLength;            /* in samples */
+    int                 soundLength;            /* in samples (file-rate frames) */
     int                 fileRate;               /* original sample rate from the file (Hz) */
+    int                 contentSamples;         /* last non-silent frame + 1 (file-rate frames);
+                                                 * 0 = all-silent / unknown; used as adaptive
+                                                 * preemption guard — see S_AL_ContentSamples() */
     qboolean            defaultSound;           /* buzz on load failure */
     qboolean            inMemory;
     int                 lastTimeUsed;           /* Com_Milliseconds() */
@@ -719,6 +709,61 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     return normGain;
 }
 
+/* Scan PCM data backwards from the last frame to find the end of audible
+ * content.  Returns the number of frames that contain non-silent audio,
+ * i.e. (index of last frame above the silence threshold) + 1.
+ *
+ * This value drives the adaptive preemption guard in S_AL_StartSound: a
+ * source playing on a named channel will not be cut short until its audible
+ * content has been consumed.  Trailing digital silence, fade-outs, and
+ * encoder padding are excluded so channels are not held unnecessarily long.
+ *
+ * Threshold: |sample| > 64 for 16-bit (≈ −54 dB) / |sample−128| > 2 for
+ * 8-bit.  Quiet reverb tails below this level are treated as silence.
+ *
+ * Key design property: weapon fire sounds are authored so that their audible
+ * content length ≈ the weapon's fire interval (e.g. MAC-11: 150 ms crack in
+ * an 858 ms file).  The silent tail is padding.  Using contentSamples as the
+ * guard therefore naturally matches each weapon's cadence without any hard-
+ * coded per-weapon constants. */
+static int S_AL_ContentSamples( const void *pcm, const snd_info_t *info )
+{
+    int maxFrames, frame, c;
+
+    if ( !pcm || info->samples <= 0 || info->channels <= 0 || info->width <= 0
+         || info->size <= 0 )
+        return 0;
+
+    /* Guard against info->samples exceeding the actual buffer size. */
+    maxFrames = (int)( info->size / ( info->width * info->channels ) );
+    if ( maxFrames > info->samples )
+        maxFrames = info->samples;
+
+    if ( info->width == 2 ) {
+        const short *s = (const short *)pcm;
+        for ( frame = maxFrames - 1; frame >= 0; frame-- ) {
+            for ( c = 0; c < info->channels; c++ ) {
+                int v = s[ frame * info->channels + c ];
+                if ( v < 0 ) v = -v;
+                if ( v > 64 )
+                    return frame + 1;
+            }
+        }
+    } else if ( info->width == 1 ) {
+        const byte *s = (const byte *)pcm;
+        for ( frame = maxFrames - 1; frame >= 0; frame-- ) {
+            for ( c = 0; c < info->channels; c++ ) {
+                int v = (int)s[ frame * info->channels + c ] - 128;
+                if ( v < 0 ) v = -v;
+                if ( v > 2 )
+                    return frame + 1;
+            }
+        }
+    }
+
+    return 0;   /* all silent or unsupported bit depth */
+}
+
 /* Load a sound file into an AL buffer.  Returns the sfxHandle_t index
  * (>= 0) on success, 0 (the default-sound slot) on failure. */
 static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
@@ -768,9 +813,10 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
         fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
     }
 
-    /* Compute RMS normalisation gain before handing PCM to AL (while the
-     * decoded data is still accessible in the temp allocation). */
-    r->normGain = S_AL_CalcNormGain(pcm, &info);
+    /* Analyse PCM while it is still in the temp allocation — both passes are
+     * O(N) backward scans and complete in microseconds. */
+    r->normGain       = S_AL_CalcNormGain(pcm, &info);
+    r->contentSamples = S_AL_ContentSamples(pcm, &info);
 
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
@@ -1537,32 +1583,39 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     if (entchannel != CHAN_AUTO) {
         srcIdx = S_AL_FindSourceByChannel(entnum, entchannel);
         if (srcIdx >= 0) {
-            /* CHAN_WEAPON cross-sound preemption guard.
+            /* Adaptive content-based preemption guard (all channels).
              *
-             * Fire-animation sequences submit multiple distinct sounds on
-             * CHAN_WEAPON after a shot (e.g. DE-50: de_out.wav → back.wav →
-             * cock.wav).  Allowing any of those to preempt the primary fire
-             * boom silences the gunshot.  The fix has two layers:
+             * Before stopping the current source, query how many frames it
+             * has played and compare against the last non-silent frame of
+             * the sound (contentSamples, computed from PCM at load time).
+             * If audible content is still playing, drop the incoming request
+             * rather than cutting the sound short.
              *
-             *   1. Cross-sound block: if the incoming sfxHandle differs from
-             *      the currently playing one, drop the request entirely.  The
-             *      game re-submits animation events every frame; they will
-             *      naturally start once the channel is free.
+             * This handles every case uniformly:
+             *   • Long fire sounds (de_out.wav, 2.5 s content) are never
+             *     cut by short animation events (cock.wav) on CHAN_WEAPON.
+             *   • Full-auto fire sounds authored with content ≈ fire interval
+             *     (MAC-11: 150 ms crack in 858 ms file) expire their guard
+             *     right at the fire cadence, so rapid-fire restarts go
+             *     through naturally.
+             *   • Inside/outside weapon variants switch cleanly once the
+             *     current sound's audible content is consumed.
+             *   • Ambient/environment sounds (trucks, city noise) play to
+             *     their audible end before the map can retrigger them.
+             *   • Impact sounds play their full crack before being replaced.
              *
-             *   2. Same-sfx minimum-play guard: rapid-fire and full-auto
-             *      weapons restart the SAME fire sample on each shot.  Enforce
-             *      CHAN_WEAPON_MIN_PLAY_MS so the sample is not restarted
-             *      faster than the weapon's true fire rate (prevents micro-
-             *      glitches from duplicate per-frame events; 50 ms is 3× one
-             *      render frame at 60 fps and well below the fastest weapon
-             *      cadence in URT ≈ 120 ms/shot). */
-            if (entchannel == CHAN_WEAPON) {
-                if (s_al_src[srcIdx].sfx != sfx)
-                    return;
-                {
-                    int elapsed = Com_Milliseconds() - s_al_src[srcIdx].allocTime;
-                    if (elapsed < CHAN_WEAPON_MIN_PLAY_MS)
-                        return;
+             * Falls through immediately when contentSamples == 0 (all-
+             * silent or unknown file) so those are always preemptable. */
+            {
+                int curSfx = s_al_src[srcIdx].sfx;
+                if ( curSfx >= 0 && curSfx < s_al_numSfx ) {
+                    int content = s_al_sfx[curSfx].contentSamples;
+                    if ( content > 0 ) {
+                        ALint offset = 0;
+                        qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
+                        if ( offset < content )
+                            return;
+                    }
                 }
             }
 

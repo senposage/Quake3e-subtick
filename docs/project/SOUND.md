@@ -1133,43 +1133,58 @@ Build flag: compile with `NO_DMAHD=1` to disable dmaHD and use the standard DMA 
 
 ---
 
-## CHAN_WEAPON Preemption — Root Cause and Fix
+## Global Audio Preemption — Root Cause and Fix
 
 ### Root cause
 
-Fire-animation sequences submit multiple distinct sounds on `CHAN_WEAPON` after
-a shot.  For the DE-50, the sequence is: `de_out.wav` → `back.wav` →
-`cock.wav`.  Each subsequent animation sound arrived on the same channel and
-preempted the previous one.
+Q3's channel model lets any new sound on the same `(entnum, entchannel)` slot
+immediately stop whatever is currently playing there.  This created several
+distinct problems confirmed by `s_alDebugPlayback 1`:
 
-Initially the DE-50 boom (`de_out.wav`, 3.74 s) was being cut after only
-~30 ms (< 1% consumed) because the animation events were submitted on every
-render frame.  A time-based guard (`CHAN_WEAPON_MIN_PLAY_MS = 100`) was added
-in PR #90 to delay preemption until 100 ms had elapsed, but this only postponed
-the problem: `cock.wav` would still kill `de_out.wav` at ~130 ms, leaving
-97% of the boom unheard.
+| Pattern | Example | Effect |
+|---------|---------|--------|
+| CHAN_WEAPON cross-sfx | `de_out.wav` cut at 3% by `cock.wav` | Fire boom inaudible |
+| CHAN_WEAPON same-sfx | `mac11-inside.wav` cut at 17% by itself | Rapid-fire clips itself |
+| CHAN_WEAPON variant switch | `mac11-inside.wav` cut by `mac11-outside.wav` | Location switch early |
+| Ambient same-sfx | `truckpassby.wav` cut at 35–90% by itself | Pass-by sound truncated |
+| Impact cross-sfx | `concrete1.wav` cut at 5% by `brass2.wav` | Impact crack inaudible |
 
-### Fix (this PR)
+Earlier time-based guards (`CHAN_WEAPON_MIN_PLAY_MS = 100`, then 50 ms) only
+postponed the CHAN_WEAPON problem — after the guard expired, `cock.wav` still
+killed `de_out.wav`, and none of the other channels were protected at all.
 
-`S_AL_StartSound` now enforces two layers of protection for `CHAN_WEAPON`:
+### Fix — adaptive content-based guard
 
-1. **Cross-sound block** — if the incoming `sfxHandle` differs from the
-   currently playing one, the request is dropped entirely.  Mechanical
-   animation sounds (`back.wav`, `cock.wav`, …) will never cut the primary
-   fire boom short.  The game re-submits animation events every frame; they
-   start naturally once the fire channel is free.
+`S_AL_RegisterSound` now scans the decoded PCM **backward** to find the last
+frame above the silence threshold (≈ −54 dB for 16-bit).  This value,
+`contentSamples`, is stored in `alSfxRec_t` alongside `soundLength`.  The scan
+is an O(N) integer comparison loop — microseconds per file — done once while
+the PCM is already in RAM before being handed to OpenAL.
 
-2. **Same-sfx minimum-play guard** (`CHAN_WEAPON_MIN_PLAY_MS = 50 ms`) —
-   rapid-fire and full-auto weapons restart the same fire sample on each shot.
-   The guard prevents the sample from restarting faster than the weapon's true
-   fire rate, eliminating micro-glitches from duplicate per-frame events
-   (client prediction can submit the same event on consecutive frames ≤ 16 ms
-   apart; 50 ms is 3× that window).  The fastest full-auto weapon in URT fires
-   at ≈ 120 ms/shot (ZM300), so the guard never blocks a real trigger pull.
+`S_AL_StartSound` uses `AL_SAMPLE_OFFSET` to query how many frames the current
+source has played.  If `offset < contentSamples`, the incoming request is
+dropped.  If the current sound has consumed its audible content (or the file is
+all-silent, `contentSamples == 0`), preemption proceeds normally.
 
-### Effect on debug output
+This single rule handles every case without any channel-specific constants:
 
-With `s_alDebugPlayback 1` you should no longer see `PREEMPT` lines where the
-incoming sound differs from the outgoing sound on `chan=2` (`CHAN_WEAPON`).
-Same-sfx restarts (rapid fire) will still appear at ≥ 100 ms elapsed.  Impact
-sounds on other channels are unaffected.
+- **DE-50 `de_out.wav`** — ~2.5 s audible content in a 3.74 s file.
+  `cock.wav` arriving at 130 ms is dropped.  The fire boom plays fully.
+- **MAC-11 `mac11-inside.wav`** — 858 ms file, fire rate 150 ms.  Audible
+  crack ≈ 150 ms; silent tail ≈ 708 ms.  The guard expires at exactly the fire
+  cadence, so every shot restarts cleanly without clipping its predecessor.
+- **MAC-11 inside → outside** — location variant switch at 160 ms.  Guard
+  (≈ 150 ms) has just expired; the outside variant is accepted immediately.
+- **`truckpassby.wav`** — 9.2 s ambient pass-by.  Guard holds for the full
+  audible length; the map can only retrigger once the truck has passed.
+- **Impact sounds** — each crack plays to its audible end before the slot is
+  reused for the next impact or casing.
+
+### Design note — why no cache
+
+The PCM scan is ≈ 0.04 ms per file.  Across a full session (≤ 1 000 sounds
+loaded lazily on first use), total cost is under 50 ms spread across the whole
+session.  A persistent cache file would add file-I/O overhead, staleness risk
+on pk3 updates, and ~100 extra lines of code in exchange for an imperceptible
+saving.  The value is computed inline at load time and stored in the existing
+`alSfxRec_t` pool.
