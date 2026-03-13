@@ -304,6 +304,28 @@ s_alReverb 1  s_alOcclusion 1  →  + static EFX reverb room
 s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 ```
 
+#### CHAN_WEAPON minimum play-time guard
+
+The root cause of the DE-50 "no sound" regression was confirmed by
+`s_alDebugPlayback 1`: all three DE-50 fire-animation sounds (`de_out.wav`,
+`back.wav`, `cock.wav`) were submitted on `CHAN_WEAPON` in rapid succession.
+Each one preempted the previous after only **~30 ms (1 % of the 3.74 s shot
+sound)**, making the gunshot completely inaudible.
+
+Fix (in `S_AL_StartSound`): before preempting a sound on `CHAN_WEAPON`, check
+how long the current sound has been playing using `allocTime`.  If less than
+`CHAN_WEAPON_MIN_PLAY_MS` (100 ms), the new request is silently dropped and
+the engine retries naturally on the next frame.
+
+| Why 100 ms |
+|---|
+| Covers the initial crack/transient of the DE-50 shot before mechanical cycling sounds (slide back, hammer cock) take over |
+| Does **not** block the Negev, which fires `negev_sil.wav` every ~100 ms — the guard expires at the same cadence as the fire rate |
+| Semi-auto weapons physically cannot fire faster than 100 ms/round, so no legitimate preemption is blocked |
+
+With the guard in place the heard sequence becomes:  
+**crack (100 ms+) → back.wav (~196 ms) → cock.wav (~370 ms)** — matching the intended animation audio.
+
 #### Vanilla-behaviour notes
 
 - **`s_alReverb 0` (default)**: no EFX reverb, matches plain dma/Q3 audio.
@@ -1108,3 +1130,57 @@ When dmaHD is active and OpenAL is unavailable (`USE_OPENAL=0` or OpenAL library
 - Sound loading goes through `dmaHD_LoadSound` for HRTF pre-processing
 
 Build flag: compile with `NO_DMAHD=1` to disable dmaHD and use the standard DMA backend.
+
+---
+
+## Pending Work — continuation from PR `copilot/aldbg-issue-89-sound-preemption`
+
+> **Context for the next session.**  This PR cannot be merged without closing
+> it first (GitHub limitation on the agent branch).  The work below was agreed
+> at the end of that session and must be picked up in a **new PR against
+> `main`** once the current one is closed.
+
+### What was fixed in this PR
+
+The root cause of the DE-50 (and all-weapons) audio regression was confirmed
+by `s_alDebugPlayback 1`:
+
+- All three fire-animation sounds (`de_out.wav`, `back.wav`, `cock.wav`) share
+  `CHAN_WEAPON` and are submitted in a burst every frame.
+- Each sound preempted the previous after only **~30 ms (1 % of the 3.74 s
+  shot sample)**, making the gunshot inaudible.
+- This affects **every weapon** to varying degrees — longer samples suffer most
+  (DE-50 is worst; shorter samples tolerate it better but are still impacted).
+
+Fix: `CHAN_WEAPON_MIN_PLAY_MS = 100` guard in `S_AL_StartSound` — a new
+CHAN_WEAPON sound is dropped if the currently-playing one has been alive for
+less than 100 ms.  The game re-fires events every frame so the new sound gets
+through naturally once the window expires.
+
+### What still needs to be done (next PR)
+
+The commits listed below were **bandaid attempts** made before the real root
+cause was known.  Now that the preemption bug is fixed, these changes should
+be reviewed and any hacks that no longer serve a purpose should be **reverted
+or stripped out**:
+
+| Commit | Title | Suspected bandaid |
+|--------|-------|-------------------|
+| `0c051a08` | Add `s_alDirectChannels` cvar to control `AL_SOFT_direct_channels` | Added to work around perceived muffling that was actually caused by the preemption bug cutting the crack; may not be needed |
+| `4a718e86` | Guarantee all-cvars-zero passthrough: Layer3 HRTF force-disable, live-vol outside EFX guard, diagnostic sndinfo | Large omnibus patch; audit each piece for necessity |
+| `a67799c9` | Fix OpenAL weapon audio: explicit HRTF off, `s_alEFX` cvar, fix `s_volume²` gain | Some items (e.g. HRTF-off) may have been addressing a perceived problem caused by preemption |
+| `b68f9b1c` | Fix DE-50 wet-blanket audio: `AL_DIRECT_CHANNELS_SOFT` for local sources, `AL_FILTER_NULL` start for 3D, extend weapon occlusion bypass | Targeted at "wet blanket" symptom that was actually the crack being cut; review whether `AL_FILTER_NULL` start and the path-based occlusion bypass are still correct |
+| Earlier commits (PRs #84–#87) | Various audio quality / occlusion / pool-management patches | Review each for necessity now the primary bug is resolved |
+
+**Suggested approach for the cleanup PR:**
+
+1. Start from `main` (after merging this PR).
+2. Work backwards through the commits above, one at a time.
+3. For each: build + test in-game; if removing it makes no perceptible audio
+   difference, drop it.  If it still serves a distinct purpose (e.g. a genuine
+   EFX bug fix, a real pool-management improvement), keep it with a clearer
+   comment explaining why.
+4. Keep `s_alDebugPlayback` — it is a useful permanent diagnostic tool.
+5. Keep the `CHAN_WEAPON_MIN_PLAY_MS` guard — it is the actual fix.
+6. Keep the `WORLD_ENTITY_MAX_CHANNELS` cap and dedup windows — they address a
+   real separate problem (bullet-impact pool exhaustion at high `sv_fps`).
