@@ -241,12 +241,43 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | `s_alOccHFFloor` | `0.50` | Floor of `AL_LOWPASS_GAINHF` (high-frequency content) for fully-blocked sources [0–1]. `1.0` = no HF filtering (only volume changes). `0.0` = bass-only thud through walls. Default 0.50 preserves enough weapon crack to remain recognisable. Old formula `occ²` reached near-zero HF even at moderate occlusion — this was the main cause of the "tinny pop" corner transition. |
 | `s_alOccPosBlend` | `0.25` | How far to redirect HRTF apparent-source position towards the nearest acoustic gap [0–1]. `0.0` = always true source position (best direction accuracy). `1.0` = full gap redirect (old behaviour — confused weapon direction). Default 0.25: subtle gap hint that aids "around the corner" perception without sacrificing localizability. |
 | `s_alDebugOcc` | `0` | Print per-source occlusion state each frame. Each occluded source shows entity, distance, trace target, smoothed gain, GAIN and GAINHF values. Use to identify which sounds are being filtered and by how much. Not archived. |
+| `s_alDebugPlayback` | `0` | Playback diagnostics for isolating audio quality issues. **`1`** = log every **PREEMPT** (sound cut short by a new sound on the same channel) and every **rate-mismatch** at load time (file Hz ≠ device Hz, which forces the internal resampler). **`2`** = also log every natural completion. Each line shows sound name, samples played / total, % consumed, file rate, and device rate. Use `1` to determine whether the DE-50 boom is being **truncated** (preempt line, low %) or **degraded** by the resampler (rate-mismatch lines at registration). Not archived — set before loading a map to catch registration warnings. |
 | `s_alVolSelf` | `1.0` | Own player/weapon/breath volume multiplier **[0–1.5]** |
 | `s_alVolOther` | `0.7` | Other player/entity volume multiplier **[0–1.0]** — capped, anti-cheat |
 | `s_alVolEnv` | `0.3` | Looping ambient/environmental volume multiplier **[0–1.0]** — capped |
 | `s_alVolUI` | `0.8` | Hit-marker/kill-confirmation/UI sound multiplier **[0–1.0]** — `StartLocalSound` (entnum=0) only, independent of weapon volume |
 
-#### Selecting an output device (`/s_devices`)
+#### Diagnosing weapon-sound quality with `s_alDebugPlayback`
+
+`s_alDebugPlayback` produces three kinds of console lines — use them together to
+pinpoint whether a broken weapon sound is a **truncation** problem or a
+**resampler** problem:
+
+| Prefix | Colour | What it means |
+|--------|--------|---------------|
+| `[alDbg] rate mismatch` | Yellow | Printed when a file is loaded and its Hz ≠ device Hz. This is the condition that forces OpenAL's internal resampler to run. If the DE-50 shot file appears here, the resampler is active on it. |
+| `[alDbg] PREEMPT` | Red | A playing sound was cut short because a new sound started on the same channel (`chan=N`) for the same entity. `played X / Y smp (Z%)` shows how far through the sample it got. A low % on the DE boom means it is being truncated — look at the "by:" field to see which sound caused it. |
+| `[alDbg] done` | Green | Natural completion (level 2 only). Should show ~100% for correctly played one-shot sounds. |
+
+**Workflow:**
+
+```
+// 1. Before loading any map (catches registration warnings):
+s_alDebugPlayback 1
+
+// 2. Load the map; watch for yellow "rate mismatch" lines on DE-50 sounds.
+//    The startup line "S_AL: device mixing frequency: NNNNN Hz" tells you
+//    what rate the device is running at.
+
+// 3. Fire the DE-50.  Watch for:
+//      RED   PREEMPT lines  → truncation/channel-preemption is the bug
+//      no PREEMPT + yellow rate-mismatch at load → resampler is the bug
+
+// 4. For full natural-completion audit:
+s_alDebugPlayback 2
+```
+
+
 
 Type `/s_devices` in the console for a numbered pick-list:
 
