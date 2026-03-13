@@ -191,6 +191,23 @@ static float					s_dmaHD_limiterGain = 1.0f;
 #define DMAHD_INT24_MAX    0x7FFFFF         //  8388607
 #define DMAHD_INT24_MIN    (-0x800000)      // -8388608
 
+// Number of output samples to linearly fade to zero at the end of every
+// resampled sound buffer.  The 4-point Hermite interpolator reads x+1 and
+// x+2 beyond the last valid input sample; dmaHD_GetSampleRaw wraps those
+// indices modulo soundLength (seamless-loop semantics).  For a non-looping
+// sound this injects the beginning-of-sound amplitude into the final 1-2
+// output samples.  When the sound has trailing silence the preceding samples
+// are all zero, so the sudden spike to the attack level followed by silence
+// produces an audible click/pop.  Fading the last DMAHD_ENDPAD samples to
+// zero eliminates the artefact; at 48 kHz, 16 samples = 0.33 ms — inaudible.
+#define DMAHD_ENDPAD       16
+
+// Tracks the last s_soundtime value processed by dmaHD_Update_Mix so that
+// the mixer is not called twice for the same hardware position.  Kept at
+// module scope (not function-local static) so it can be reset when
+// s_soundtime is reinitialised by S_StopAllSounds / vid_restart.
+static int dmaHD_lastsoundtime = -1;
+
 qboolean g_tablesinit = qfalse;
 float g_voltable[256];
 
@@ -490,6 +507,39 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
         lp_data = lp_a * (float)bsample + lp_inva * lp_last;
         buffer[idx_lp++] = SMPCLAMP(lp_data);
         lp_last = lp_data;
+    }
+
+    /* --- End-of-buffer boundary fix -------------------------------------------
+     * The 4-point Hermite interpolator reads x+1 and x+2 beyond the last
+     * valid input sample; dmaHD_GetSampleRaw wraps those indices back to 0
+     * (loop semantics).  For a non-looping sound this contaminates the last
+     * 1-2 output samples with beginning-of-sound amplitude.
+     *
+     * The no-interpolation path used for the bass sub-buffer also rounds up
+     * at the boundary (FLOAT_DECIMAL_PART > 0.5 → index++ → wraps to 0),
+     * affecting the very last bass sample the same way.
+     *
+     * Impact is most severe on silence-padded WAV files (e.g. a 1.5-second
+     * ding stored in a 4-second file): the 2.5 seconds of trailing zeros keep
+     * the DMA buffer at silence, so when the last output sample suddenly
+     * carries the attack amplitude the hardware produces a loud click/pop the
+     * instant playback ends — reproducibly at exactly 3-4 s after the kill.
+     *
+     * Fix: linearly fade the last DMAHD_ENDPAD samples of both sub-buffers to
+     * zero.  For sounds that already decay to silence the fade is completely
+     * inaudible; for others it adds at most 0.33 ms of extra tail at 48 kHz.
+     */
+    {
+        int n   = (outcount < DMAHD_ENDPAD) ? outcount : DMAHD_ENDPAD;
+        int div = (n > 1) ? (n - 1) : 1;
+        int i;
+        for (i = 0; i < n; i++)
+        {
+            int scale256 = ((n - 1 - i) * 256) / div;
+            int idx      = outcount - n + i;
+            buffer[idx]           = (short)(((int)buffer[idx]           * scale256) >> 8);
+            buffer[outcount + idx] = (short)(((int)buffer[outcount + idx] * scale256) >> 8);
+        }
     }
 
     sfx->soundData = (sndBuffer*)buffer;
@@ -1418,7 +1468,6 @@ void dmaHD_Update_Mix(void)
     int samps;
     static int lastTime = 0.0f;
     int mixahead, op, thisTime, sane;
-    static int lastsoundtime = -1;
 
     if (!s_soundStarted || s_soundMuted) return;
 
@@ -1427,8 +1476,23 @@ void dmaHD_Update_Mix(void)
     // Updates s_soundtime
     S_GetSoundtime();
 
-    if (s_soundtime <= lastsoundtime) return;
-    lastsoundtime = s_soundtime;
+    /* Guard against s_soundtime being reset (vid_restart, level change).
+     * If it jumped backward by more than one second's worth of samples the
+     * sound subsystem was reinitialised (s_soundtime set back to 0 by
+     * S_Base_Init / S_Base_StopAllSounds).  Without this check the function-
+     * local static lastsoundtime would remain at the old large value and the
+     * mixer would silently skip every call until s_soundtime climbed back up —
+     * causing complete silence for several seconds after a vid_restart. */
+    if ((dmaHD_lastsoundtime - s_soundtime) > (int)dma.speed)
+    {
+        Com_DPrintf(S_COLOR_YELLOW "dmaHD: s_soundtime reset detected (%d -> %d), resetting mixer state\n",
+            dmaHD_lastsoundtime, s_soundtime);
+        dmaHD_lastsoundtime = s_soundtime - 1;
+        s_dmaHD_limiterGain = 1.0f;
+    }
+
+    if (s_soundtime <= dmaHD_lastsoundtime) return;
+    dmaHD_lastsoundtime = s_soundtime;
 
     // clear any sound effects that end before the current time,
     // and start any new sounds

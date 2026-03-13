@@ -352,7 +352,70 @@ dmaHD was audited for correctness at sample rates above the original 44 100 Hz t
 | LP (bass) filter coefficient | `lp_a = 0.03 × (44100 / dma.speed)` | ✅ | Maintains ~211 Hz cutoff at all rates |
 | Sound storage layout | High-freq at `[0..soundLength]`, bass at `[soundLength..2×soundLength]` | ✅ | Both halves use `outcount` samples at `dma.speed` |
 
-**No bugs were found.** The filter coefficient scaling (`44100.0f / dma.speed`) introduced in PR 67 is mathematically correct for first-order IIR filters at the small-coefficient approximation used here. Overflow in `CALCSMPOFF` is not possible at supported sample rates (≤ 48 000 Hz) for any in-map distance.
+The filter coefficient scaling (`44100.0f / dma.speed`) introduced in PR 67 is mathematically correct for first-order IIR filters at the small-coefficient approximation used here. Overflow in `CALCSMPOFF` is not possible at supported sample rates (≤ 48 000 Hz) for any in-map distance.
+
+### Audio Click/Pop at End of Sound — Bug & Fix [URT]
+
+**Symptoms (PRs #69, #70, #73, issue continuation):**
+A loud click/pop is audible in both channels at the exact moment a kill-sound finishes playing — approximately 3–4 seconds after a kill event on Windows with WASAPI. The sound is a 16-bit PCM stereo WAV file at 22 050 Hz, approximately 4 seconds long: ~1.5 seconds of actual ding audio followed by ~2.5 seconds of digital silence (zero samples). The click is reproducible on every kill.
+
+**Root cause — Hermite interpolation boundary wraparound (`dmaHD_ResampleSfx`):**
+
+The 4-point Hermite interpolator (`dmaHD_GetInterpolatedSampleHermite4pt3oX`) reads four neighbouring input samples — `x−1`, `x`, `x+1`, `x+2` — and passes them to `dmaHD_GetSampleRaw_*`. That function uses **modulo wrapping** for out-of-range indices (designed for seamless-loop sounds):
+
+```c
+if (index < 0) index += samples;
+else if (index >= samples) index -= samples;  // wraps to 0 for index == samples
+```
+
+At the very last output sample, `x = soundLength − 1` (last valid input sample), so:
+
+- `x+1 = soundLength` → wraps to **0** (first sample = sharp attack peak of the ding)
+- `x+2 = soundLength + 1` → wraps to **1** (also near the attack peak)
+
+The `dmaHD_GetNoInterpolationSample` path used for the bass sub-buffer also wraps: at the final output sample, `FLOAT_DECIMAL_PART > 0.5` causes `index++` which makes `index = soundLength`, wrapping to 0.
+
+**Why silence-padded files make this maximally audible:**
+
+With 2.5 seconds of trailing zeros in the source file:
+- Output samples `outcount − 120 000` through `outcount − 2` are all zero (silence)
+- Output sample `outcount − 1` (the last) is the Hermite-interpolated combination of near-zero end-of-sound samples and sample[0] (the large attack peak) — a value of roughly **±15 000** for a typical ding sound
+- The hardware DMA plays 2.5 s of silence, then encounters this spike, then drops to silence again → **step discontinuity → loud click in both channels**
+
+The timing matches exactly: `outcount / dma.speed ≈ 192 000 / 48 000 = 4.0 s` after the sound starts.
+
+**Fix applied (`dmaHD_ResampleSfx`):**
+
+After the main resampling loop, a linear fade-out is applied to the last `DMAHD_ENDPAD` (16) samples of both the high-frequency and bass sub-buffers:
+
+```c
+int n   = (outcount < DMAHD_ENDPAD) ? outcount : DMAHD_ENDPAD;
+int div = (n > 1) ? (n - 1) : 1;   // guard: div by zero when n == 1
+for (i = 0; i < n; i++) {
+    int scale256 = ((n - 1 - i) * 256) / div;   // 256→0 over n samples
+    int idx = outcount - n + i;
+    buffer[idx]            = (short)(((int)buffer[idx]            * scale256) >> 8);
+    buffer[outcount + idx] = (short)(((int)buffer[outcount + idx] * scale256) >> 8);
+}
+```
+
+- The last output sample (`i = n−1`) is forced to **zero**, eliminating the Hermite spike.
+- For sounds that already decay to silence (natural fade, or silence-padded) the fade is imperceptible — multiplying near-zero by a linearly-decreasing factor remains near-zero.
+- At 48 000 Hz, 16 samples = **0.33 ms** — shorter than the threshold of human auditory perception for transients.
+- Covers all common source rates: at 11 025 Hz (`stepscale ≈ 0.23`) up to 5 output samples can be contaminated; `DMAHD_ENDPAD = 16` provides a safe margin at any supported input rate.
+
+**Secondary fix — `dmaHD_lastsoundtime` reset guard (`dmaHD_Update_Mix`):**
+
+The previous `static int lastsoundtime = -1;` was function-local, so it was never reset when `s_soundtime` was reinitialised to 0 by `S_Base_Init` / `S_Base_StopAllSounds` (e.g., `vid_restart`, level change, disconnect/reconnect). After such a reset, `s_soundtime (0) <= lastsoundtime (large)` caused `dmaHD_Update_Mix` to silently skip **all** painting until `s_soundtime` climbed back up to the old value — potentially several seconds of complete silence.
+
+The variable was promoted to module scope as `dmaHD_lastsoundtime`. A guard resets it (and the peak-limiter gain) if `s_soundtime` drops more than one second below the last seen value:
+
+```c
+if ((dmaHD_lastsoundtime - s_soundtime) > (int)dma.speed) {
+    dmaHD_lastsoundtime = s_soundtime - 1;
+    s_dmaHD_limiterGain = 1.0f;
+}
+```
 
 ---
 
