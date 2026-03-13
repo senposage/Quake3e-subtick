@@ -199,6 +199,14 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_SOUND_FULLVOLUME   80.0f
 #define S_AL_SOUND_MAXDIST      1330.0f   /* 80 + 1/0.0008 */
 
+/* Target RMS level for ambient-sound loudness normalisation.
+ * -18 dBFS gives a comfortable background-ambiance level; individual
+ * sounds are scaled so their measured RMS matches this reference before
+ * s_alVolEnv is applied on top.  Only ambient/looping sources use this
+ * — one-shot world and local sounds are deliberately left un-normalised
+ * so weapon impacts, footstep ticks, etc. retain their designed levels. */
+#define S_AL_AMBIENT_TARGET_RMS  0.125f   /* ≈ -18 dBFS */
+
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
@@ -207,6 +215,7 @@ typedef struct alSfxRec_s {
     qboolean            defaultSound;           /* buzz on load failure */
     qboolean            inMemory;
     int                 lastTimeUsed;           /* Com_Milliseconds() */
+    float               normGain;              /* RMS loudness-normalisation factor for ambient use */
     struct alSfxRec_s  *next;                   /* hash chain */
 } alSfxRec_t;
 
@@ -324,6 +333,7 @@ static cvar_t *s_alDynamicReverb;/* 0 = static EFX, 1 = ray-traced acoustic env 
 static cvar_t *s_alVolSelf;      /* own player/weapon volume multiplier [0..1.5] */
 static cvar_t *s_alVolOther;     /* other entity/player volume multiplier [0..1.0] */
 static cvar_t *s_alVolEnv;       /* looping ambient volume multiplier [0..1.0] */
+static cvar_t *s_alLocalSelf;    /* force own-entity sounds local even with explicit origin */
 
 /* =========================================================================
  * Section 5 — Library loading helpers
@@ -550,6 +560,75 @@ static alSfxRec_t *S_AL_AllocSfx( void )
     }
 }
 
+/* Compute a per-sample RMS loudness-normalisation gain for ambient sources.
+ *
+ * Scans the decoded PCM data (up to S_AL_NORM_SCAN_SAMPLES per channel),
+ * calculates the root-mean-square level, and returns the gain multiplier
+ * required to bring that level to S_AL_AMBIENT_TARGET_RMS.
+ *
+ * Returns 1.0 (no adjustment) for:
+ *   • empty or silent files
+ *   • unsupported bit depths
+ *
+ * The result is clamped to [0.25, 4.0] (±12 dB) so very quiet or very loud
+ * outliers are still audible / not ear-splitting after normalization. */
+#define S_AL_NORM_SCAN_SAMPLES  (44100 * 4)   /* at most 4 s worth of samples */
+
+static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
+{
+    double       sumSq = 0.0;
+    long         count, i;
+    float        rms, normGain;
+    long         maxSamples;
+
+    if (!pcm || info->samples <= 0 || info->size <= 0)
+        return 1.0f;
+
+    /* Cap scan length to keep load times short on very long ambient loops. */
+    maxSamples = info->samples;
+    if (maxSamples > S_AL_NORM_SCAN_SAMPLES)
+        maxSamples = S_AL_NORM_SCAN_SAMPLES;
+
+    if (info->width == 2) {
+        /* 16-bit signed PCM */
+        const short *s = (const short *)pcm;
+        long n = maxSamples * info->channels;
+        /* guard against size underflow */
+        if (n > (long)(info->size / 2))
+            n = (long)(info->size / 2);
+        for (i = 0; i < n; i++) {
+            double v = s[i] / 32768.0;
+            sumSq += v * v;
+        }
+        count = n;
+    } else if (info->width == 1) {
+        /* 8-bit unsigned PCM (centre = 128) */
+        const byte *s = (const byte *)pcm;
+        long n = maxSamples * info->channels;
+        if (n > (long)info->size)
+            n = (long)info->size;
+        for (i = 0; i < n; i++) {
+            double v = (s[i] - 128) / 128.0;
+            sumSq += v * v;
+        }
+        count = n;
+    } else {
+        return 1.0f;  /* unsupported depth */
+    }
+
+    if (count == 0) return 1.0f;
+
+    rms = (float)sqrt(sumSq / (double)count);
+    if (rms < 1e-6f) return 1.0f;   /* silent — don't amplify noise floor */
+
+    normGain = S_AL_AMBIENT_TARGET_RMS / rms;
+    /* Clamp to ±12 dB so outliers stay sane */
+    if (normGain > 4.0f)   normGain = 4.0f;
+    if (normGain < 0.25f)  normGain = 0.25f;
+
+    return normGain;
+}
+
 /* Load a sound file into an AL buffer.  Returns the sfxHandle_t index
  * (>= 0) on success, 0 (the default-sound slot) on failure. */
 static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
@@ -587,6 +666,7 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
         Com_Printf(S_COLOR_YELLOW "S_AL: couldn't load %s\n", sample);
         r->defaultSound = qtrue;
         r->inMemory     = qtrue;
+        r->normGain     = 1.0f;
         r->lastTimeUsed = Com_Milliseconds();
         return (sfxHandle_t)(r - s_al_sfx);
     }
@@ -597,6 +677,10 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     if (info.channels == 4) {
         fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
     }
+
+    /* Compute RMS normalisation gain before handing PCM to AL (while the
+     * decoded data is still accessible in the temp allocation). */
+    r->normGain = S_AL_CalcNormGain(pcm, &info);
 
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
@@ -742,6 +826,10 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
 
     VectorCopy(srcOrigin, acousticPos);
 
+    /* Guard: CM_BoxTrace with handle 0 will crash if no map is loaded. */
+    if (CM_NumInlineModels() <= 0)
+        return 1.0f;
+
     CM_BoxTrace(&tr, s_al_listener_origin, srcOrigin,
                 vec3_origin, vec3_origin,
                 0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
@@ -835,6 +923,11 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         src->category = SRC_CAT_WORLD;
 
     catVol = S_AL_GetCategoryVol(src->category);
+    /* Ambient sources additionally apply per-sample RMS normalisation so
+     * that different map environments have consistent perceived loudness
+     * without the player having to adjust s_alVolEnv every map. */
+    if (src->category == SRC_CAT_AMBIENT)
+        catVol *= r->normGain;
 
     if (origin)
         VectorCopy(origin, src->origin);
@@ -1187,23 +1280,28 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     srcIdx = S_AL_GetFreeSource();
     if (srcIdx < 0) return;
 
-    if (origin) {
+    if (entnum == s_al_listener_entnum &&
+            (!s_alLocalSelf || s_alLocalSelf->integer)) {
+        /* Own-entity sound: always non-spatialized regardless of whether an
+         * explicit origin was supplied.  The origin passed by the game code
+         * is the player's position at the moment the event fired; with URT's
+         * jumping/sliding physics that position can be significantly stale by
+         * the time the frame is rendered, causing footstep and landing sounds
+         * to appear to come from behind the player.  Treating them as local
+         * (relative-mode, position 0,0,0) keeps them firmly at the listener
+         * regardless of velocity — matching snd_dma.c behaviour.
+         * Disable with s_alLocalSelf 0 to restore the old positional path. */
+        VectorClear(sndOrigin);
+        isLocal = qtrue;
+    } else if (origin) {
         /* Caller supplied a world-space origin — use it as-is. */
         VectorCopy(origin, sndOrigin);
         isLocal = qfalse;
-    } else if (entnum == s_al_listener_entnum) {
-        /* Sound from the local player's own entity: non-spatialized so that
-         * weapon fire, footsteps, etc. are heard at full volume regardless of
-         * HRTF positioning.  This mirrors the base snd_dma.c behaviour where
-         * listener-entity sounds are treated as local. */
-        VectorClear(sndOrigin);
-        isLocal = qtrue;
     } else {
-        /* No origin given but it is a world entity: look up its last known
-         * position from the per-entity cache (filled by UpdateEntityPosition
-         * and Respatialize).  If the cache is still zero the sound will be
-         * placed at the world origin; UpdateEntityPosition will correct the
-         * AL source position on the very next frame. */
+        /* No origin given: look up entity's last known position from cache
+         * (filled by UpdateEntityPosition and Respatialize).  If the cache
+         * is still zero the sound starts at the world origin and is corrected
+         * on the very next frame by UpdateEntityPosition. */
         if (entnum >= 0 && entnum < MAX_GENTITIES)
             VectorCopy(s_al_entity_origins[entnum], sndOrigin);
         else
@@ -1212,12 +1310,11 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     }
 
     vol = S_AL_GetMasterVol();
-    /* fixed_origin=true only when the caller supplied an explicit world-space
-     * position.  Entity-cache positions (origin==NULL, non-listener entity)
-     * use fixed_origin=false so that S_AL_UpdateEntityPosition can keep
-     * moving the source as the entity moves each frame. */
+    /* fixed_origin: lock position only for explicit world-space origins that
+     * belong to other entities.  Own-entity sounds are always local (above),
+     * so fixed_origin is irrelevant for them. */
     S_AL_SrcSetup(srcIdx, sfx, isLocal ? NULL : sndOrigin,
-                  (origin != NULL), entnum, entchannel, vol, isLocal,
+                  (origin != NULL && !isLocal), entnum, entchannel, vol, isLocal,
                   qfalse /* one-shot entity sound, not ambient */);
 
     r->lastTimeUsed = Com_Milliseconds();
@@ -1489,10 +1586,16 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
     if (entityNum >= 0 && entityNum < MAX_GENTITIES)
         VectorCopy(origin, s_al_entity_origins[entityNum]);
 
-    /* Move any active source attached to this entity */
+    /* Move any active source attached to this entity.
+     * Skip local (listener-relative) sources: they use AL_SOURCE_RELATIVE=TRUE
+     * and must stay at position (0,0,0).  Setting them to a world-space origin
+     * while they are in relative mode causes the sound to appear off to the
+     * side or behind the player (the world coordinate is treated as a relative
+     * offset from the listener instead of an absolute position). */
     for (i = 0; i < s_al_numSrc; i++) {
         if (!s_al_src[i].isPlaying) continue;
-        if (s_al_src[i].entnum == entityNum && !s_al_src[i].fixed_origin) {
+        if (s_al_src[i].entnum == entityNum && !s_al_src[i].fixed_origin
+                && !s_al_src[i].isLocal) {
             VectorCopy(origin, s_al_src[i].origin);
             qalSource3f(s_al_src[i].source, AL_POSITION,
                         origin[0], origin[1], origin[2]);
@@ -1566,6 +1669,9 @@ static void S_AL_UpdateDynamicReverb( void )
     if (!s_alReverb        || !s_alReverb->integer)           return;
     if (!s_alDynamicReverb || !s_alDynamicReverb->integer)    return;
     if (s_al_inwater)                                         return;
+    /* No map loaded yet (main menu, pre-game) — CM_BoxTrace with handle 0
+     * would crash with "bad handle 0 < 0 < 256" when cm.numSubModels == 0. */
+    if (CM_NumInlineModels() <= 0)                            return;
 
     /* Detect frame-counter reset (map load / StopAllSounds) */
     snap = (s_al_loopFrame < lastFrame || curDecay < 0.f);
@@ -1736,10 +1842,15 @@ static void S_AL_Update( int msec )
             if (vSelf != lastVolSelf || vOther != lastVolOther || vEnv != lastVolEnv) {
                 int j;
                 for (j = 0; j < s_al_numSrc; j++) {
+                    float catGain;
                     if (!s_al_src[j].isPlaying) continue;
+                    catGain = S_AL_GetCategoryVol(s_al_src[j].category);
+                    /* Re-apply per-sample normalisation for ambient sources */
+                    if (s_al_src[j].category == SRC_CAT_AMBIENT &&
+                            s_al_src[j].sfx >= 0 && s_al_src[j].sfx < s_al_numSfx)
+                        catGain *= s_al_sfx[s_al_src[j].sfx].normGain;
                     qalSourcef(s_al_src[j].source, AL_GAIN,
-                        (s_al_src[j].master_vol / 255.f) *
-                        S_AL_GetCategoryVol(s_al_src[j].category));
+                        (s_al_src[j].master_vol / 255.f) * catGain);
                 }
                 lastVolSelf  = vSelf;
                 lastVolOther = vOther;
@@ -2123,9 +2234,12 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alVolOther = Cvar_Get("s_alVolOther", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolOther, "0", "1.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolOther, "Other player / entity one-shot volume multiplier [0.0-1.0]. Capped at 1.0 — can turn down but not amplify (anti-cheat).");
-    s_alVolEnv = Cvar_Get("s_alVolEnv", "1.0", CVAR_ARCHIVE_ND);
+    s_alVolEnv = Cvar_Get("s_alVolEnv", "0.5", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolEnv, "0", "1.0", CV_FLOAT);
-    Cvar_SetDescription(s_alVolEnv, "Looping ambient / environmental sound volume multiplier [0.0-1.0]. Capped at 1.0.");
+    Cvar_SetDescription(s_alVolEnv, "Looping ambient / environmental sound volume multiplier [0.0-1.0]. Default 0.5. Per-sample RMS normalisation is applied automatically so different map environments have consistent loudness. Capped at 1.0.");
+    s_alLocalSelf = Cvar_Get("s_alLocalSelf", "1", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alLocalSelf, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alLocalSelf, "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized regardless of any world-space origin supplied by the game. Prevents stale-position artefacts caused by URT jumping/sliding physics. Default 1.");
 
     /* Load library */
     if (!S_AL_LoadLibrary())
