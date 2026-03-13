@@ -25,6 +25,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "snd_codec.h"
 #include "snd_local.h"
 #include "snd_public.h"
+#ifdef USE_OPENAL
+#include "snd_openal.h"
+#endif
 
 cvar_t *s_volume;
 cvar_t *s_musicVolume;
@@ -440,6 +443,15 @@ void S_Init( void )
 		Cmd_AddCommand( "s_list", S_SoundList );
 		Cmd_AddCommand( "s_stop", S_StopAllSounds );
 		Cmd_AddCommand( "s_info", S_SoundInfo );
+
+		if ( !started ) {
+#ifdef USE_OPENAL
+			started = S_AL_Init( &si );
+			if ( !started ) {
+				Com_Printf( "S_AL_Init failed, falling back to base sound\n" );
+			}
+#endif
+		}
 
 		if ( !started ) {
 			started = S_Base_Init( &si );

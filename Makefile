@@ -49,6 +49,7 @@ USE_AUTH          = 1
 USE_SERVER_DEMO  = 1
 USE_URT_DEMO     = 1
 NO_DMAHD         = 0
+USE_OPENAL       = 1
 
 # valid options: opengl, vulkan, opengl2
 RENDERER_DEFAULT = opengl
@@ -381,6 +382,11 @@ endif
 
 ifeq ($(NO_DMAHD),1)
   BASE_CFLAGS += -DNO_DMAHD
+endif
+
+ifeq ($(USE_OPENAL),1)
+  BASE_CFLAGS += -DUSE_OPENAL
+  BASE_CFLAGS += -I$(MOUNT_DIR)/libopenal/include
 endif
 
 
@@ -1297,6 +1303,10 @@ endif # !MINGW
 
 ifneq ($(NO_DMAHD),1)
     Q3OBJ += $(B)/client/snd_dmahd.o
+endif
+
+ifeq ($(USE_OPENAL),1)
+    Q3OBJ += $(B)/client/snd_openal.o
 endif
 
 # client binary

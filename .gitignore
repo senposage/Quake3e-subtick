@@ -9,4 +9,4 @@ UrbanTerror42_Source/
 .claud
 .git
 build/
-tmp/
+*.o
