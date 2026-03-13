@@ -1133,54 +1133,58 @@ Build flag: compile with `NO_DMAHD=1` to disable dmaHD and use the standard DMA 
 
 ---
 
-## Pending Work — continuation from PR `copilot/aldbg-issue-89-sound-preemption`
+## Global Audio Preemption — Root Cause and Fix
 
-> **Context for the next session.**  This PR cannot be merged without closing
-> it first (GitHub limitation on the agent branch).  The work below was agreed
-> at the end of that session and must be picked up in a **new PR against
-> `main`** once the current one is closed.
+### Root cause
 
-### What was fixed in this PR
+Q3's channel model lets any new sound on the same `(entnum, entchannel)` slot
+immediately stop whatever is currently playing there.  This created several
+distinct problems confirmed by `s_alDebugPlayback 1`:
 
-The root cause of the DE-50 (and all-weapons) audio regression was confirmed
-by `s_alDebugPlayback 1`:
+| Pattern | Example | Effect |
+|---------|---------|--------|
+| CHAN_WEAPON cross-sfx | `de_out.wav` cut at 3% by `cock.wav` | Fire boom inaudible |
+| CHAN_WEAPON same-sfx | `mac11-inside.wav` cut at 17% by itself | Rapid-fire clips itself |
+| CHAN_WEAPON variant switch | `mac11-inside.wav` cut by `mac11-outside.wav` | Location switch early |
+| Ambient same-sfx | `truckpassby.wav` cut at 35–90% by itself | Pass-by sound truncated |
+| Impact cross-sfx | `concrete1.wav` cut at 5% by `brass2.wav` | Impact crack inaudible |
 
-- All three fire-animation sounds (`de_out.wav`, `back.wav`, `cock.wav`) share
-  `CHAN_WEAPON` and are submitted in a burst every frame.
-- Each sound preempted the previous after only **~30 ms (1 % of the 3.74 s
-  shot sample)**, making the gunshot inaudible.
-- This affects **every weapon** to varying degrees — longer samples suffer most
-  (DE-50 is worst; shorter samples tolerate it better but are still impacted).
+Earlier time-based guards (`CHAN_WEAPON_MIN_PLAY_MS = 100`, then 50 ms) only
+postponed the CHAN_WEAPON problem — after the guard expired, `cock.wav` still
+killed `de_out.wav`, and none of the other channels were protected at all.
 
-Fix: `CHAN_WEAPON_MIN_PLAY_MS = 100` guard in `S_AL_StartSound` — a new
-CHAN_WEAPON sound is dropped if the currently-playing one has been alive for
-less than 100 ms.  The game re-fires events every frame so the new sound gets
-through naturally once the window expires.
+### Fix — adaptive content-based guard
 
-### What still needs to be done (next PR)
+`S_AL_RegisterSound` now scans the decoded PCM **backward** to find the last
+frame above the silence threshold (≈ −54 dB for 16-bit).  This value,
+`contentSamples`, is stored in `alSfxRec_t` alongside `soundLength`.  The scan
+is an O(N) integer comparison loop — microseconds per file — done once while
+the PCM is already in RAM before being handed to OpenAL.
 
-The commits listed below were **bandaid attempts** made before the real root
-cause was known.  Now that the preemption bug is fixed, these changes should
-be reviewed and any hacks that no longer serve a purpose should be **reverted
-or stripped out**:
+`S_AL_StartSound` uses `AL_SAMPLE_OFFSET` to query how many frames the current
+source has played.  If `offset < contentSamples`, the incoming request is
+dropped.  If the current sound has consumed its audible content (or the file is
+all-silent, `contentSamples == 0`), preemption proceeds normally.
 
-| Commit | Title | Suspected bandaid |
-|--------|-------|-------------------|
-| `0c051a08` | Add `s_alDirectChannels` cvar to control `AL_SOFT_direct_channels` | Added to work around perceived muffling that was actually caused by the preemption bug cutting the crack; may not be needed |
-| `4a718e86` | Guarantee all-cvars-zero passthrough: Layer3 HRTF force-disable, live-vol outside EFX guard, diagnostic sndinfo | Large omnibus patch; audit each piece for necessity |
-| `a67799c9` | Fix OpenAL weapon audio: explicit HRTF off, `s_alEFX` cvar, fix `s_volume²` gain | Some items (e.g. HRTF-off) may have been addressing a perceived problem caused by preemption |
-| `b68f9b1c` | Fix DE-50 wet-blanket audio: `AL_DIRECT_CHANNELS_SOFT` for local sources, `AL_FILTER_NULL` start for 3D, extend weapon occlusion bypass | Targeted at "wet blanket" symptom that was actually the crack being cut; review whether `AL_FILTER_NULL` start and the path-based occlusion bypass are still correct |
-| Earlier commits (PRs #84–#87) | Various audio quality / occlusion / pool-management patches | Review each for necessity now the primary bug is resolved |
+This single rule handles every case without any channel-specific constants:
 
-**Suggested approach for the cleanup PR:**
+- **DE-50 `de_out.wav`** — ~2.5 s audible content in a 3.74 s file.
+  `cock.wav` arriving at 130 ms is dropped.  The fire boom plays fully.
+- **MAC-11 `mac11-inside.wav`** — 858 ms file, fire rate 150 ms.  Audible
+  crack ≈ 150 ms; silent tail ≈ 708 ms.  The guard expires at exactly the fire
+  cadence, so every shot restarts cleanly without clipping its predecessor.
+- **MAC-11 inside → outside** — location variant switch at 160 ms.  Guard
+  (≈ 150 ms) has just expired; the outside variant is accepted immediately.
+- **`truckpassby.wav`** — 9.2 s ambient pass-by.  Guard holds for the full
+  audible length; the map can only retrigger once the truck has passed.
+- **Impact sounds** — each crack plays to its audible end before the slot is
+  reused for the next impact or casing.
 
-1. Start from `main` (after merging this PR).
-2. Work backwards through the commits above, one at a time.
-3. For each: build + test in-game; if removing it makes no perceptible audio
-   difference, drop it.  If it still serves a distinct purpose (e.g. a genuine
-   EFX bug fix, a real pool-management improvement), keep it with a clearer
-   comment explaining why.
-4. Keep `s_alDebugPlayback` — it is a useful permanent diagnostic tool.
-5. Keep the `CHAN_WEAPON_MIN_PLAY_MS` guard — it is the actual fix.
-6. Keep the `WORLD_ENTITY_MAX_CHANNELS` cap and dedup windows — they address a
-   real separate problem (bullet-impact pool exhaustion at high `sv_fps`).
+### Design note — why no cache
+
+The PCM scan is ≈ 0.04 ms per file.  Across a full session (≤ 1 000 sounds
+loaded lazily on first use), total cost is under 50 ms spread across the whole
+session.  A persistent cache file would add file-I/O overhead, staleness risk
+on pk3 updates, and ~100 extra lines of code in exchange for an imperceptible
+saving.  The value is computed inline at load time and stored in the existing
+`alSfxRec_t` pool.

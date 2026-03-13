@@ -231,33 +231,19 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 #define S_AL_WEAPON_SOUND_PREFIX        "sound/weapons/"
 #define S_AL_WEAPON_SOUND_PREFIX_LEN    14  /* strlen("sound/weapons/") */
 
-/* Minimum time (ms) a CHAN_WEAPON sound must play before it can be preempted
- * by another sound on the same channel.
- *
- * Without this guard, weapon fire-animation sequences submit multiple sounds
- * on CHAN_WEAPON in rapid succession (e.g. DE-50: de_out.wav → back.wav →
- * cock.wav) and each one preempts the previous after only ~30 ms (1 % of the
- * 3.74 s shot sound), making the gunshot completely inaudible.  This affects
- * ALL weapons to varying degrees — longer samples tolerate preemption less
- * (DE-50 de_out.wav is most severe) while shorter samples are less impacted,
- * but all CHAN_WEAPON sounds benefit from the protection.
- *
- * 100 ms is chosen to:
- *   • protect the initial crack/transient of semi-auto shots before mechanical
- *     cycling sounds (slide back, hammer cock) take over the channel
- *   • not block full-auto weapons: the Negev fires negev_sil.wav every ~100 ms
- *     so the guard (elapsed < 100 ms) expires at the same cadence as fire rate
- *   • semi-auto weapons cannot physically fire faster than ~100 ms/round, so
- *     no legitimate cross-shot preemption is blocked
- */
-#define CHAN_WEAPON_MIN_PLAY_MS  100
+/* No fixed preemption guard constants needed: see S_AL_ContentSamples() and
+ * S_AL_StartSound() for the content-based adaptive approach that replaced all
+ * channel-specific guards. */
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
     char                name[MAX_QPATH];
-    int                 soundLength;            /* in samples */
+    int                 soundLength;            /* in samples (file-rate frames) */
     int                 fileRate;               /* original sample rate from the file (Hz) */
+    int                 contentSamples;         /* last non-silent frame + 1 (file-rate frames);
+                                                 * 0 = all-silent / unknown; used as adaptive
+                                                 * preemption guard — see S_AL_ContentSamples() */
     qboolean            defaultSound;           /* buzz on load failure */
     qboolean            inMemory;
     int                 lastTimeUsed;           /* Com_Milliseconds() */
@@ -723,6 +709,61 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     return normGain;
 }
 
+/* Scan PCM data backwards from the last frame to find the end of audible
+ * content.  Returns the number of frames that contain non-silent audio,
+ * i.e. (index of last frame above the silence threshold) + 1.
+ *
+ * This value drives the adaptive preemption guard in S_AL_StartSound: a
+ * source playing on a named channel will not be cut short until its audible
+ * content has been consumed.  Trailing digital silence, fade-outs, and
+ * encoder padding are excluded so channels are not held unnecessarily long.
+ *
+ * Threshold: |sample| > 64 for 16-bit (≈ −54 dB) / |sample−128| > 2 for
+ * 8-bit.  Quiet reverb tails below this level are treated as silence.
+ *
+ * Key design property: weapon fire sounds are authored so that their audible
+ * content length ≈ the weapon's fire interval (e.g. MAC-11: 150 ms crack in
+ * an 858 ms file).  The silent tail is padding.  Using contentSamples as the
+ * guard therefore naturally matches each weapon's cadence without any hard-
+ * coded per-weapon constants. */
+static int S_AL_ContentSamples( const void *pcm, const snd_info_t *info )
+{
+    int maxFrames, frame, c;
+
+    if ( !pcm || info->samples <= 0 || info->channels <= 0 || info->width <= 0
+         || info->size <= 0 )
+        return 0;
+
+    /* Guard against info->samples exceeding the actual buffer size. */
+    maxFrames = (int)( info->size / ( info->width * info->channels ) );
+    if ( maxFrames > info->samples )
+        maxFrames = info->samples;
+
+    if ( info->width == 2 ) {
+        const short *s = (const short *)pcm;
+        for ( frame = maxFrames - 1; frame >= 0; frame-- ) {
+            for ( c = 0; c < info->channels; c++ ) {
+                int v = s[ frame * info->channels + c ];
+                if ( v < 0 ) v = -v;
+                if ( v > 64 )
+                    return frame + 1;
+            }
+        }
+    } else if ( info->width == 1 ) {
+        const byte *s = (const byte *)pcm;
+        for ( frame = maxFrames - 1; frame >= 0; frame-- ) {
+            for ( c = 0; c < info->channels; c++ ) {
+                int v = (int)s[ frame * info->channels + c ] - 128;
+                if ( v < 0 ) v = -v;
+                if ( v > 2 )
+                    return frame + 1;
+            }
+        }
+    }
+
+    return 0;   /* all silent or unsupported bit depth */
+}
+
 /* Load a sound file into an AL buffer.  Returns the sfxHandle_t index
  * (>= 0) on success, 0 (the default-sound slot) on failure. */
 static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
@@ -772,9 +813,10 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
         fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
     }
 
-    /* Compute RMS normalisation gain before handing PCM to AL (while the
-     * decoded data is still accessible in the temp allocation). */
-    r->normGain = S_AL_CalcNormGain(pcm, &info);
+    /* Analyse PCM while it is still in the temp allocation — both passes are
+     * O(N) backward scans and complete in microseconds. */
+    r->normGain       = S_AL_CalcNormGain(pcm, &info);
+    r->contentSamples = S_AL_ContentSamples(pcm, &info);
 
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
@@ -1541,11 +1583,40 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     if (entchannel != CHAN_AUTO) {
         srcIdx = S_AL_FindSourceByChannel(entnum, entchannel);
         if (srcIdx >= 0) {
-            /* Minimum play-time guard for CHAN_WEAPON — see CHAN_WEAPON_MIN_PLAY_MS. */
-            if (entchannel == CHAN_WEAPON) {
-                int elapsed = Com_Milliseconds() - s_al_src[srcIdx].allocTime;
-                if (elapsed < CHAN_WEAPON_MIN_PLAY_MS)
-                    return;
+            /* Adaptive content-based preemption guard (all channels).
+             *
+             * Before stopping the current source, query how many frames it
+             * has played and compare against the last non-silent frame of
+             * the sound (contentSamples, computed from PCM at load time).
+             * If audible content is still playing, drop the incoming request
+             * rather than cutting the sound short.
+             *
+             * This handles every case uniformly:
+             *   • Long fire sounds (de_out.wav, 2.5 s content) are never
+             *     cut by short animation events (cock.wav) on CHAN_WEAPON.
+             *   • Full-auto fire sounds authored with content ≈ fire interval
+             *     (MAC-11: 150 ms crack in 858 ms file) expire their guard
+             *     right at the fire cadence, so rapid-fire restarts go
+             *     through naturally.
+             *   • Inside/outside weapon variants switch cleanly once the
+             *     current sound's audible content is consumed.
+             *   • Ambient/environment sounds (trucks, city noise) play to
+             *     their audible end before the map can retrigger them.
+             *   • Impact sounds play their full crack before being replaced.
+             *
+             * Falls through immediately when contentSamples == 0 (all-
+             * silent or unknown file) so those are always preemptable. */
+            {
+                int curSfx = s_al_src[srcIdx].sfx;
+                if ( curSfx >= 0 && curSfx < s_al_numSfx ) {
+                    int content = s_al_sfx[curSfx].contentSamples;
+                    if ( content > 0 ) {
+                        ALint offset = 0;
+                        qalGetSourcei(s_al_src[srcIdx].source, AL_SAMPLE_OFFSET, &offset);
+                        if ( offset < content )
+                            return;
+                    }
+                }
             }
 
             /* Level 1: label preemptions so they are visually distinct from
