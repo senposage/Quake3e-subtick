@@ -1140,13 +1140,21 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     /* Classify into volume category.
      * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
      * menu audio) — give these their own SRC_CAT_UI knob so they can be tuned
-     * independently of own-weapon / breath sounds (SRC_CAT_LOCAL). */
+     * independently of own-weapon / breath sounds (SRC_CAT_LOCAL).
+     * Own-entity sounds (entnum == s_al_listener_entnum) are SRC_CAT_LOCAL even
+     * when s_alLocalSelf=0 (3D spatialized mode) so that s_alVolSelf always
+     * controls own-player audio regardless of the spatialization setting.
+     * Ambient (loop) sources are classified before the own-entity check so that
+     * a loop entity that happens to share the listener's entity number is still
+     * correctly routed to SRC_CAT_AMBIENT → s_alVolEnv. */
     if (isLocal && entnum == 0)
         src->category = SRC_CAT_UI;
     else if (isLocal)
         src->category = SRC_CAT_LOCAL;
     else if (isAmbient)
         src->category = SRC_CAT_AMBIENT;
+    else if (s_al_listener_entnum >= 0 && entnum == s_al_listener_entnum)
+        src->category = SRC_CAT_LOCAL;   /* own entity, 3D mode */
     else
         src->category = SRC_CAT_WORLD;
 
@@ -1962,6 +1970,32 @@ static void S_AL_UpdateLoops( void )
 
         /* ---- Step 4: Start a new source if needed ---- */
         if (lp->srcIdx < 0 || !s_al_src[lp->srcIdx].isPlaying) {
+            /* Dedup: mirror DMA S_AddLoopSounds() merge behaviour.
+             * When two or more map entities reference the same sfx (e.g.
+             * ut4_austria has three ambient entities playing the same Bach
+             * prelude loop), only ONE AL source is ever running for that sfx.
+             * We scan ALL loop slots (not just k < i) so that a higher-index
+             * entity that already owns a source also blocks a lower-index
+             * newcomer — whichever entity entered PVS first keeps the source.
+             * When the owning entity leaves PVS its active flag clears (Step 1),
+             * which immediately lets any remaining duplicate claim a source on
+             * the next frame (smooth cross-fade rather than a hard cut).
+             * Without this, N entities → N simultaneous sources → N× volume
+             * ("double running", confirmed by 3 identical stop-offsets in
+             *  ut4_austria logs). */
+            if (lp->srcIdx < 0) {
+                int      k;
+                qboolean sfxDuped = qfalse;
+                for (k = 0; k < MAX_GENTITIES; k++) {
+                    alLoop_t *other;
+                    if (k == i) continue;
+                    other = &s_al_loops[k];
+                    if (!other->active || other->srcIdx < 0) continue;
+                    if (other->sfx != lp->sfx)              continue;
+                    if (s_al_src[other->srcIdx].isPlaying)  { sfxDuped = qtrue; break; }
+                }
+                if (sfxDuped) continue;
+            }
             srcIdx = S_AL_GetFreeSource();
             if (srcIdx < 0) continue;
             {

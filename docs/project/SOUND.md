@@ -259,7 +259,7 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | `s_alOccPosBlend` | `0.25` | How far to redirect HRTF apparent-source position towards the nearest acoustic gap [0–1]. `0.0` = always true source position (best direction accuracy). `1.0` = full gap redirect (old behaviour — confused weapon direction). Default 0.25: subtle gap hint that aids "around the corner" perception without sacrificing localizability. |
 | `s_alDebugOcc` | `0` | Print per-source occlusion state each frame. Each occluded source shows entity, distance, trace target, smoothed gain, GAIN and GAINHF values. Use to identify which sounds are being filtered and by how much. Not archived. |
 | `s_alDebugPlayback` | `0` | Playback diagnostics for isolating audio quality issues. **`1`** = log every **PREEMPT** (sound cut short by a new sound on the same channel) and every **rate-mismatch** at load time (file Hz ≠ device Hz, which forces the internal resampler). **`2`** = also log every natural completion. Each line shows sound name, samples played / total, % consumed, file rate, and device rate. Use `1` to determine whether the DE-50 boom is being **truncated** (preempt line, low %) or **degraded** by the resampler (rate-mismatch lines at registration). Not archived — set before loading a map to catch registration warnings. |
-| `s_alVolSelf` | `1.0` | Own player/weapon/breath volume multiplier **[0–1.5]** |
+| `s_alVolSelf` | `1.0` | Own player/weapon/breath volume multiplier **[0–1.5]**.  Applies to own-entity sounds in both spatialized (`s_alLocalSelf 0`, default) and non-spatialized (`s_alLocalSelf 1`) modes. |
 | `s_alVolOther` | `0.7` | Other player/entity volume multiplier **[0–1.0]** — capped, anti-cheat |
 | `s_alVolEnv` | `0.3` | Looping ambient/environmental volume multiplier **[0–1.0]** — capped |
 | `s_alVolUI` | `0.8` | Hit-marker/kill-confirmation/UI sound multiplier **[0–1.0]** — `StartLocalSound` (entnum=0) only, independent of weapon volume |
@@ -354,6 +354,24 @@ instead of starting and stopping abruptly:
 | Entity leaves PVS / out of range | `S_AL_LOOP_FADEOUT_MS` = 500 ms | Gain 1 → 0 (hard cut eliminated) |
 | Entity re-enters during fade-out | Immediate | Fade-out cancelled; fade-in from current level |
 
+#### Ambient loop deduplication (same-sfx entities)
+
+DMA's `S_AddLoopSounds()` merges all map entities sharing the same sfx into a
+**single mixer channel**, summing their spatial volumes.  Without equivalent
+deduplication, the OpenAL slot-based model would start one AL source per entity,
+giving N× volume for maps that place N ambient entities using the same file
+(confirmed on `ut4_austria`: three entities all use `Bach-Prelude_No_30_D_minor.wav`,
+producing triple-volume output and three stop-log entries at identical sample
+offsets).
+
+`S_AL_UpdateLoops` now mirrors this behaviour: before allocating a new AL source
+for entity `i`, it scans **all** other loop slots — both lower- and higher-index.
+If any other *active* entity already has a playing source for the same sfx, entity
+`i` is skipped (no new source allocated).  This prevents double-start regardless
+of which entity entered PVS first.  When the owning entity leaves PVS its `active`
+flag clears immediately, allowing any remaining duplicate to claim a source on the
+next frame (smooth cross-fade rather than a hard cut).
+
 #### Occlusion update cadence (distance-adaptive)
 
 The occlusion system uses a **three-phase design** to give smooth wall↔clear
@@ -437,7 +455,7 @@ DMA-matching mechanisms prevent degradation:
 DMA plays own-entity sounds at `leftvol = rightvol = master_vol` — pure stereo
 mix, no filter, no spatialization.  OpenAL matches this via:
 
-- `s_alLocalSelf 0` (default): own-entity sounds use their world-space origin supplied by the game for full 3D spatialization.
+- `s_alLocalSelf 0` (default): own-entity sounds use their world-space origin supplied by the game for full 3D spatialization.  `s_alVolSelf` **always** controls own-entity volume regardless of this setting — in 3D mode the source is classified `SRC_CAT_LOCAL` based on entity-number match with the listener, not on the `isLocal` flag.
 - `s_alLocalSelf 1`: own-entity sounds are forced non-spatialized → `AL_SOURCE_RELATIVE=TRUE`,
   position (0,0,0), no rolloff, `AL_DIRECT_FILTER = AL_FILTER_NULL`. Use if stale-position
   artefacts occur from URT jumping/sliding physics.
