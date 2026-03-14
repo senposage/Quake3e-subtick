@@ -249,6 +249,9 @@ static void S_AL_ParseMapEntities( void )
             else if (!Q_stricmp(key, "music"))       Q_strncpyz(blkMusic,     val, sizeof(blkMusic));
             else if (!Q_stricmp(key, "noise"))       Q_strncpyz(blkNoise,     val, sizeof(blkNoise));
             else if (!Q_stricmp(key, "origin"))      Q_strncpyz(blkOriginStr, val, sizeof(blkOriginStr));
+```
+
+Note: `blkOriginStr` is declared as `char blkOriginStr[96]` in the implementation.
         }
 
         if (!Q_stricmp(blkClass, "worldspawn")) {
@@ -691,14 +694,11 @@ Add a new section after the existing **"Key Sound Cvars"** table:
 | `s_alDebugNorm` cvar registration | code block | ✅ done |
 | `snd_normcache_rebuild` cmd | code block | ✅ done |
 | per-frame `s_alDebugNorm` output | code block | ✅ done |
-| `SOUND.md` updates | doc | ❌ not done |
+| `SOUND.md` updates | doc | ✅ done |
 
 ---
 
 ## Continuing from here
 
-**All code changes are complete.**  The only remaining item is **K** (SOUND.md
-documentation update).  Add the three sections described in K to
-`docs/project/SOUND.md` and mark this document's K item ✅.
-
-After that, run `code_review` then `codeql_checker` to finalise the PR.
+**All items are complete (✅).**  Run `code_review` then `codeql_checker`
+to finalise the PR.

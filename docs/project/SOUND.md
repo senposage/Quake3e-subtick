@@ -1462,6 +1462,7 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | `s_alDebugOcc` | `0` | Print per-source occlusion state each frame. Not archived. |
 | `s_alDebugReverb` | `0` | Log dynamic reverb probe results (`1`) or raw data (`2`). Not archived. |
 | `s_alTrace` | `0` | Key source lifecycle events (`1`) or verbose (`2`). Not archived. |
+| `s_alDebugNorm` | `0` | Print `normGain` for every active looping ambient source once per frame. Use on a specific map (e.g. `ut4_turnpike`) to identify which sounds are too loud and verify that the normcache is taking effect. Not archived. |
 
 - OpenAL Soft selects the native device rate automatically (no `s_khz` needed).
 - `s_doppler` controls `AL_DOPPLER_FACTOR` (1.0 = enabled, 0.0 = disabled).
@@ -1718,3 +1719,168 @@ collateral:
 | 3D sources starting with `AL_FILTER_NULL` instead of filter object | `snd_openal.c` | **Leave for now** — independent merit; re-evaluate after other cleanup |
 | `alcResetDeviceSoft` Layer-3 HRTF disable | `snd_openal.c` | **Leave** — defensively correct even if motivated by wrong diagnosis |
 | Stale `SOUND.md` references to old 100 ms guard | `docs/project/SOUND.md` | ✅ **Done in prior PR** |
+
+---
+
+## Per-Map Ambient Normalisation Cache
+
+### Problem: outlier-loud map loops
+
+Some maps (notably `ut4_turnpike`) have ambient loop sounds that are far too
+loud even after volume cvars are tuned.  The root cause was a bug in
+`S_AL_CalcNormGain`: it scanned only the **first 4 seconds** of each audio
+file.  A loop with a quiet intro followed by a loud main body received an
+inflated `normGain` (based on the quiet intro), causing the bulk of playback
+to be far too loud.
+
+The second problem was that the old normaliser was **bidirectional** — it both
+cut loud sounds *and* boosted quiet sounds toward a fixed target RMS of 0.085
+(−21 dBFS).  This collapsed the relative loudness differences between ambient
+sounds on the same map: a waterfall would end up at the same perceived volume
+as a gentle breeze, which is not the map designer's intent.
+
+### Solution: strided scan + one-sided ceiling limiter
+
+`S_AL_CalcNormGain` now uses a **strided full-file scan**:
+
+```
+stride = totalFrames / S_AL_NORM_SCAN_SAMPLES   (at most 4 s worth of frames)
+```
+
+Frames are sampled evenly across the entire file so that the RMS accurately
+represents the loop's bulk energy, not just its intro.
+
+The normalisation formula is now a **one-sided ceiling limiter**:
+
+```
+normGain = min(1.0,  S_AL_NORM_CEILING / RMS)
+
+S_AL_NORM_CEILING = 0.316   (≈ −10 dBFS)
+```
+
+- Sounds with RMS ≤ 0.316: `normGain = 1.0` — play at natural level, no cut,
+  no boost.  A quiet breeze stays quiet; a moderately loud waterfall stays at
+  its intended loudness.
+- Sounds with RMS > 0.316: `normGain < 1.0` — proportional cut bringing the
+  sound down to the ceiling.  Only genuine outliers (broadcast-hot, heavily
+  compressed, or clipped ambient WAVs) are affected.
+- Safety floor: `normGain` is clamped to a minimum of `0.05` for pathological
+  files (e.g. square-wave clipping at RMS 1.0).
+
+This preserves the **relative loudness** between ambient sounds on the same
+map while preventing any single over-recorded loop from dominating.
+
+### Per-map normcache file
+
+On the **first load** of each map, the engine:
+
+1. Parses the BSP entity lump (`CM_EntityString()`) to discover every sound
+   file referenced in `worldspawn` (`ambient`, `music`) and every
+   `target_speaker` entity (`noise`).
+2. Force-registers all of those sounds so their `normGain` is computed via the
+   strided scan.
+3. Writes a plain-text cache file:
+   ```
+   normcache/ut4_turnpike.cfg
+   ```
+
+On **subsequent loads** the cache is read during `S_AL_BeginRegistration`
+(before cgame registers its sounds) so the cached values take effect for every
+`RegisterSound` call.
+
+#### Cache file format
+
+```
+// Quake3e-urt per-map ambient normalisation cache
+// map: maps/ut4_turnpike.bsp
+// normGain 0.05–1.00  (1.0 = natural level; lower = quieter)
+// Edit values to tune loudness. Delete file to regenerate.
+// Reload with: snd_normcache_rebuild
+sound/urban_terror/traffic_loop.wav 0.2914
+sound/env/wind.wav 1.0000
+music/ut4_turnpike.ogg 0.4531
+```
+
+The file lives in the game's write directory (the same location as `q3config.cfg`).
+
+#### Tuning procedure
+
+1. Load the map.
+2. Set `s_alDebugNorm 1` — the console will print one line per active loop
+   source each frame showing the current `normGain`.
+3. Identify the loud outlier.  Its `normGain` will be well below `1.0`.
+4. Open `normcache/<mapname>.cfg` in a text editor and lower the value
+   further if needed, or raise it to allow a sound to be louder.
+5. Type `snd_normcache_rebuild` in the console to reload and apply the values.
+6. Repeat until the balance sounds correct.
+
+#### Console command
+
+```
+snd_normcache_rebuild
+```
+
+Regenerates the cache for the currently loaded map from the decoded audio
+files (discarding any hand-edits).  Use this after a map update that changes
+audio content, or to reset a badly-edited cache.
+
+---
+
+## BSP Entity Acoustic Hints
+
+### What is parsed
+
+On the first dynamic-reverb probe cycle after a new map loads, the engine
+calls `S_AL_ParseMapEntities()` which walks the BSP entity lump and extracts:
+
+**From `worldspawn`:**
+
+| Key | Stored in | Purpose |
+|---|---|---|
+| `sky` | `s_al_mapHints.skyShader` / `hasSky` | Whether the map has outdoor sky exposure |
+| `ambient` | `s_al_mapHints.worldAmbient` | Global ambient sound path |
+| `music` | `s_al_mapHints.worldMusic` | Background music track path |
+
+**From every `target_speaker` with a `noise` key:**
+
+| Key | Stored in | Purpose |
+|---|---|---|
+| `noise` | `s_al_bspSpeakers[i].noise` | Sound file path |
+| `origin` | `s_al_bspSpeakers[i].origin` | World position |
+| `spawnflags` | `s_al_bspSpeakers[i].spawnflags` | Bit 0 = GLOBAL (plays everywhere) |
+
+Entity example:
+```
+{
+"classname" "target_speaker"
+"spawnflags" "1"
+"noise" "sound/urban_terror/traffic_loop.wav"
+"origin" "-1306.4 660 293.6"
+}
+```
+
+### Uses
+
+#### 1. `hasSky` → classifier cave-bonus dampening
+
+If `worldspawn` has a `sky` key, the dynamic reverb classifier dampens the
+`caveBonus` to 35% of its computed value.  This prevents basement sections and
+stairwells of outdoor/urban maps from triggering the stone-tunnel reverb
+character that is appropriate only for true underground caves.
+
+#### 2. Cold-start speaker origin fallback
+
+Static `target_speaker` entities emit their first sounds on the earliest frames
+of a map load, before `S_UpdateEntityPosition` has been called for them.
+Without a fallback, those sounds play from world-origin (0, 0, 0).
+
+`S_AL_StartSound` now checks the BSP speaker list: if the entity origin cache
+is still at (0, 0, 0) **and** exactly one BSP speaker uses the same noise file,
+that speaker's BSP origin is used instead.  Ambiguous cases (multiple speakers
+with the same file) are left for the natural entity-update path.
+
+#### 3. Normcache population
+
+All `noise` paths collected from `target_speaker` entities, plus `worldAmbient`
+and `worldMusic`, are pre-registered at map load via `S_AL_PreRegisterMapSounds`
+so their `normGain` is computed before the normcache is written.

@@ -3061,14 +3061,10 @@ static qboolean S_AL_LoadMapNormCache( const char *mapbase )
         float       ng;
         alSfxRec_t *r;
 
+        /* COM_ParseExt already skips // comments and blank lines.
+         * The first token on each data line is the sfx path. */
         tok = COM_ParseExt(&p, qtrue);
         if (!tok || !tok[0]) break;
-
-        /* Skip comment lines */
-        if (tok[0] == '/') {
-            while (*p && *p != '\n') p++;
-            continue;
-        }
 
         Q_strncpyz(sfxPath, tok, sizeof(sfxPath));
 
