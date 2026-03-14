@@ -273,6 +273,13 @@ typedef enum {
                                     * Suppressed fire is inherently quieter and
                                     * harder to locate — tunable via
                                     * s_alVolEnemySuppressedWeapon. */
+    SRC_CAT_EXTRAVOL          = 8, /* user-defined path list (s_alExtraVolList):
+                                    * sounds whose file name matches one of the
+                                    * comma-separated patterns are routed here so
+                                    * s_alExtraVol can attenuate them
+                                    * independently. Reduce-only (max cvar 1.0).
+                                    * Defaults to sound/feedback — the feedback
+                                    * sounds that are disproportionately loud. */
 } alSrcCat_t;
 
 /* Per-active-sound source */
@@ -434,6 +441,9 @@ static cvar_t *s_alGrenadeBloomGain;    /* peak reverb slot gain boost [0..0.3] 
 static cvar_t *s_alGrenadeBloomMs;      /* bloom decay duration in ms */
 static cvar_t *s_alGrenadeBloomDuck;       /* 0=off, 1=also apply mild listener-gain duck with bloom */
 static cvar_t *s_alGrenadeBloomDuckFloor;  /* min listener gain during grenade duck [0.5..0.95] */
+/* Extra-vol list: player-configurable sound-path filter with its own volume knob */
+static cvar_t *s_alExtraVolList; /* comma-separated path patterns; prefix with ! to exclude */
+static cvar_t *s_alExtraVol;    /* volume for matched sounds [0..1.0, reduce-only] */
 /* Suppressed weapons: separate volume knob + exclusion from suppression/reverb effects */
 static cvar_t *s_alSuppressedSoundPattern; /* comma-separated substrings matched against sfx name */
 static cvar_t *s_alVolSuppressedWeapon;    /* own suppressed-weapon sounds [0..10] */
@@ -1018,6 +1028,70 @@ static qboolean S_AL_IsSoundSuppressed( sfxHandle_t sfx, int entnum )
     return gearSuppressed || nameSuppressed;
 }
 
+/* Return qtrue when the sound file name matches s_alExtraVolList.
+ *
+ * Pattern syntax (comma-separated tokens, whitespace around commas is trimmed):
+ *   Plain token   — case-insensitive substring match against the sound path.
+ *                   e.g. "sound/feedback" matches everything under that dir.
+ *                   e.g. "sound/feedback/hit.wav" matches only that one file.
+ *   !token        — exclusion: if the name contains this substring the sound
+ *                   is removed from the group even if a positive token matched.
+ *                   e.g. "sound/feedback,!sound/feedback/quiet.wav" includes
+ *                   all feedback sounds except quiet.wav.
+ *
+ * A sound is routed to SRC_CAT_EXTRAVOL when at least one positive token
+ * matches AND no exclusion token matches.  A list containing only exclusion
+ * tokens never matches anything. */
+static qboolean S_AL_IsExtraVolSound( sfxHandle_t sfx )
+{
+    const char *pat;
+    const char *name;
+    qboolean    included = qfalse;
+    qboolean    excluded = qfalse;
+
+    if (!s_alExtraVolList)
+        return qfalse;
+
+    pat  = s_alExtraVolList->string;
+    name = (sfx >= 0 && sfx < s_al_numSfx) ? s_al_sfx[sfx].name : NULL;
+
+    if (!pat || !pat[0] || !name || !name[0])
+        return qfalse;
+
+    {
+        /* tok is MAX_QPATH bytes: all valid sound names are bounded by
+         * alSfxRec_t::name[MAX_QPATH], so no pattern token can legitimately
+         * exceed this limit.  Over-long tokens are silently truncated and
+         * will simply fail to match — consistent with the engine path limit. */
+        char        tok[MAX_QPATH];
+        const char *p = pat;
+        while (*p) {
+            int i = 0;
+            while (*p && *p != ',' && i < (int)sizeof(tok) - 1)
+                tok[i++] = *p++;
+            tok[i] = '\0';
+            if (*p == ',') p++;
+            {
+                char *s = tok, *e;
+                while (*s == ' ') s++;
+                e = s + strlen(s);
+                while (e > s && *(e-1) == ' ') *--e = '\0';
+                if (!s[0]) continue;
+                if (s[0] == '!') {
+                    /* exclusion token — strip the leading '!' */
+                    if (s[1] && Q_stristr(name, s + 1))
+                        excluded = qtrue;
+                } else {
+                    if (Q_stristr(name, s))
+                        included = qtrue;
+                }
+            }
+        }
+    }
+
+    return included && !excluded;
+}
+
 /* Anti-cheat: SRC_CAT_WORLD and SRC_CAT_IMPACT are capped at 2.0 so that
  * other players/impacts cannot be amplified to wallhack-level volume. */
 static float S_AL_GetCategoryVol( alSrcCat_t cat )
@@ -1056,6 +1130,10 @@ static float S_AL_GetCategoryVol( alSrcCat_t cat )
     default:
         v    = s_alVolOther  ? s_alVolOther->value  : 1.0f;
         ref  = 0.70f;  maxV = 2.0f;   /* anti-cheat cap */
+        break;
+    case SRC_CAT_EXTRAVOL:
+        v    = s_alExtraVol  ? s_alExtraVol->value  : 1.0f;
+        ref  = 0.70f;  maxV = 1.0f;   /* reduce-only: 30% reduction at cvar=1.0 */
         break;
     }
     if (v < 0.0f) v = 0.0f;
@@ -1350,6 +1428,13 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                          && S_AL_IsSoundSuppressed(sfx, entnum))
                         ? SRC_CAT_WORLD_SUPPRESSED : SRC_CAT_WORLD;
     }
+
+    /* Extra-vol override: if the sound file name matches s_alExtraVolList,
+     * route it to SRC_CAT_EXTRAVOL regardless of entity/channel classification.
+     * Spatial properties (local, rolloff, origin) are unaffected — only the
+     * gain group changes so s_alExtraVol controls the loudness independently. */
+    if (S_AL_IsExtraVolSound(sfx))
+        src->category = SRC_CAT_EXTRAVOL;
 
     catVol = S_AL_GetCategoryVol(src->category);
     /* Ambient sources additionally apply per-sample RMS normalisation so
@@ -3418,27 +3503,30 @@ static void S_AL_Update( int msec )
      * NOTE: loop sources in the middle of a fade-in are NOT touched here;
      * S_AL_UpdateLoops always writes their gain last. */
     {
-        static float lastVolSelf   = -1.f;
-        static float lastVolOther  = -1.f;
-        static float lastVolEnv    = -1.f;
-        static float lastVolUI     = -1.f;
-        static float lastVolWeapon = -1.f;
-        static float lastVolImpact = -1.f;
-        static float lastVolSupWpn = -1.f;
+        static float lastVolSelf    = -1.f;
+        static float lastVolOther   = -1.f;
+        static float lastVolEnv     = -1.f;
+        static float lastVolUI      = -1.f;
+        static float lastVolWeapon  = -1.f;
+        static float lastVolImpact  = -1.f;
+        static float lastVolSupWpn  = -1.f;
         static float lastVolESupWpn = -1.f;
-        float vSelf    = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
-        float vOther   = S_AL_GetCategoryVol(SRC_CAT_WORLD);
-        float vEnv     = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
-        float vUI      = S_AL_GetCategoryVol(SRC_CAT_UI);
-        float vWeapon  = S_AL_GetCategoryVol(SRC_CAT_WEAPON);
-        float vImpact  = S_AL_GetCategoryVol(SRC_CAT_IMPACT);
-        float vSupWpn  = S_AL_GetCategoryVol(SRC_CAT_WEAPON_SUPPRESSED);
-        float vESupWpn = S_AL_GetCategoryVol(SRC_CAT_WORLD_SUPPRESSED);
+        static float lastVolExtraVol = -1.f;
+        float vSelf     = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
+        float vOther    = S_AL_GetCategoryVol(SRC_CAT_WORLD);
+        float vEnv      = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
+        float vUI       = S_AL_GetCategoryVol(SRC_CAT_UI);
+        float vWeapon   = S_AL_GetCategoryVol(SRC_CAT_WEAPON);
+        float vImpact   = S_AL_GetCategoryVol(SRC_CAT_IMPACT);
+        float vSupWpn   = S_AL_GetCategoryVol(SRC_CAT_WEAPON_SUPPRESSED);
+        float vESupWpn  = S_AL_GetCategoryVol(SRC_CAT_WORLD_SUPPRESSED);
+        float vExtraVol = S_AL_GetCategoryVol(SRC_CAT_EXTRAVOL);
 
-        if (vSelf    != lastVolSelf   || vOther   != lastVolOther   ||
-            vEnv     != lastVolEnv    || vUI      != lastVolUI      ||
-            vWeapon  != lastVolWeapon || vImpact  != lastVolImpact  ||
-            vSupWpn  != lastVolSupWpn || vESupWpn != lastVolESupWpn) {
+        if (vSelf      != lastVolSelf     || vOther    != lastVolOther    ||
+            vEnv       != lastVolEnv      || vUI       != lastVolUI       ||
+            vWeapon    != lastVolWeapon   || vImpact   != lastVolImpact   ||
+            vSupWpn    != lastVolSupWpn   || vESupWpn  != lastVolESupWpn  ||
+            vExtraVol  != lastVolExtraVol) {
             int j;
             for (j = 0; j < s_al_numSrc; j++) {
                 float catGain;
@@ -3457,14 +3545,15 @@ static void S_AL_Update( int msec )
                 qalSourcef(s_al_src[j].source, AL_GAIN,
                     (s_al_src[j].master_vol / 255.f) * catGain);
             }
-            lastVolSelf    = vSelf;
-            lastVolOther   = vOther;
-            lastVolEnv     = vEnv;
-            lastVolUI      = vUI;
-            lastVolWeapon  = vWeapon;
-            lastVolImpact  = vImpact;
-            lastVolSupWpn  = vSupWpn;
-            lastVolESupWpn = vESupWpn;
+            lastVolSelf     = vSelf;
+            lastVolOther    = vOther;
+            lastVolEnv      = vEnv;
+            lastVolUI       = vUI;
+            lastVolWeapon   = vWeapon;
+            lastVolImpact   = vImpact;
+            lastVolSupWpn   = vSupWpn;
+            lastVolESupWpn  = vESupWpn;
+            lastVolExtraVol = vExtraVol;
         }
     }
 
@@ -4121,6 +4210,30 @@ qboolean S_AL_Init( soundInterface_t *si )
         "reflects that inherent quietness. Capped at 2× (anti-cheat). "
         "Default 1.0 (reference level). Reduce to make suppressed enemies even "
         "harder to detect; raise to compensate if suppressors feel inaudible.");
+    /* Extra-vol list — player-configurable sound-path volume group.
+     * Any sound whose file name matches a token in s_alExtraVolList is routed
+     * to SRC_CAT_EXTRAVOL and attenuated by s_alExtraVol.  The reference gain
+     * is 0.70 (30 % reduction) and the cvar is clamped to 1.0 (reduce-only). */
+    s_alExtraVolList = Cvar_Get("s_alExtraVolList", "sound/feedback", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alExtraVolList,
+        "Comma-separated list of sound path patterns routed to the s_alExtraVol "
+        "volume group (case-insensitive substring match). "
+        "Prefix a token with ! to exclude matching files from the group. "
+        "Examples: \"sound/feedback\" — all feedback sounds; "
+        "\"sound/feedback,!sound/feedback/quiet.wav\" — all feedback except quiet.wav; "
+        "\"sound/feedback/hit.wav\" — only that specific file. "
+        "Default \"sound/feedback\" (disproportionately loud feedback sounds).");
+    s_alExtraVol = Cvar_Get("s_alExtraVol", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alExtraVol, "0.25", "1.0", CV_FLOAT);
+    Cvar_SetDescription(s_alExtraVol,
+        "Volume for sounds matched by s_alExtraVolList [0.25–1.0, reduce-only]. "
+        "Reference gain is 0.70 so cvar=1.0 already applies a 30%% reduction "
+        "relative to unmodified playback. "
+        "Below 1.0 uses a power-2 curve (0.5 ≈ −12 dB). "
+        "Floored at 0.25 (25%% of maximum) so matched sounds are never "
+        "completely silenced — they remain audible as quiet background cues. "
+        "Cannot exceed 1.0 — use this cvar only to reduce noisy sounds further. "
+        "Default 1.0.");
     s_alOcclusion = Cvar_Get("s_alOcclusion", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOcclusion, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alOcclusion, "Per-source occlusion tracing. Sounds behind walls are gain-attenuated and their apparent HRTF direction is corrected to the nearest audible gap. Close sources (<300 u) update every frame; distant sources update less often. Default 1.");

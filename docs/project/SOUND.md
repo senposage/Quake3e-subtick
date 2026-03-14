@@ -272,8 +272,33 @@ All volume cvars use a **0–10 scale** where **1.0 = reference** (the historica
 | `s_alVolImpact` | `1.0` | 0.55 | 2 | World entity impacts: bullet hits, brass casings, explosions. Often disproportionately loud; capped at 2× (anti-cheat) |
 | `s_alVolEnv` | `1.0` | 0.30 | 10 | Looping ambient/environmental sounds |
 | `s_alVolUI` | `1.0` | 0.80 | 10 | Hit-markers, kill-confirmations, menu sounds (`StartLocalSound` with entnum=0) |
+| `s_alExtraVol` | `1.0` | 0.70 | 1 | Volume for sounds matched by `s_alExtraVolList`. **Reduce-only** (max 1.0, floor 0.25). Ref 0.70 means cvar=1.0 already applies a 30% reduction. Power-2 curve below 1.0. |
 
 **Example**: `s_alVolEnv 0.5` reduces ambient volume to 25% of reference (−12 dB); `s_alVolEnv 2.0` doubles it (+6 dB).
+
+#### Extra-vol list — per-player custom loud-sound group
+
+`s_alExtraVolList` defines a **comma-separated list of path patterns**. Any sound whose file name contains a matching token is moved into the `s_alExtraVol` gain group, independently of how it was triggered (local, world, or ambient).
+
+**Syntax**:
+
+| Token | Effect |
+|-------|--------|
+| `sound/feedback` | Include every sound under that directory |
+| `sound/feedback/hit.wav` | Include only that specific file |
+| `!sound/feedback/quiet.wav` | **Exclude** that file even if another positive token matched it |
+
+A sound is included when at least one positive token matches **and** no `!` exclusion token matches. A list of only exclusion tokens matches nothing.
+
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `s_alExtraVolList` | `sound/feedback` | Comma-separated sound path patterns. Case-insensitive substring match against the sound file path. Prefix with `!` to exclude. Default routes all files whose path contains `sound/feedback` — the URT feedback sounds that are disproportionately loud — into the `s_alExtraVol` group. |
+| `s_alExtraVol` | `1.0` | Volume for matched sounds [0.25–1.0, reduce-only, ref 0.70]. At default (1.0) feedback sounds are already 30% quieter than unmodified playback. Floored at 0.25 so matched sounds are never fully silenced. |
+
+**Examples**:
+- `s_alExtraVol 0.7` — cuts feedback to about 49% of original (power-2 curve: 0.7² × 0.70 ref ≈ −6 dB on top of the built-in reduction)
+- `s_alExtraVolList "sound/feedback,sound/misc/beep"` — group two directories together under one knob
+- `s_alExtraVolList "sound/feedback,!sound/feedback/confirm.wav"` — quiet all feedback except the kill-confirmation sound
 
 #### Loop-sound fade controls
 
