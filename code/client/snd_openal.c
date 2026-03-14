@@ -278,7 +278,10 @@ typedef enum {
                                     * comma-separated patterns are routed here so
                                     * s_alExtraVol can attenuate them
                                     * independently. Reduce-only (max cvar 1.0).
-                                    * Defaults to sound/feedback — the feedback
+                                    * A ":-N" dB suffix on a token applies an
+                                    * extra per-sample cut on top of the global
+                                    * s_alExtraVol reduction. Defaults to
+                                    * hit.wav and kill.wav — the two URT feedback
                                     * sounds that are disproportionately loud. */
 } alSrcCat_t;
 
@@ -300,6 +303,8 @@ typedef struct {
     float           occlusionTarget;    /* raw trace result [0..1] — occlusionGain blends towards this */
     int             occlusionTick;      /* s_al_loopFrame when last traced */
     vec3_t          acousticOffset;     /* displacement from real origin towards gap (×posBlend) */
+    float           sampleVol;         /* per-sample linear scale from ":-N" dB suffix in s_alExtraVolList;
+                                         * 1.0 for non-EXTRAVOL sources and EXTRAVOL tokens without a suffix */
 } alSrc_t;
 
 static alSrc_t  s_al_src[S_AL_MAX_SRC];
@@ -1028,26 +1033,34 @@ static qboolean S_AL_IsSoundSuppressed( sfxHandle_t sfx, int entnum )
     return gearSuppressed || nameSuppressed;
 }
 
-/* Return qtrue when the sound file name matches s_alExtraVolList.
+/* Return qtrue when the sound file name matches s_alExtraVolList, and write
+ * the per-sample linear gain scale into *outSampleScale (1.0 when the matched
+ * token carries no ":-N" dB suffix).
  *
  * Pattern syntax (comma-separated tokens, whitespace around commas is trimmed):
- *   Plain token   — case-insensitive substring match against the sound path.
- *                   e.g. "sound/feedback" matches everything under that dir.
- *                   e.g. "sound/feedback/hit.wav" matches only that one file.
- *   !token        — exclusion: if the name contains this substring the sound
- *                   is removed from the group even if a positive token matched.
- *                   e.g. "sound/feedback,!sound/feedback/quiet.wav" includes
- *                   all feedback sounds except quiet.wav.
+ *   Plain token         — case-insensitive substring match against the sound path.
+ *                         e.g. "sound/feedback" matches everything under that dir.
+ *                         e.g. "sound/feedback/hit.wav" matches only that one file.
+ *   token:-N            — same match, but also apply an N dB cut on top of the
+ *                         global s_alExtraVol reduction.  N must be ≤ 0 (cuts only;
+ *                         values > 0 are clamped to 0, floor at −40 dB).
+ *                         e.g. "sound/feedback/hit.wav:-3" applies an extra −3 dB.
+ *   !token / !token:-N  — exclusion: if the name contains this substring the sound
+ *                         is removed from the group even if a positive token matched.
+ *                         The dB suffix on exclusion tokens is accepted but ignored.
  *
  * A sound is routed to SRC_CAT_EXTRAVOL when at least one positive token
  * matches AND no exclusion token matches.  A list containing only exclusion
  * tokens never matches anything. */
-static qboolean S_AL_IsExtraVolSound( sfxHandle_t sfx )
+static qboolean S_AL_IsExtraVolSound( sfxHandle_t sfx, float *outSampleScale )
 {
     const char *pat;
     const char *name;
-    qboolean    included = qfalse;
-    qboolean    excluded = qfalse;
+    qboolean    included  = qfalse;
+    qboolean    excluded  = qfalse;
+    float       bestScale = 1.0f;
+
+    if (outSampleScale) *outSampleScale = 1.0f;
 
     if (!s_alExtraVolList)
         return qfalse;
@@ -1072,24 +1085,53 @@ static qboolean S_AL_IsExtraVolSound( sfxHandle_t sfx )
             tok[i] = '\0';
             if (*p == ',') p++;
             {
-                char *s = tok, *e;
+                char     *s = tok, *e;
+                char     *colon;
+                float     sampleScale = 1.0f;
+                qboolean  isExclusion = qfalse;
+
+                /* trim leading/trailing whitespace */
                 while (*s == ' ') s++;
                 e = s + strlen(s);
                 while (e > s && *(e-1) == ' ') *--e = '\0';
                 if (!s[0]) continue;
+
+                /* strip optional ":-N" dB suffix (applies to both + and ! tokens;
+                 * for exclusion tokens the scale is parsed but never used) */
+                colon = strrchr(s, ':');
+                if (colon && colon != s) {
+                    float db = Q_atof(colon + 1);
+                    if (db > 0.0f)   db = 0.0f;    /* cuts only, no boosts */
+                    if (db < -40.0f) db = -40.0f;  /* floor at -40 dB */
+                    sampleScale = powf(10.0f, db / 20.0f);
+                    *colon = '\0'; /* truncate token before the colon */
+                }
+
+                /* check for exclusion prefix after optional suffix has been stripped */
                 if (s[0] == '!') {
-                    /* exclusion token — strip the leading '!' */
-                    if (s[1] && Q_stristr(name, s + 1))
+                    isExclusion = qtrue;
+                    s++; /* skip '!' */
+                }
+                if (!s[0]) continue;
+
+                if (isExclusion) {
+                    if (Q_stristr(name, s))
                         excluded = qtrue;
                 } else {
-                    if (Q_stristr(name, s))
-                        included = qtrue;
+                    if (Q_stristr(name, s)) {
+                        included  = qtrue;
+                        bestScale = sampleScale;
+                    }
                 }
             }
         }
     }
 
-    return included && !excluded;
+    if (included && !excluded) {
+        if (outSampleScale) *outSampleScale = bestScale;
+        return qtrue;
+    }
+    return qfalse;
 }
 
 /* Anti-cheat: SRC_CAT_WORLD and SRC_CAT_IMPACT are capped at 2.0 so that
@@ -1391,6 +1433,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->occlusionTarget = 1.0f;
     src->occlusionTick   = 0;
     VectorClear(src->acousticOffset);
+    src->sampleVol       = 1.0f;
 
     /* Classify into volume category.
      * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
@@ -1432,9 +1475,17 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     /* Extra-vol override: if the sound file name matches s_alExtraVolList,
      * route it to SRC_CAT_EXTRAVOL regardless of entity/channel classification.
      * Spatial properties (local, rolloff, origin) are unaffected — only the
-     * gain group changes so s_alExtraVol controls the loudness independently. */
-    if (S_AL_IsExtraVolSound(sfx))
-        src->category = SRC_CAT_EXTRAVOL;
+     * gain group changes so s_alExtraVol controls the loudness independently.
+     * A per-sample dB suffix (":-N") in the matching token is converted to a
+     * linear scale stored in src->sampleVol and multiplied into the gain on
+     * top of the global s_alExtraVol reduction. */
+    {
+        float sampleScale = 1.0f;
+        if (S_AL_IsExtraVolSound(sfx, &sampleScale)) {
+            src->category  = SRC_CAT_EXTRAVOL;
+            src->sampleVol = sampleScale;
+        }
+    }
 
     catVol = S_AL_GetCategoryVol(src->category);
     /* Ambient sources additionally apply per-sample RMS normalisation so
@@ -1450,7 +1501,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->fixed_origin = fixed_origin;
 
     qalSourcei(sid,  AL_BUFFER,   r->buffer);
-    qalSourcef(sid,  AL_GAIN,     (vol / 255.0f) * catVol);
+    qalSourcef(sid,  AL_GAIN,     (vol / 255.0f) * catVol * src->sampleVol);
     qalSourcei(sid,  AL_LOOPING,  AL_FALSE);
 
     if (isLocal) {
@@ -3542,6 +3593,9 @@ static void S_AL_Update( int msec )
                 if (s_al_src[j].category == SRC_CAT_AMBIENT &&
                         s_al_src[j].sfx >= 0 && s_al_src[j].sfx < s_al_numSfx)
                     catGain *= s_al_sfx[s_al_src[j].sfx].normGain;
+                /* Re-apply per-sample dB offset for extra-vol sources */
+                if (s_al_src[j].category == SRC_CAT_EXTRAVOL)
+                    catGain *= s_al_src[j].sampleVol;
                 qalSourcef(s_al_src[j].source, AL_GAIN,
                     (s_al_src[j].master_vol / 255.f) * catGain);
             }
@@ -4214,17 +4268,20 @@ qboolean S_AL_Init( soundInterface_t *si )
      * Any sound whose file name matches a token in s_alExtraVolList is routed
      * to SRC_CAT_EXTRAVOL and attenuated by s_alExtraVol.  The reference gain
      * is 0.70 (30 % reduction) and the cvar is clamped to 1.0 (reduce-only). */
-    s_alExtraVolList = Cvar_Get("s_alExtraVolList", "sound/feedback/hit.wav,sound/feedback/kill.wav", CVAR_ARCHIVE_ND);
+    s_alExtraVolList = Cvar_Get("s_alExtraVolList", "sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alExtraVolList,
         "Comma-separated list of sound path patterns routed to the s_alExtraVol "
         "volume group (case-insensitive substring match). "
         "Prefix a token with ! to exclude matching files from the group. "
-        "Examples: \"sound/feedback/hit.wav,sound/feedback/kill.wav\" — only the two "
-        "loudest feedback sounds (default); "
+        "Append \":-N\" to a token to apply an extra N dB cut to that specific "
+        "sound on top of the global s_alExtraVol reduction (N must be ≤ 0; "
+        "fractional values are accepted; floor −40 dB). "
+        "Examples: \"sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5\" — "
+        "extra −2.5 dB (≈25%% amplitude cut) on each file (default); "
         "\"sound/feedback\" — all sounds under that directory; "
         "\"sound/feedback,!sound/feedback/hit.wav\" — all feedback except hit.wav. "
-        "Default \"sound/feedback/hit.wav,sound/feedback/kill.wav\" "
-        "(the two disproportionately loud URT feedback sounds).");
+        "Default \"sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5\" "
+        "(the two disproportionately loud URT feedback sounds, −2.5 dB each).");
     s_alExtraVol = Cvar_Get("s_alExtraVol", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alExtraVol, "0.25", "1.0", CV_FLOAT);
     Cvar_SetDescription(s_alExtraVol,

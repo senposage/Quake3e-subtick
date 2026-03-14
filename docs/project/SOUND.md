@@ -286,17 +286,20 @@ All volume cvars use a **0–10 scale** where **1.0 = reference** (the historica
 |-------|--------|
 | `sound/feedback` | Include every sound under that directory |
 | `sound/feedback/hit.wav` | Include only that specific file |
+| `sound/feedback/hit.wav:-3` | Include and apply an extra **−3 dB** cut to that file on top of `s_alExtraVol` |
 | `!sound/feedback/quiet.wav` | **Exclude** that file even if another positive token matched it |
 
-A sound is included when at least one positive token matches **and** no `!` exclusion token matches. A list of only exclusion tokens matches nothing.
+A sound is included when at least one positive token matches **and** no `!` exclusion token matches. A list of only exclusion tokens matches nothing. The `:-N` suffix is a **per-sample dB cut** (≤ 0 only; floor −40 dB; fractional values allowed) applied on top of the global `s_alExtraVol` reduction, giving independent fine-grained control over each listed file.
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alExtraVolList` | `sound/feedback/hit.wav,sound/feedback/kill.wav` | Comma-separated sound path patterns. Case-insensitive substring match against the sound file path. Prefix with `!` to exclude. Default targets only the two disproportionately loud URT feedback sounds: `hit.wav` and `kill.wav`. Widen to `sound/feedback` to catch the whole directory. |
-| `s_alExtraVol` | `1.0` | Volume for matched sounds [0.25–1.0, reduce-only, ref 0.70]. At default (1.0) matched sounds are already 30% quieter than unmodified playback. Floored at 0.25 so matched sounds are never fully silenced. |
+| `s_alExtraVolList` | `sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5` | Comma-separated sound path patterns. Case-insensitive substring match. Prefix with `!` to exclude. Append `:-N` (dB ≤ 0) to apply a per-sample cut on top of the global knob. Default applies an extra −2.5 dB (≈25% amplitude cut) to each of the two disproportionately loud URT feedback sounds. |
+| `s_alExtraVol` | `1.0` | Global volume for all matched sounds [0.25–1.0, reduce-only, ref 0.70]. At default (1.0) matched sounds are already 30% quieter than unmodified playback. Floored at 0.25 so matched sounds are never fully silenced. |
 
 **Examples**:
-- `s_alExtraVol 0.7` — cuts matched sounds to about 49% of original (power-2 curve: 0.7² × 0.70 ref ≈ −6 dB on top of the built-in reduction)
+- `s_alExtraVol 0.7` — cuts all matched sounds to about 49% of original (power-2 curve: 0.7² × 0.70 ref ≈ −6 dB on top of the built-in reduction)
+- `s_alExtraVolList "sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5"` — default: extra −2.5 dB (≈25% amplitude cut) on each file
+- `s_alExtraVolList "sound/feedback/hit.wav:-5,sound/feedback/kill.wav:-5"` — deeper cut if still too loud
 - `s_alExtraVolList "sound/feedback"` — widen the group to cover every sound under that directory
 - `s_alExtraVolList "sound/feedback,!sound/feedback/hit.wav"` — all feedback except hit.wav
 
