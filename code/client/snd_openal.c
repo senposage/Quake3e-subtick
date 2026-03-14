@@ -403,9 +403,37 @@ static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each fram
 static cvar_t *s_alDebugPlayback;  /* 0=off 1=rate-mismatch+preemption 2=+natural-stop */
 static cvar_t *s_alMaxSrc;         /* max source pool size (LATCH) */
 static cvar_t *s_alDedupMs;        /* same-frame dedup window in ms (live) */
+static cvar_t *s_alTrace;          /* 0=off 1=key lifecycle events 2=verbose */
 
 /* Set to qtrue by the s_alReset command; cleared on the next probe cycle. */
 static qboolean s_al_reverbReset = qfalse;
+
+/* =========================================================================
+ * Trace-level debug logging.
+ *
+ * S_AL_TRACE(level, fmt, ...) — prints when s_alTrace >= level.
+ *   level 1 : key lifecycle events (source alloc/free, music open/close,
+ *             AL errors at critical call sites, init sequence).
+ *   level 2 : verbose — every source setup, buffer queue/unqueue, and
+ *             intermediate state change.
+ *
+ * S_AL_CheckALError(where) — queries and logs any pending AL error then
+ *   clears the error state.  Only active when s_alTrace >= 1 so the
+ *   extra qalGetError() calls are never visible in production builds.
+ * =========================================================================
+ */
+#define S_AL_TRACE(lvl, fmt, ...) \
+    do { if (s_alTrace && s_alTrace->integer >= (lvl)) \
+        Com_Printf("[altrace] " fmt, ##__VA_ARGS__); } while(0)
+
+static void S_AL_CheckALError( const char *where )
+{
+    ALenum err;
+    if (!s_alTrace || s_alTrace->integer < 1) return;
+    err = qalGetError();
+    if (err != AL_NO_ERROR)
+        Com_Printf("[altrace] ^1AL error 0x%04x at %s\n", (unsigned)err, where);
+}
 
 /* AL_SOFT_direct_channels: when available, local (head-locked) sources bypass
  * the HRTF convolution pipeline and route PCM straight to the stereo output.
@@ -984,6 +1012,8 @@ static int S_AL_GetFreeSource( void )
             (nonLocalIdx >= 0) ? nonLocalIdx : anyIdx;
 
         if (i >= 0) {
+            S_AL_TRACE(2, "GetFreeSource: stealing slot %d (sfx %d) for new sound\n",
+                       i, s_al_src[i].sfx);
             qalSourceStop(s_al_src[i].source);
             qalSourcei(s_al_src[i].source, AL_BUFFER, 0);
             s_al_src[i].isPlaying = qfalse;
@@ -1273,6 +1303,21 @@ static void S_AL_MusicStop( void )
     ALint  queued;
     ALuint buf;
 
+    S_AL_TRACE(2, "MusicStop: active=%d source=%u stream=%p\n",
+               s_al_music.active, s_al_music.source,
+               (void *)s_al_music.stream);
+
+    /* If no valid music source was created (e.g. voice pool was exhausted
+     * at init), only clean up the codec stream and return. */
+    if (!s_al_music.source) {
+        if (s_al_music.stream) {
+            S_CodecCloseStream(s_al_music.stream);
+            s_al_music.stream = NULL;
+        }
+        s_al_music.active = qfalse;
+        return;
+    }
+
     /* Stop the source unconditionally so that all queued buffers transition
      * to the "processed" state and can be unqueued.  We do this even when
      * active==qfalse because MusicUpdate may have set active=qfalse on EOF
@@ -1308,12 +1353,18 @@ static qboolean S_AL_MusicFillBuffer( ALuint buf )
     info = &stream->info;
     read = S_CodecReadStream(stream, S_AL_MUSIC_BUFSZ, musicBuf);
     if (read <= 0) {
+        S_AL_TRACE(1, "MusicFillBuffer: stream read=%d (EOF or error) looping=%d\n",
+                   read, s_al_music.looping);
         /* End of track — try to loop */
         S_CodecCloseStream(s_al_music.stream);
         s_al_music.stream = NULL;
         if (s_al_music.looping && s_al_music.loopFile[0]) {
             s_al_music.stream = S_CodecOpenStream(s_al_music.loopFile);
-            if (!s_al_music.stream) return qfalse;
+            if (!s_al_music.stream) {
+                S_AL_TRACE(1, "MusicFillBuffer: loop reopen \"%s\" failed\n",
+                           s_al_music.loopFile);
+                return qfalse;
+            }
             stream = s_al_music.stream;
             info   = &stream->info;
             read   = S_CodecReadStream(stream, S_AL_MUSIC_BUFSZ, musicBuf);
@@ -1325,6 +1376,7 @@ static qboolean S_AL_MusicFillBuffer( ALuint buf )
 
     fmt = S_AL_Format(info->width, info->channels);
     qalBufferData(buf, fmt, musicBuf, read, info->rate);
+    S_AL_CheckALError("MusicFillBuffer/qalBufferData");
     return qtrue;
 }
 
@@ -1341,17 +1393,22 @@ static void S_AL_MusicUpdate( void )
     for (i = 0; i < processed; i++) {
         qalSourceUnqueueBuffers(s_al_music.source, 1, &buf);
         if (!S_AL_MusicFillBuffer(buf)) {
+            S_AL_TRACE(1, "MusicUpdate: fill failed — stopping music\n");
             s_al_music.active = qfalse;
             return;
         }
         qalSourceQueueBuffers(s_al_music.source, 1, &buf);
+        S_AL_CheckALError("MusicUpdate/qalSourceQueueBuffers");
     }
 
     /* Restart if the source stalled (buffer underrun) */
     qalGetSourcei(s_al_music.source, AL_BUFFERS_QUEUED, &queued);
     qalGetSourcei(s_al_music.source, AL_SOURCE_STATE, &state);
-    if (queued > 0 && state != AL_PLAYING && !s_al_music.paused)
+    if (queued > 0 && state != AL_PLAYING && !s_al_music.paused) {
+        S_AL_TRACE(1, "MusicUpdate: source stalled — restarting playback\n");
         qalSourcePlay(s_al_music.source);
+        S_AL_CheckALError("MusicUpdate/qalSourcePlay");
+    }
 }
 
 /* =========================================================================
@@ -1504,18 +1561,23 @@ static void S_AL_Shutdown( void )
     }
     s_al_numSrc = 0;
 
-    /* Music */
+    /* Music — MusicStop already stops and unqueues all buffers.
+     * The redundant qalSourceStop that was here has been removed.
+     * Guard the delete against source==0 (init failure when voice pool
+     * was exhausted before the music source could be created). */
     S_AL_MusicStop();
-    qalSourceStop(s_al_music.source);
-    qalDeleteSources(1, &s_al_music.source);
+    if (s_al_music.source)
+        qalDeleteSources(1, &s_al_music.source);
     qalDeleteBuffers(S_AL_MUSIC_BUFFERS, s_al_music.buffers);
 
     /* Raw samples */
     if (s_al_raw.active) {
-        qalSourceStop(s_al_raw.source);
+        if (s_al_raw.source)
+            qalSourceStop(s_al_raw.source);
         s_al_raw.active = qfalse;
     }
-    qalDeleteSources(1, &s_al_raw.source);
+    if (s_al_raw.source)
+        qalDeleteSources(1, &s_al_raw.source);
     qalDeleteBuffers(S_AL_RAW_BUFFERS, s_al_raw.buffers);
 
     /* EFX cleanup */
@@ -1597,6 +1659,9 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
 
     r->lastTimeUsed = Com_Milliseconds();
     qalSourcePlay(s_al_src[srcIdx].source);
+    S_AL_CheckALError("StartSound/qalSourcePlay");
+    S_AL_TRACE(2, "StartSound: sfx=%d ent=%d ch=%d slot=%d local=%d\n",
+               sfx, entnum, entchannel, srcIdx, isLocal);
 }
 
 static void S_AL_StartLocalSound( sfxHandle_t sfx, int channelNum )
@@ -1618,6 +1683,9 @@ static void S_AL_StartLocalSound( sfxHandle_t sfx, int channelNum )
                   qfalse /* not ambient */);
     r->lastTimeUsed = Com_Milliseconds();
     qalSourcePlay(s_al_src[srcIdx].source);
+    S_AL_CheckALError("StartLocalSound/qalSourcePlay");
+    S_AL_TRACE(2, "StartLocalSound: sfx=%d ch=%d slot=%d\n",
+               sfx, channelNum, srcIdx);
 }
 
 static void S_AL_StartBackgroundTrack( const char *intro, const char *loop )
@@ -1627,15 +1695,31 @@ static void S_AL_StartBackgroundTrack( const char *intro, const char *loop )
 
     if (!s_al_started) return;
 
+    S_AL_TRACE(1, "StartBackgroundTrack: intro=\"%s\" loop=\"%s\" source=%u\n",
+               intro ? intro : "(null)", loop ? loop : "(null)",
+               s_al_music.source);
+
     S_AL_MusicStop();
 
     if (!intro || !*intro) return;
+
+    /* If no valid music source was created at init (e.g. voice pool was
+     * exhausted by the game source pool — a PR #95 regression), warn and
+     * bail out gracefully rather than sending AL_INVALID_NAME to every
+     * subsequent qalSource* call, which causes OpenAL Soft's 64-bit GCC
+     * runtime to throw 0x20474343 C++ exceptions and hard-crash. */
+    if (!s_al_music.source) {
+        Com_Printf(S_COLOR_YELLOW "S_AL: StartBackgroundTrack: no music source — "
+                   "background music disabled (check s_alMaxSrc)\n");
+        return;
+    }
 
     s_al_music.stream = S_CodecOpenStream(intro);
     if (!s_al_music.stream) {
         Com_Printf(S_COLOR_YELLOW "S_AL: couldn't open music %s\n", intro);
         return;
     }
+    S_AL_TRACE(1, "StartBackgroundTrack: stream opened for \"%s\"\n", intro);
 
     Q_strncpyz(s_al_music.introFile, intro, sizeof(s_al_music.introFile));
     if (loop && *loop)
@@ -1649,10 +1733,12 @@ static void S_AL_StartBackgroundTrack( const char *intro, const char *loop )
         if (!S_AL_MusicFillBuffer(s_al_music.buffers[i]))
             break;
         qalSourceQueueBuffers(s_al_music.source, 1, &s_al_music.buffers[i]);
+        S_AL_CheckALError("StartBackgroundTrack/qalSourceQueueBuffers");
         primed = qtrue;
     }
 
     if (!primed) {
+        S_AL_TRACE(1, "StartBackgroundTrack: priming failed for \"%s\"\n", intro);
         S_AL_MusicStop();
         return;
     }
@@ -1666,6 +1752,9 @@ static void S_AL_StartBackgroundTrack( const char *intro, const char *loop )
     qalSource3f(s_al_music.source, AL_POSITION, 0.0f, 0.0f, 0.0f);
     qalSourcef(s_al_music.source, AL_ROLLOFF_FACTOR, 0.0f);
     qalSourcePlay(s_al_music.source);
+    S_AL_CheckALError("StartBackgroundTrack/qalSourcePlay");
+    S_AL_TRACE(1, "StartBackgroundTrack: playing (looping=%d)\n",
+               s_al_music.looping);
 }
 
 static void S_AL_StopBackgroundTrack( void )
@@ -1683,6 +1772,14 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
 
     if (!s_al_started) return;
 
+    /* If no valid raw source was created at init (voice pool exhausted by
+     * the game source pool), silently drop cinematic/VoIP audio rather than
+     * flooding AL with AL_INVALID_NAME errors that crash the 64-bit build. */
+    if (!s_al_raw.source) {
+        S_AL_TRACE(2, "RawSamples: no raw source — dropping %d samples\n", samples);
+        return;
+    }
+
     fmt  = S_AL_Format(width, channels);
     size = samples * width * channels;
 
@@ -1692,6 +1789,7 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
      * after it has been played.  Without this drain step the round-robin pool
      * would attempt alBufferData on still-attached buffers after 8 calls and
      * silently fail, causing raw-samples audio (cinematics, VoIP) to stop. */
+    processed = 0;
     qalGetSourcei(s_al_raw.source, AL_BUFFERS_PROCESSED, &processed);
     while (processed-- > 0) {
         ALuint tmp;
@@ -1703,9 +1801,12 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
     s_al_raw.nextBuf = (s_al_raw.nextBuf + 1) % S_AL_RAW_BUFFERS;
 
     qalBufferData(buf, fmt, data, size, rate);
+    S_AL_CheckALError("RawSamples/qalBufferData");
     qalSourceQueueBuffers(s_al_raw.source, 1, &buf);
+    S_AL_CheckALError("RawSamples/qalSourceQueueBuffers");
 
     qalSourcef(s_al_raw.source, AL_GAIN, volume);
+    state = AL_STOPPED;
     qalGetSourcei(s_al_raw.source, AL_SOURCE_STATE, &state);
     if (state != AL_PLAYING)
         qalSourcePlay(s_al_raw.source);
@@ -1725,7 +1826,8 @@ static void S_AL_StopAllSounds( void )
     S_AL_MusicStop();
 
     if (s_al_raw.active) {
-        qalSourceStop(s_al_raw.source);
+        if (s_al_raw.source)
+            qalSourceStop(s_al_raw.source);
         s_al_raw.active = qfalse;
     }
 
@@ -3286,6 +3388,16 @@ qboolean S_AL_Init( soundInterface_t *si )
         "When > 0, suppresses a second start of the exact same sound from the same "
         "entity within this window — prevents audible doubling on rapid re-triggers.");
 
+    s_alTrace = Cvar_Get("s_alTrace", "0", CVAR_TEMP);
+    Cvar_CheckRange(s_alTrace, "0", "2", CV_INTEGER);
+    Cvar_SetDescription(s_alTrace,
+        "OpenAL trace logging. "
+        "0 = off (default). "
+        "1 = key lifecycle events: source alloc/free, music open/close/loop, "
+        "video audio drops, AL errors at critical call sites, init sequence. "
+        "2 = verbose: every source setup, buffer queue/unqueue, and state change. "
+        "Not archived. Set before starting the game to capture the init sequence.");
+
     /* Load library */
     if (!S_AL_LoadLibrary())
         return qfalse;
@@ -3463,8 +3575,66 @@ qboolean S_AL_Init( soundInterface_t *si )
                (s_al_directChannelsExt && !s_al_directChannels)
                    ? " (disabled by s_alDirectChannels 0)" : "");
 
-    /* Allocate source pool — up to s_alMaxSrc sources (capped at S_AL_MAX_SRC).
-     * OpenAL Soft will stop early if it hits its own mix-voice limit. */
+    /* -----------------------------------------------------------------------
+     * Streaming sources — allocated BEFORE the game source pool so they are
+     * guaranteed a valid OpenAL voice regardless of the driver's voice limit.
+     *
+     * PR #95 raised s_alMaxSrc to 512.  OpenAL Soft's default mix-voice cap
+     * is 256.  When the game pool was allocated first it consumed all 256
+     * voices, leaving s_al_music.source = 0 and s_al_raw.source = 0.
+     * Every subsequent qalSource* call on source 0 generates AL_INVALID_NAME,
+     * which causes OpenAL Soft's 64-bit GCC runtime to throw 0x20474343 C++
+     * exceptions — the hard crash reported after the intro video finishes and
+     * the menu music tries to start.  On 32-bit the same root cause silently
+     * drops all video audio and menu music without crashing.
+     * ----------------------------------------------------------------------- */
+
+    /* Music streaming source and buffers */
+    Com_Memset(&s_al_music, 0, sizeof(s_al_music));
+    {
+        ALenum preErr = qalGetError(); /* clear any stale error before the alloc */
+        if (preErr != AL_NO_ERROR)
+            S_AL_TRACE(1, "init: stale AL error 0x%04x cleared before music source alloc\n",
+                       (unsigned)preErr);
+    }
+    qalGenSources(1, &s_al_music.source);
+    if (qalGetError() != AL_NO_ERROR) {
+        Com_Printf(S_COLOR_YELLOW
+            "S_AL: WARNING: failed to create music streaming source — "
+            "background music will be silent\n");
+        s_al_music.source = 0;
+    } else {
+        S_AL_TRACE(1, "init: music source created (AL id %u)\n",
+                   s_al_music.source);
+    }
+    qalGenBuffers(S_AL_MUSIC_BUFFERS, s_al_music.buffers);
+
+    /* Raw-samples source and buffers (cinematics / VoIP) */
+    Com_Memset(&s_al_raw, 0, sizeof(s_al_raw));
+    {
+        ALenum preErr = qalGetError(); /* clear any stale error before the alloc */
+        if (preErr != AL_NO_ERROR)
+            S_AL_TRACE(1, "init: stale AL error 0x%04x cleared before raw source alloc\n",
+                       (unsigned)preErr);
+    }
+    qalGenSources(1, &s_al_raw.source);
+    if (qalGetError() != AL_NO_ERROR) {
+        Com_Printf(S_COLOR_YELLOW
+            "S_AL: WARNING: failed to create raw streaming source — "
+            "cinematic and VoIP audio will be silent\n");
+        s_al_raw.source = 0;
+    } else {
+        S_AL_TRACE(1, "init: raw source created (AL id %u)\n",
+                   s_al_raw.source);
+        qalSourcei(s_al_raw.source, AL_SOURCE_RELATIVE, AL_TRUE);
+        qalSource3f(s_al_raw.source, AL_POSITION, 0.0f, 0.0f, 0.0f);
+        qalSourcef(s_al_raw.source, AL_ROLLOFF_FACTOR, 0.0f);
+    }
+    qalGenBuffers(S_AL_RAW_BUFFERS, s_al_raw.buffers);
+
+    /* Game source pool — up to s_alMaxSrc sources (capped at S_AL_MAX_SRC).
+     * OpenAL Soft will stop early if it hits its own mix-voice limit; the
+     * streaming sources above are already allocated so they are unaffected. */
     {
         int wantSrc = (s_alMaxSrc && s_alMaxSrc->integer > 0)
                       ? s_alMaxSrc->integer : S_AL_MAX_SRC;
@@ -3481,21 +3651,10 @@ qboolean S_AL_Init( soundInterface_t *si )
             s_al_src[i].sfx = -1;
             s_al_numSrc++;
         }
-        Com_Printf("S_AL: %d sources allocated\n", s_al_numSrc);
+        Com_Printf("S_AL: %d game sources allocated (wanted %d)\n",
+                   s_al_numSrc, wantSrc);
+        S_AL_TRACE(1, "init: game pool %d/%d voices\n", s_al_numSrc, wantSrc);
     }
-
-    /* Music streaming source and buffers */
-    Com_Memset(&s_al_music, 0, sizeof(s_al_music));
-    qalGenSources(1, &s_al_music.source);
-    qalGenBuffers(S_AL_MUSIC_BUFFERS, s_al_music.buffers);
-
-    /* Raw-samples source and buffers */
-    Com_Memset(&s_al_raw, 0, sizeof(s_al_raw));
-    qalGenSources(1, &s_al_raw.source);
-    qalGenBuffers(S_AL_RAW_BUFFERS, s_al_raw.buffers);
-    qalSourcei(s_al_raw.source, AL_SOURCE_RELATIVE, AL_TRUE);
-    qalSource3f(s_al_raw.source, AL_POSITION, 0.0f, 0.0f, 0.0f);
-    qalSourcef(s_al_raw.source, AL_ROLLOFF_FACTOR, 0.0f);
 
     /* Looping state */
     Com_Memset(s_al_loops, 0, sizeof(s_al_loops));
