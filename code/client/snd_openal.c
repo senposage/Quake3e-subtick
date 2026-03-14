@@ -4747,7 +4747,7 @@ qboolean S_AL_Init( soundInterface_t *si )
      * dB suffix for a per-sample cut (N ≤ 0, floor −40 dB, fractional OK).
      * Empty slots are silently skipped during matching.
      * Slot 1 and 2 default to the two disproportionately loud URT feedback sounds
-     * with a −2.5 dB (≈25% amplitude) cut each. */
+     * with a −0.4 dB cut each. */
     {
         static const char * const slotDesc =
             "One sound path pattern for the s_alExtraVol volume group "
@@ -4759,8 +4759,8 @@ qboolean S_AL_Init( soundInterface_t *si )
             "All eight slots are evaluated together: a sound is matched when "
             "at least one positive slot matches and no exclusion slot matches.";
         static const char * const slotDefaults[S_AL_EXTRAVOL_SLOTS] = {
-            "sound/feedback/hit.wav:-2.5",
-            "sound/feedback/kill.wav:-2.5",
+            "sound/feedback/hit.wav:-0.4",
+            "sound/feedback/kill.wav:-0.4",
             "", "", "", "", "", ""
         };
         int si;
