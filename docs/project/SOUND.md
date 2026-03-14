@@ -627,20 +627,54 @@ Casts **14 world-space rays** from the listener every **16 frames** plus up to *
 - 1 straight down — max `s_alEnvDownDist` u (default 160)
 - 0–2 look-ahead (direction of travel) — max `s_alEnvHorizDist` u, only when `moveDist > s_alEnvVelThresh`
 
-**openFrac** is a weighted average: `s_alEnvHorizWeight` × horizontal + (1 − `s_alEnvHorizWeight`) × vertical (defaults 70 / 30 %).  When the player is moving faster than `s_alEnvVelThresh` units per probe cycle, up to `s_alEnvVelWeight` (default 30 %) of openFrac is blended from 2 look-ahead rays in the direction of travel — this prevents the classifier from stalling in the TRANSITION zone when walking from indoors to outdoors.
+**openFrac** is a weighted average: `s_alEnvHorizWeight` × horizontal + (1 − `s_alEnvHorizWeight`) × vertical (defaults 70 / 30 %).  When the player is moving faster than `s_alEnvVelThresh` units per probe cycle, up to `s_alEnvVelWeight` (default 30 %) of openFrac is blended from 2 look-ahead rays in the direction of travel — this prevents the classifier from stalling in semi-open zones when walking from indoors to outdoors.
 
-A **rolling history buffer** (`s_alEnvHistorySize` slots, default 3, max 8) averages the last N probe sets. A **movement cache** reuses metrics when the listener has moved < 32 units since the last probe.
+**vertOpenFrac** is now history-averaged alongside the other metrics, enabling two additional derived signals:
+
+- **caveBonus** (`sizeFactor × clamp(0.25 − vertOpenFrac, 0, 0.25) / 0.25`): fires when the listener is in a large horizontal space with solid overhead (cave, mine tunnel, underground passage). Adds up to 1.0 s extra decay, boosts HF ratio (stone surfaces), echo density, and late reverb.
+- **openBoxFrac** (`clamp((vertOpenFrac − horizOpenFrac − 0.20) / 0.60, 0, 1)` when `horizOpenFrac < 0.50`): fires when sky is clearly visible above but walls surround the listener — URT "open box" designs (rooftops, walled courtyards, arenas with no ceiling). Trims decay (no ceiling to trap reverb), adds early reflections off the surrounding walls, and slightly reduces bass in the reverb tail.
+
+A **rolling history buffer** (`s_alEnvHistorySize` slots, default 3, max 8) averages the last N probe sets for all four metrics (size, open, corr, vert). A **movement cache** reuses metrics when the listener has moved < 32 units since the last probe.
 
 Parameters blend smoothly via IIR pole `s_alEnvSmoothPole` (default 0.92, ≈ 3.5 s half-transition at 60 fps).  When the player is moving, the pole is automatically reduced by up to 0.07 (toward 0.85) so transitions respond faster during environment changes.
 
-| Environment | `openFrac` | Target `decayTime` | Target late-gain |
-|---|---|---|---|
-| Tight room | low | ~0.5 s | low |
-| Normal indoor | low | ~1.5 s | moderate |
-| Large hall/cave | low | ~2.5–3.0 s | moderate–high |
-| Corridor | low + asymmetric | medium | moderate + strong reflections |
-| Semi-open / urban | ~0.30–0.55 | ~0.8–1.3 s | low–moderate |
-| Open outdoor | > 0.55 | < 0.5 s | near-zero |
+#### Environment classification (9 types)
+
+| Label | Condition | Acoustic character |
+|---|---|---|
+| `OUTDOOR` | openFrac > 0.60 | Very short decay, near-dry, dim reverb tail |
+| `OPEN_BOX` | openBoxFrac > 0.35 | Walls around, sky above: short decay, strong early reflections, moderate wet |
+| `SEMI_OPEN` | openFrac > 0.42 | Forest edge, large plaza: transitional with some reverb |
+| `CAVE` | caveBonus > 0.30 | Long decay, stone HF ratio, dense echo, bassy tail |
+| `CORRIDOR` | corrFactor > 0.40 & openFrac < 0.25 | Flutter echo, bright HF, strong reflections, low diffusion |
+| `HALLWAY` | corrFactor > 0.20 & openFrac < 0.45 | Multi-doorway passage: corridor + urban early-reflection blend |
+| `LARGE_HALL` | sizeFactor > 0.65 | Large enclosed space, long decay, moderate density |
+| `MEDIUM_ROOM` | sizeFactor > 0.30 | Standard indoor room |
+| `SMALL_ROOM` | fallback | Short decay, modest reverb |
+
+#### EFX parameters dynamically modulated (9 total)
+
+The following EFX parameters are now all driven by the probe metrics every 16 frames, giving each environment a distinct spectral and acoustic signature:
+
+| Parameter | Range driven | Effect |
+|---|---|---|
+| `DECAY_TIME` | openFrac, sizeFactor, caveBonus, openBoxFrac | Room size / tail length |
+| `LATE_REVERB_GAIN` | sizeFactor, openFrac, caveBonus | Reverb tail loudness |
+| `REFLECTIONS_GAIN` | corrFactor, openFrac, urban semi-open boost, openBoxFrac | Early reflection strength |
+| `EFFECTSLOT_GAIN` | openFrac, openBoxFrac | Overall wet/dry mix |
+| `DECAY_HFRATIO` | openFrac, caveBonus, corrFactor | Surface hardness: 0.55 (outdoor/foliage) → 1.25+ (stone/cave) |
+| `DENSITY` | openFrac, caveBonus | Echo density: sparse outdoor → dense cave |
+| `DIFFUSION` | openFrac, caveBonus, corrFactor | Wall irregularity: corridor flutter vs cave scatter |
+| `GAINHF` | openFrac, corrFactor, caveBonus, openBoxFrac | Reverb tail treble EQ: dim outdoor → bright corridor |
+| `GAINLF` | openFrac, caveBonus, openBoxFrac | Reverb tail bass EQ: thin outdoor → resonant cave |
+
+#### Fire-impact reverb (consistency fix)
+
+The muzzle-report and incoming-fire reverb boosts (`s_alFireImpactReverb`) are now applied directly to the **smoothed output values** (`cur*`) rather than to the intermediate targets after the IIR blend.  This means:
+- The boost is **immediate** — it takes effect in the same probe cycle it is detected.
+- It is **classifier-independent** — a weapon fired at a wall produces an audible spike regardless of whether the environment probe reports CORRIDOR, OUTDOOR, or any other type.
+- It includes a **slot gain spike** so the muzzle report is audible even in dry outdoor or semi-open environments where the base slot gain is low.
+- When `s_alDynamicReverb 0` (static reverb mode), a dedicated `S_AL_UpdateStaticFireBoost` function provides the same muzzle-report and incoming-fire enhancement directly against the static EFX baseline.
 
 #### Live tuning with `/s_alReset`
 
@@ -669,6 +703,21 @@ s_alDebugReverb 2        // watch the output
 | `s_alEnvVelWeight` | 0.30 | 0–0.5 | Max look-ahead blend weight |
 | `s_alOccWeaponDist` | 160 | 80–400 | CHAN_WEAPON no-occlusion radius (u) |
 
+#### HRTF directional accuracy (`s_alOcclusion 1`)
+
+When a source is occluded, the engine searches for the nearest acoustic gap using 8 tangent-plane probe rays displaced `s_alOccSearchRadius` units from the source.  The found gap position is **projected onto the source's actual distance** from the listener before blending, so `s_alOccPosBlend` now directly controls an angular direction shift rather than a small positional nudge:
+
+| `s_alOccPosBlend` | Effect |
+|---|---|
+| 0.0 | Always use true source position — no gap hint |
+| 0.40 (default) | ~16° apparent shift for a doorway 45° off the direct line |
+| 1.0 | Full redirect to gap direction — maximum corner-peek effect |
+
+| CVar | Default | Range | Purpose |
+|---|---|---|---|
+| `s_alOccPosBlend` | 0.40 | 0–1 | Fraction of HRTF redirect toward nearest acoustic gap |
+| `s_alOccSearchRadius` | 120 | 20–400 | Probe radius (u) for gap search — increase for wide doorways/pillars |
+
 #### Debug workflow (`s_alDebugReverb`)
 
 ```
@@ -676,17 +725,15 @@ s_alReverb 1 ; s_alDynamicReverb 1 ; s_alDebugReverb 1
 ```
 Prints one line per probe cycle (every 16 frames):
 ```
-[dynreverb] env=MEDIUM_ROOM  size=0.42  open=0.18  corr=0.12  |  tgt: dec=1.24 lat=0.11 ref=0.04 slot=0.16  |  cur: dec=1.18 lat=0.10 ref=0.04 slot=0.16
+[dynreverb] env=OPEN_BOX    size=0.38  open=0.33  corr=0.08  |  tgt: dec=0.82 lat=0.14 ref=0.22 slot=0.28  |  cur: dec=0.79 lat=0.13 ref=0.21 slot=0.27
 ```
 
 ```
 s_alDebugReverb 2
 ```
-Also prints raw pre-history probe values with the horizontal/vertical split, current history window, and player velocity:
+Also prints raw pre-history probe values including the new `cave=` and `box=` metrics:
 ```
-             raw: size=0.44  horizOpen=0.21  vertOpen=0.08  corr=0.15  |  hist=3/3  vel=62  cache=miss
-[alfilter] src#7 3D: reset stale filter (prev occ=0.23  GAIN≈0.42  GAINHF≈0.05)
-[alfilter] src#2 local: cleared stale filter
+             raw: size=0.40  horizOpen=0.14  vertOpen=0.88  corr=0.09  cave=0.00  box=0.71  |  hist=3/3  vel=58  cache=miss
 ```
 The `vel=` field shows movement units per probe cycle — use it to verify `s_alEnvVelThresh` is appropriate for your frame rate.
 

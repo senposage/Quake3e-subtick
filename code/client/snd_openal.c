@@ -545,6 +545,7 @@ static cvar_t *s_alLoopFadeDist;    /* distance from maxDist at which new source
 static cvar_t *s_alOccGainFloor;   /* floor of AL_LOWPASS_GAIN for fully-blocked sources */
 static cvar_t *s_alOccHFFloor;     /* floor of AL_LOWPASS_GAINHF (HF content) through walls */
 static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest gap [0-1] */
+static cvar_t *s_alOccSearchRadius; /* tangent-plane probe radius for gap finding [units] */
 static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each frame */
 static cvar_t *s_alDebugPlayback;  /* 0=off 1=rate-mismatch+preemption 2=+natural-stop */
 static cvar_t *s_alMaxSrc;         /* max source pool size (LATCH) */
@@ -1412,9 +1413,12 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
             { 1.f,  0.f}, {-1.f,  0.f}, { 0.f,  1.f}, { 0.f, -1.f},
             { 1.f,  1.f}, { 1.f, -1.f}, {-1.f,  1.f}, {-1.f, -1.f}
         };
-        /* ~half a doorway width; large enough to reach around thin walls,
-         * small enough not to sample through unrelated geometry */
-        static const float SEARCH_RADIUS = 80.0f;
+        /* Doorway-scale search radius — default 120 u (≈ URT door half-width).
+         * Tunable via s_alOccSearchRadius: increase to reach further around
+         * thick walls or wide columns, decrease for tighter gap sensitivity. */
+        float SEARCH_RADIUS = s_alOccSearchRadius
+                              ? s_alOccSearchRadius->value : 120.0f;
+        if (SEARCH_RADIUS < 20.f) SEARCH_RADIUS = 20.f;
 
         vec3_t fwd, right, upv;
         int    k;
@@ -1450,6 +1454,39 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 VectorCopy(probe, acousticPos);
                 if (bestFrac >= 1.0f)
                     break;   /* clear path found — stop searching */
+            }
+        }
+    }
+
+    /* Project the best-gap position onto the listener→source distance.
+     *
+     * Without projection acousticPos sits only SEARCH_RADIUS units from the
+     * real source.  The listener→acousticPos angle is nearly identical to
+     * listener→source, giving < 1° apparent HRTF shift even at high pBlend
+     * values (a 120 u gap offset on a 500 u source moves the angle ≈ 5°).
+     *
+     * With projection we normalise the listener→gap direction and rescale
+     * it to the source distance.  At pBlend=0.40 a doorway 45° to the right
+     * of the direct line now gives a clearly audible ~16° HRTF direction
+     * shift — the sound appears to come from around the corner. */
+    if (bestFrac > directFrac) {
+        vec3_t gapVec;
+        float  gapLen;
+        VectorSubtract(acousticPos, s_al_listener_origin, gapVec);
+        gapLen = VectorLength(gapVec);
+        if (gapLen > 1.0f) {
+            vec3_t srcVec;
+            float  srcLen;
+            VectorSubtract(srcOrigin, s_al_listener_origin, srcVec);
+            srcLen = VectorLength(srcVec);
+            if (srcLen > 1.0f) {
+                float rcpGap = 1.0f / gapLen;
+                acousticPos[0] = s_al_listener_origin[0]
+                                 + gapVec[0] * rcpGap * srcLen;
+                acousticPos[1] = s_al_listener_origin[1]
+                                 + gapVec[1] * rcpGap * srcLen;
+                acousticPos[2] = s_al_listener_origin[2]
+                                 + gapVec[2] * rcpGap * srcLen;
             }
         }
     }
@@ -3129,10 +3166,15 @@ typedef char s_al_envDists_size_assert[
 static void S_AL_UpdateDynamicReverb( void )
 {
     /* Smoothed current EFX values (negative = uninitialised, snap on first run) */
-    static float curDecay  = -1.f;
-    static float curLate   =  0.f;
-    static float curRefl   =  0.f;
-    static float curSlot   =  0.f;
+    static float curDecay    = -1.f;
+    static float curLate     =  0.f;
+    static float curRefl     =  0.f;
+    static float curSlot     =  0.f;
+    static float curHFRatio  = -1.f;  /* decay HF ratio — surface hardness  */
+    static float curDensity  = -1.f;  /* echo density                        */
+    static float curDiffusion = -1.f; /* wall diffusion (flutter vs scatter) */
+    static float curGainHF   = -1.f;  /* reverb tail treble level (EQ)       */
+    static float curGainLF   = -1.f;  /* reverb tail bass level (EQ)         */
     static int   lastFrame = -(S_AL_ENV_RATE);
 
     /* Rolling environment history — averages the last S_AL_ENV_HISTORY probe
@@ -3142,6 +3184,7 @@ static void S_AL_UpdateDynamicReverb( void )
     static float histSize[S_AL_ENV_HISTORY_MAX];
     static float histOpen[S_AL_ENV_HISTORY_MAX];
     static float histCorr[S_AL_ENV_HISTORY_MAX];
+    static float histVert[S_AL_ENV_HISTORY_MAX];  /* vertical openness history */
     static int   histIdx   = 0;
     static int   histCount = 0;
 
@@ -3166,6 +3209,9 @@ static void S_AL_UpdateDynamicReverb( void )
     int   i;
     float horizOpenFrac, vertOpenFrac, openFrac, sizeFactor, corrFactor;
     float targetDecay, targetLate, targetRefl, targetSlot;
+    float targetHFRatio, targetDensity, targetDiffusion;
+    float targetGainHF, targetGainLF;
+    float caveBonus, openBoxFrac;
     float baseGain;
     qboolean snap;
 
@@ -3425,21 +3471,24 @@ static void S_AL_UpdateDynamicReverb( void )
         histSize[histIdx] = sizeFactor;
         histOpen[histIdx] = openFrac;
         histCorr[histIdx] = corrFactor;
+        histVert[histIdx] = vertOpenFrac;
         histIdx = (histIdx + 1) % historySize;
         if (histCount < historySize) histCount++;
         /* If the user shrank historySize, drop excess entries. */
         if (histCount > historySize) histCount = historySize;
 
         if (histCount > 1) {
-            float sumSize = 0.f, sumOpen = 0.f, sumCorr = 0.f;
+            float sumSize = 0.f, sumOpen = 0.f, sumCorr = 0.f, sumVert = 0.f;
             for (i = 0; i < histCount; i++) {
                 sumSize += histSize[i];
                 sumOpen += histOpen[i];
                 sumCorr += histCorr[i];
+                sumVert += histVert[i];
             }
-            sizeFactor = sumSize / (float)histCount;
-            openFrac   = sumOpen / (float)histCount;
-            corrFactor = sumCorr / (float)histCount;
+            sizeFactor   = sumSize / (float)histCount;
+            openFrac     = sumOpen / (float)histCount;
+            corrFactor   = sumCorr / (float)histCount;
+            vertOpenFrac = sumVert / (float)histCount;
         }
     }
 
@@ -3447,36 +3496,133 @@ static void S_AL_UpdateDynamicReverb( void )
     baseGain = (s_alReverbGain && s_alReverbGain->value > 0.f)
                ? s_alReverbGain->value : 0.35f;
 
-    /* Decay: short room (0.5 s) up to large space (3.0 s), killed outdoors. */
+    /* ---- Cave bonus: large horizontal space with enclosed overhead --------
+     * Detects caves, mine tunnels, and underground passages.  The listener
+     * sees far horizontally (sizeFactor high) but solid rock overhead keeps
+     * vertOpenFrac below 0.25.  Boosts decay, HF-ratio (stone surfaces), echo
+     * density, and late reverb for the thick, long-tailed underground sound. */
+    {
+        float coveredCeiling = (0.25f - vertOpenFrac) / 0.25f;
+        if (coveredCeiling < 0.f) coveredCeiling = 0.f;
+        caveBonus = sizeFactor * coveredCeiling;
+        if (caveBonus > 1.f) caveBonus = 1.f;
+    }
+
+    /* ---- Open-box fraction: walls all around but open sky above ----------
+     * Detects URT "open box" designs: rooftops, open-top courtyards, walled
+     * arenas with no ceiling.  Signature: vertOpenFrac >> horizOpenFrac.
+     * Gives shorter decay (no ceiling to trap reverb), strong early
+     * reflections (building walls), and moderate slot gain. */
+    {
+        float vertExcess = vertOpenFrac - horizOpenFrac - 0.20f;
+        if (vertExcess < 0.f) vertExcess = 0.f;
+        openBoxFrac = (horizOpenFrac < 0.50f) ? (vertExcess / 0.60f) : 0.f;
+        if (openBoxFrac > 1.f) openBoxFrac = 1.f;
+    }
+
+    /* Decay: short room (0.5 s) up to large space (3.0 s), killed outdoors.
+     * caveBonus adds up to 1.0 s extra tail for hard stone reflections;
+     * openBoxFrac trims the tail since the open sky kills long reverberation. */
     targetDecay = 0.5f + sizeFactor * 2.5f;
     targetDecay *= (1.f - openFrac * 0.85f);
+    targetDecay += caveBonus  * 1.0f;
+    targetDecay -= openBoxFrac * 0.30f;
     if (targetDecay < 0.1f) targetDecay = 0.1f;
 
     /* Late reverb tail: max 0.53 — clearly audible in enclosed spaces. */
     targetLate = 0.08f + sizeFactor * 0.45f;
     targetLate *= (1.f - openFrac * 0.85f);
+    targetLate += caveBonus * 0.12f;
     if (targetLate < 0.f) targetLate = 0.f;
     if (targetLate > 1.f) targetLate = 1.f;
 
-    /* Early reflections: corridor-boosted.  Max 0.40. */
+    /* Early reflections: corridor-boosted, urban semi-open boost, open-box boost.
+     *
+     * Semi-open urban boost (0.20–0.55 openFrac, non-corridor): courtyards,
+     * plazas, short hallways with doorways and walled alleys all reflect sound
+     * off surrounding faces without forming a single dominant corridor axis.
+     * A parabolic lift over that range gives them a characteristic early-
+     * reflection signature instead of flat near-dry reverb.
+     *
+     * Open-box boost: vertical walls produce strong first-order reflections
+     * even though the absence of a ceiling means no long late-reverb tail. */
     targetRefl = 0.05f + corrFactor * 0.35f;
+    if (openFrac > 0.20f && openFrac < 0.55f && corrFactor < 0.30f) {
+        float x = (openFrac - 0.20f) / 0.35f;          /* 0→1 over 0.20→0.55 */
+        targetRefl += 4.f * x * (1.f - x) * 0.20f;    /* parabola, peak 0.20 */
+    }
+    targetRefl += openBoxFrac * 0.18f;
     targetRefl *= (1.f - openFrac * 0.75f);
     if (targetRefl < 0.f) targetRefl = 0.f;
     if (targetRefl > 1.f) targetRefl = 1.f;
 
     /* Slot gain: scales with enclosure; outdoor → near-dry.
-     * Kill factor 0.70 — gradual transition so semi-open areas retain
-     * some reverb character. */
+     * Open-box gets a small bonus: wall reflections add wetness even without
+     * a ceiling to trap the tail. */
     targetSlot = baseGain * (1.f - openFrac * 0.70f);
+    targetSlot += openBoxFrac * baseGain * 0.15f;
     if (targetSlot < 0.f) targetSlot = 0.f;
     if (targetSlot > 1.f) targetSlot = 1.f;
 
+    /* Decay HF ratio: characterises surface hardness / material absorption.
+     *   Outdoor / forest  — ~0.55: air and foliage absorb HF quickly.
+     *   Concrete indoor   — ~0.83: default plaster/concrete.
+     *   Corridor          — ~1.05: flat parallel walls sustain HF (flutter).
+     *   Stone cave        — ~1.25: hard reflective surfaces; HF persists. */
+    targetHFRatio = 0.55f + (1.f - openFrac) * 0.55f
+                   + caveBonus  * 0.45f
+                   + corrFactor * 0.20f;
+    if (targetHFRatio < 0.1f) targetHFRatio = 0.1f;
+    if (targetHFRatio > 2.0f) targetHFRatio = 2.0f;
+
+    /* Echo density: sparse outdoors, increasingly rich indoors and in caves. */
+    targetDensity = 0.20f + (1.f - openFrac) * 0.50f + caveBonus * 0.30f;
+    if (targetDensity < 0.0f) targetDensity = 0.0f;
+    if (targetDensity > 1.0f) targetDensity = 1.0f;
+
+    /* Diffusion: wall irregularity.
+     * Corridors are less diffuse — parallel flat walls create flutter echo,
+     * which is itself an audible cue that the player is in a tight passage.
+     * Caves are highly diffuse — irregular rock surfaces scatter reflections.
+     * Outdoors and open-box: low (few surfaces to scatter off). */
+    targetDiffusion = 0.20f + (1.f - openFrac) * 0.55f
+                     + caveBonus  * 0.25f
+                     - corrFactor * 0.30f;
+    if (targetDiffusion < 0.0f) targetDiffusion = 0.0f;
+    if (targetDiffusion > 1.0f) targetDiffusion = 1.0f;
+
+    /* GainHF: high-frequency content of the reverb tail (EQ brightness).
+     * Outdoor: dim (air absorption thins HF over distance).
+     * Corridor: bright (concrete flush-wall flutter is rich in treble).
+     * Cave: strong (stone surfaces reflect HF with little absorption). */
+    targetGainHF = 0.60f + (1.f - openFrac) * 0.35f
+                  + corrFactor * 0.12f
+                  + caveBonus  * 0.10f
+                  - openBoxFrac * 0.08f;
+    if (targetGainHF < 0.0f) targetGainHF = 0.0f;
+    if (targetGainHF > 1.0f) targetGainHF = 1.0f;
+
+    /* GainLF: low-frequency content of the reverb tail (EQ bass weight).
+     * Outdoor: thin (little LF reinforcement in open air).
+     * Large indoor / cave: resonant (volume of enclosed air boosts bass).
+     * Open-box: trimmed (no ceiling to build standing low-frequency waves). */
+    targetGainLF = 0.50f + (1.f - openFrac) * 0.40f
+                  + caveBonus  * 0.20f
+                  - openBoxFrac * 0.15f;
+    if (targetGainLF < 0.0f) targetGainLF = 0.0f;
+    if (targetGainLF > 1.0f) targetGainLF = 1.0f;
+
     /* --- Smooth blend or snap -------------------------------------------- */
     if (snap) {
-        curDecay = targetDecay;
-        curLate  = targetLate;
-        curRefl  = targetRefl;
-        curSlot  = targetSlot;
+        curDecay     = targetDecay;
+        curLate      = targetLate;
+        curRefl      = targetRefl;
+        curSlot      = targetSlot;
+        curHFRatio   = targetHFRatio;
+        curDensity   = targetDensity;
+        curDiffusion = targetDiffusion;
+        curGainHF    = targetGainHF;
+        curGainLF    = targetGainLF;
     } else {
         /* Base pole from s_alEnvSmoothPole (default 0.92).
          * Reduced toward 0.85 when the player is moving — faster probe-to-probe
@@ -3492,20 +3638,26 @@ static void S_AL_UpdateDynamicReverb( void )
             blendPole = basePole - vf * 0.07f;
             if (blendPole < 0.5f) blendPole = 0.5f;
         }
-        curDecay = curDecay * blendPole + targetDecay * (1.f - blendPole);
-        curLate  = curLate  * blendPole + targetLate  * (1.f - blendPole);
-        curRefl  = curRefl  * blendPole + targetRefl  * (1.f - blendPole);
-        curSlot  = curSlot  * blendPole + targetSlot  * (1.f - blendPole);
+        curDecay     = curDecay     * blendPole + targetDecay     * (1.f - blendPole);
+        curLate      = curLate      * blendPole + targetLate      * (1.f - blendPole);
+        curRefl      = curRefl      * blendPole + targetRefl      * (1.f - blendPole);
+        curSlot      = curSlot      * blendPole + targetSlot      * (1.f - blendPole);
+        curHFRatio   = curHFRatio   * blendPole + targetHFRatio   * (1.f - blendPole);
+        curDensity   = curDensity   * blendPole + targetDensity   * (1.f - blendPole);
+        curDiffusion = curDiffusion * blendPole + targetDiffusion * (1.f - blendPole);
+        curGainHF    = curGainHF    * blendPole + targetGainHF    * (1.f - blendPole);
+        curGainLF    = curGainLF    * blendPole + targetGainLF    * (1.f - blendPole);
     }
 
     /* --- Fire-direction impact reverb boost (Feature C) -------------------
-     * When the local player just fired (s_al_fire_frame within the last
-     * S_AL_ENV_RATE*2 frames) and s_alFireImpactReverb is on, cast 3 short
-     * rays in a narrow forward cone in the aim direction.  If any ray hits
-     * solid geometry within 400 units we transiently boost targetRefl and
-     * targetDecay to simulate the sharp early reflection of the muzzle blast
-     * off a nearby surface.  The boost decays over the next probe cycle via
-     * the normal IIR smoother. */
+     * When the local player just fired and s_alFireImpactReverb is on, cast
+     * 3 short rays in a narrow forward cone in the aim direction.  If any ray
+     * hits solid geometry within 400 units, boost the smoothed cur* values
+     * directly so the effect is immediate and independent of what environment
+     * the classifier is currently reporting — a weapon fired at a wall always
+     * produces a sharp early reflection regardless of whether the probe says
+     * CORRIDOR, TRANSITION, or OUTDOOR.  The IIR smoother then naturally
+     * decays the boost back toward the environment target over the next cycles. */
     if (s_alFireImpactReverb && s_alFireImpactReverb->integer
             && (s_al_loopFrame - s_al_fire_frame) <= S_AL_ENV_RATE * 2
             && CM_NumInlineModels() > 0) {
@@ -3543,14 +3695,20 @@ static void S_AL_UpdateDynamicReverb( void )
         }
 
         if (bestHit < 1.0f) {
-            /* Closer hit → stronger reflection boost */
-            float proximity = 1.0f - bestHit;   /* 0=far, 1=right on face */
+            /* Closer hit → stronger reflection boost.  Applied directly to the
+             * smoothed output values so the spike is consistent across all
+             * environment types — classifier confusion cannot suppress it. */
+            float proximity = 1.0f - bestHit;
             float boost     = maxBoost * proximity;
-            targetRefl = targetRefl + boost;
-            if (targetRefl > 1.f) targetRefl = 1.f;
-            /* Short decay bump — the blast reflection decays fast */
-            targetDecay += boost * 0.3f;
-            if (targetDecay > 2.5f) targetDecay = 2.5f;
+            curRefl += boost;
+            if (curRefl > 1.f) curRefl = 1.f;
+            /* Short decay bump — muzzle blast echo decays fast */
+            curDecay += boost * 0.3f;
+            if (curDecay > 3.0f) curDecay = 3.0f;
+            /* Slot gain spike so the muzzle report is audible even when the
+             * environment probe has set a dry slot (outdoor, TRANSITION). */
+            curSlot += boost * baseGain * 0.60f;
+            if (curSlot > 1.f) curSlot = 1.f;
         }
     }
 
@@ -3559,20 +3717,23 @@ static void S_AL_UpdateDynamicReverb( void )
      * fires near the listener.  Half the own-fire max boost since the shooter
      * is typically further away; no ray cast needed because we already have
      * the distance-normalised proximity from the trigger in StartSound.
-     * Excluded for suppressed weapons and teammates (both filtered at capture). */
+     * Excluded for suppressed weapons and teammates (both filtered at capture).
+     * Applied to cur* for the same consistency reason as Feature C above. */
     if (s_alFireImpactReverb && s_alFireImpactReverb->integer
             && (s_al_loopFrame - s_al_incoming_fire_frame) <= S_AL_ENV_RATE * 2
             && CM_NumInlineModels() > 0) {
         float maxBoost  = s_alFireImpactMaxBoost
                           ? s_alFireImpactMaxBoost->value * 0.5f : 0.125f;
-        float proximity = 1.0f - s_al_incoming_fire_dist;  /* 0=edge, 1=at listener */
+        float proximity = 1.0f - s_al_incoming_fire_dist;
         float boost;
         if (maxBoost > 0.25f) maxBoost = 0.25f;
         boost = maxBoost * proximity;
-        targetRefl += boost;
-        if (targetRefl > 1.f) targetRefl = 1.f;
-        targetDecay += boost * 0.2f;
-        if (targetDecay > 2.5f) targetDecay = 2.5f;
+        curRefl += boost;
+        if (curRefl > 1.f) curRefl = 1.f;
+        curDecay += boost * 0.2f;
+        if (curDecay > 3.0f) curDecay = 3.0f;
+        curSlot += boost * baseGain * 0.40f;
+        if (curSlot > 1.f) curSlot = 1.f;
     }
 
     /* --- Push to EFX effect and re-upload to slot ------------------------- */
@@ -3580,10 +3741,19 @@ static void S_AL_UpdateDynamicReverb( void )
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,       curDecay);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_LATE_REVERB_GAIN, curLate);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN, curRefl);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_HFRATIO,    curHFRatio);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DENSITY,          curDensity);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DIFFUSION,        curDiffusion);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINHF,           curGainHF);
+        qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAINLF,           curGainLF);
     } else {
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME,          curDecay);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_LATE_REVERB_GAIN,    curLate);
         qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,    curRefl);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_HFRATIO,       curHFRatio);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DENSITY,             curDensity);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DIFFUSION,           curDiffusion);
+        qalEffectf(s_al_efx.reverbEffect, AL_REVERB_GAINHF,              curGainHF);
     }
     /* Re-attach effect to slot so parameter changes take effect */
     qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
@@ -3592,14 +3762,24 @@ static void S_AL_UpdateDynamicReverb( void )
 
     /* --- Debug output ---------------------------------------------------- */
     if (s_alDebugReverb && s_alDebugReverb->integer >= 1) {
-        /* Classify the averaged environment into a human-readable label. */
+        /* Classify into a human-readable environment label.
+         * OPEN_BOX  — walls all around, open sky (rooftop / open-top courtyard)
+         * SEMI_OPEN — clearly transitional, leaning outdoor
+         * CAVE      — large space with solid overhead (tunnel / mine)
+         * CORRIDOR  — single tight axis, closed (pure passage or alley)
+         * HALLWAY   — corridor-like but with doorways / openings on sides
+         * LARGE_HALL — big enclosed space
+         * MEDIUM_ROOM / SMALL_ROOM — standard indoor fallbacks */
         const char *envLabel;
-        if      (openFrac   > 0.55f)  envLabel = "OUTDOOR";
-        else if (openFrac   > 0.30f)  envLabel = "TRANSITION";
-        else if (corrFactor > 0.40f)  envLabel = "CORRIDOR";
-        else if (sizeFactor > 0.65f)  envLabel = "LARGE_ROOM";
-        else if (sizeFactor > 0.30f)  envLabel = "MEDIUM_ROOM";
-        else                          envLabel = "SMALL_ROOM";
+        if      (openFrac    > 0.60f)                       envLabel = "OUTDOOR";
+        else if (openBoxFrac > 0.35f)                       envLabel = "OPEN_BOX";
+        else if (openFrac    > 0.42f)                       envLabel = "SEMI_OPEN";
+        else if (caveBonus   > 0.30f)                       envLabel = "CAVE";
+        else if (corrFactor  > 0.40f && openFrac < 0.25f)  envLabel = "CORRIDOR";
+        else if (corrFactor  > 0.20f && openFrac < 0.45f)  envLabel = "HALLWAY";
+        else if (sizeFactor  > 0.65f)                       envLabel = "LARGE_HALL";
+        else if (sizeFactor  > 0.30f)                       envLabel = "MEDIUM_ROOM";
+        else                                                envLabel = "SMALL_ROOM";
 
         Com_Printf(S_COLOR_CYAN "[dynreverb] env=%-11s"
                    "  size=%.2f  open=%.2f  corr=%.2f"
@@ -3618,14 +3798,131 @@ static void S_AL_UpdateDynamicReverb( void )
                                                   : S_AL_ENV_HISTORY;
             if (historySize < 1) historySize = 1;
             if (historySize > S_AL_ENV_HISTORY_MAX) historySize = S_AL_ENV_HISTORY_MAX;
-            Com_Printf(S_COLOR_CYAN "             raw: size=%.2f  horizOpen=%.2f  vertOpen=%.2f  corr=%.2f"
+            Com_Printf(S_COLOR_CYAN "             raw: size=%.2f  horizOpen=%.2f  vertOpen=%.2f  corr=%.2f  cave=%.2f  box=%.2f"
                        "  |  hist=%d/%d  vel=%.0f  cache=%s\n",
                        cachedSize, horizOpenFrac, vertOpenFrac, cachedCorr,
+                       caveBonus, openBoxFrac,
                        histCount, historySize, cachedVelSpeed,
                        haveCache ? "hit" : "miss");
         }
     }
 }
+
+/* S_AL_UpdateStaticFireBoost — fire-impact reverb enhancement when
+ * s_alDynamicReverb is OFF.  In static reverb mode the environment probe
+ * never runs, so the fire-boost logic inside S_AL_UpdateDynamicReverb is
+ * never reached.  This lightweight function provides the same muzzle-report
+ * and incoming-fire reverb spike using a one-shot spike + timed restore:
+ *   1. Detect fire event via s_al_fire_frame / s_al_incoming_fire_frame.
+ *   2. Cast the 3-ray forward cone (own fire) and check proximity (incoming).
+ *   3. Temporarily raise EFX reflections, decay, and slot gain.
+ *   4. After S_AL_ENV_RATE*2 frames restore the static defaults.
+ *
+ * Called from S_AL_Update when s_alReverb 1, s_alFireImpactReverb 1,
+ * s_alDynamicReverb 0, EFX available. */
+static void S_AL_UpdateStaticFireBoost( void )
+{
+    static int      lastBoostFire   = -99999; /* s_al_fire_frame when last boosted */
+    static int      lastBoostInFire = -99999; /* s_al_incoming_fire_frame ditto */
+    static int      boostStartFrame = -99999; /* frame the boost was applied */
+    static qboolean boostActive     = qfalse;
+
+    float baseDecay, baseRefl, baseSlot, maxBoost, boost;
+
+    if (!s_al_efx.available)                              return;
+    if (!s_alReverb        || !s_alReverb->integer)       return;
+    if (!s_alFireImpactReverb || !s_alFireImpactReverb->integer) return;
+    if (CM_NumInlineModels() <= 0)                        return;
+
+    baseDecay = s_alReverbDecay ? s_alReverbDecay->value : 1.49f;
+    baseRefl  = 0.25f;
+    baseSlot  = s_alReverbGain  ? s_alReverbGain->value  : 0.35f;
+    maxBoost  = s_alFireImpactMaxBoost
+                ? s_alFireImpactMaxBoost->value : 0.25f;
+    if (maxBoost < 0.f)  maxBoost = 0.f;
+    if (maxBoost > 0.5f) maxBoost = 0.5f;
+
+    /* Expire a running boost and restore static defaults */
+    if (boostActive &&
+            (s_al_loopFrame - boostStartFrame) >= S_AL_ENV_RATE * 2) {
+        if (s_al_efx.hasEAXReverb) {
+            qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN, baseRefl);
+            qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,       baseDecay);
+        } else {
+            qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN, baseRefl);
+            qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME,       baseDecay);
+        }
+        qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
+                                (ALint)s_al_efx.reverbEffect);
+        qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot, AL_EFFECTSLOT_GAIN, baseSlot);
+        boostActive = qfalse;
+    }
+
+    boost = 0.f;
+
+    /* Own-fire: 3-ray muzzle cone — only trigger once per fire event */
+    if ((s_al_loopFrame - s_al_fire_frame) <= S_AL_ENV_RATE * 2
+            && s_al_fire_frame != lastBoostFire) {
+        float bestHit  = 1.0f;
+        float fireRange = 400.0f;
+        float fwdX = s_al_fire_dir[0], fwdY = s_al_fire_dir[1];
+        float rgtX = -fwdY, rgtY = fwdX;
+        int   fi;
+        static const float coneOff[3] = { 0.f, 0.12f, -0.12f };
+
+        for (fi = 0; fi < 3; fi++) {
+            trace_t ftr;
+            vec3_t  fend;
+            float   dx  = fwdX + coneOff[fi] * rgtX;
+            float   dy  = fwdY + coneOff[fi] * rgtY;
+            float   len = sqrtf(dx*dx + dy*dy);
+            if (len > 0.001f) { dx /= len; dy /= len; }
+            fend[0] = s_al_listener_origin[0] + dx * fireRange;
+            fend[1] = s_al_listener_origin[1] + dy * fireRange;
+            fend[2] = s_al_listener_origin[2] + s_al_fire_dir[2] * fireRange;
+            CM_BoxTrace(&ftr, s_al_listener_origin, fend,
+                        vec3_origin, vec3_origin, 0, CONTENTS_SOLID, qfalse);
+            if (ftr.fraction < bestHit) bestHit = ftr.fraction;
+        }
+        if (bestHit < 1.0f) {
+            boost = maxBoost * (1.0f - bestHit);
+            lastBoostFire = s_al_fire_frame;
+        }
+    }
+
+    /* Incoming enemy fire */
+    if ((s_al_loopFrame - s_al_incoming_fire_frame) <= S_AL_ENV_RATE * 2
+            && s_al_incoming_fire_frame != lastBoostInFire) {
+        float inBoostMax = maxBoost * 0.5f;
+        float inBoost    = inBoostMax * (1.0f - s_al_incoming_fire_dist);
+        if (inBoostMax > 0.25f) inBoostMax = 0.25f;
+        if (inBoost > boost) {
+            boost = inBoost;
+            lastBoostInFire = s_al_incoming_fire_frame;
+        }
+    }
+
+    if (boost > 0.01f && !boostActive) {
+        if (s_al_efx.hasEAXReverb) {
+            qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_REFLECTIONS_GAIN,
+                       baseRefl + boost);
+            qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DECAY_TIME,
+                       baseDecay + boost * 0.3f);
+        } else {
+            qalEffectf(s_al_efx.reverbEffect, AL_REVERB_REFLECTIONS_GAIN,
+                       baseRefl + boost);
+            qalEffectf(s_al_efx.reverbEffect, AL_REVERB_DECAY_TIME,
+                       baseDecay + boost * 0.3f);
+        }
+        qalAuxiliaryEffectSloti(s_al_efx.reverbSlot, AL_EFFECTSLOT_EFFECT,
+                                (ALint)s_al_efx.reverbEffect);
+        qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot, AL_EFFECTSLOT_GAIN,
+                                baseSlot + boost * baseSlot * 0.60f);
+        boostStartFrame = s_al_loopFrame;
+        boostActive     = qtrue;
+    }
+}
+
 
 /* Lightweight dynamic-reverb state reset, triggered by the s_alReset console
  * command.  Invalidates the history buffer, movement cache, velocity tracking,
@@ -3802,6 +4099,12 @@ static void S_AL_Update( int msec )
 
         /* Dynamic acoustic environment: updates EFX params + slot gain */
         S_AL_UpdateDynamicReverb();
+
+        /* Fire-impact reverb in static mode (s_alDynamicReverb 0).
+         * When the dynamic probe is active it handles fire boosts internally;
+         * this call is a no-op in that case (guarded inside the function). */
+        if (!s_alDynamicReverb || !s_alDynamicReverb->integer)
+            S_AL_UpdateStaticFireBoost();
 
         /* Grenade-concussion EFX bloom: scan snapshot entities once per frame.
          *
@@ -5101,15 +5404,25 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Default 0.50 preserves enough weapon-fire crack to remain recognisable. "
         "Old formula was occ\xc2\xb2 which reached near-zero HF even at moderate occlusion — "
         "this caused the 'tinny then boom' corner-pop effect.");
-    s_alOccPosBlend = Cvar_Get("s_alOccPosBlend", "0.25", CVAR_ARCHIVE_ND);
+    s_alOccPosBlend = Cvar_Get("s_alOccPosBlend", "0.40", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOccPosBlend, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alOccPosBlend,
         "Occlusion: how far to redirect the HRTF apparent-source position towards the nearest "
         "acoustic gap when a source is blocked [0-1]. "
-        "0 = always use true source position (best direction accuracy, no gap hint); "
-        "1 = full redirect to gap (old behaviour — confuses direction of fire). "
-        "Default 0.25: subtle gap hint that helps 'around the corner' perception "
-        "without sacrificing the ability to locate shooting players.");
+        "The gap direction is projected to the source's actual distance so even a modest "
+        "value produces a clear angular shift: at 0.40 a doorway 45° off the direct line "
+        "gives ~16° apparent HRTF direction change. "
+        "0 = always use true source position (no gap hint); "
+        "1 = full redirect to gap direction. "
+        "Default 0.40.");
+    s_alOccSearchRadius = Cvar_Get("s_alOccSearchRadius", "120", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOccSearchRadius, "20", "400", CV_FLOAT);
+    Cvar_SetDescription(s_alOccSearchRadius,
+        "Occlusion: radius (game units) of the 8 tangent-plane probe rays used to find the "
+        "nearest acoustic gap when a source is occluded. "
+        "Default 120 (~URT standard door half-width). "
+        "Increase to 160-200 if sounds behind wide doorways or around thick pillars still "
+        "appear to come from the wrong direction; decrease to 60 for tighter gap sensitivity.");
     s_alDebugOcc = Cvar_Get("s_alDebugOcc", "0", CVAR_TEMP);
     Cvar_CheckRange(s_alDebugOcc, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alDebugOcc,
