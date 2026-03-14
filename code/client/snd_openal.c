@@ -394,9 +394,24 @@ static float s_al_bloomPeak   = 0.f;
  * suppressExpiry: Com_Milliseconds() timestamp when the duck expires (0=off).
  * suppressHFPeak: the AL_LOWPASS_GAINHF floor for the active event.
  *   Multiple overlapping triggers (incoming fire + helmet hit, etc.) take
- *   the later expiry and the deeper (lower) HF floor. */
-static int   s_al_suppressExpiry = 0;
-static float s_al_suppressHFPeak = 1.0f; /* HF floor set by the last trigger */
+ *   the later expiry and the deeper (lower) HF floor.
+ * suppress_dir / suppress_directional: direction TOWARD the incoming fire
+ *   source (normalised).  When directional, only sources within the cone
+ *   defined by s_alSuppressionConeAngle are fully muffled; sources outside
+ *   receive no HF cut.  Head-hit triggers set suppress_directional = qfalse
+ *   (attacker direction unknown) so the full HF cut is applied globally. */
+static int      s_al_suppressExpiry      = 0;
+static float    s_al_suppressHFPeak      = 1.0f;
+static vec3_t   s_al_suppress_dir        = {0.f, 0.f, 0.f};
+static qboolean s_al_suppress_directional = qfalse;
+/* Precomputed cosine of the half-cone angle; updated each frame. */
+static float    s_al_suppress_cone_halfcos = 0.f; /* cos(60°) = 0.5 at default 120° */
+
+/* Reverb boost during suppression: spikes the reverb slot gain on trigger
+ * then decays back over the suppression duration — creates the "ring/splash"
+ * acoustic character of a nearby shot rather than just volume loss. */
+static int   s_al_suppressReverbExpiry = 0;
+static float s_al_suppressReverbPeak   = 0.f;
 
 /* Per-frame combined hearing-disruption HF multipliers.
  * 1.0 = flat (no filter); lower values cut high frequencies, turning the
@@ -460,6 +475,9 @@ static cvar_t *s_alSuppressionRadius;  /* near-miss detection radius (units) */
 static cvar_t *s_alSuppressionFloor;   /* min listener gain during suppression [0..0.8] */
 static cvar_t *s_alSuppressionMs;      /* suppression duration in ms */
 static cvar_t *s_alSuppressionHFFloor; /* min AL_LOWPASS_GAINHF during suppression [0..1] */
+static cvar_t *s_alSuppressionConeAngle;  /* full cone angle (deg) for directional HF suppression */
+static cvar_t *s_alSuppressionRearGain;   /* partial HF suppression fraction behind the listener */
+static cvar_t *s_alSuppressionReverbBoost; /* reverb slot gain spike added on suppression trigger */
 static cvar_t *s_alNearMissPattern;    /* sound-name substrings that identify a near-miss bullet */
 /* Head-hit triggers (helmet and bare-head) — separate gate from s_alSuppression */
 static cvar_t *s_alHeadHit;            /* 0=off, 1=head-hit disruption + tinnitus (standalone) */
@@ -2066,12 +2084,17 @@ static void S_AL_Shutdown( void )
  */
 
 /* Arm (or extend/deepen) the suppression event.
+ * fireDir: direction TOWARD the incoming fire source (need not be normalised —
+ *   the function normalises it internally), or NULL for omnidirectional (head
+ *   hits — attacker position unknown).  Directional events gate per-source HF
+ *   suppression to a cone; omnidirectional events apply the full cut globally.
  * Takes the later expiry and the lower (more muffling) HF floor so that
- * overlapping triggers — e.g. incoming fire that arrives while a helmet
- * hit is still ringing — always favour the worse outcome. */
-static void S_AL_TriggerSuppression( int durationMs, float hfFloor )
+ * overlapping triggers always favour the worse outcome. */
+static void S_AL_TriggerSuppression( int durationMs, float hfFloor,
+                                     const float *fireDir )
 {
-    int expiry;
+    int   expiry;
+    float reverbBoost;
     if (durationMs < 50)   durationMs = 50;
     if (hfFloor   < 0.0f)  hfFloor    = 0.0f;
     if (hfFloor   > 1.0f)  hfFloor    = 1.0f;
@@ -2082,6 +2105,37 @@ static void S_AL_TriggerSuppression( int durationMs, float hfFloor )
     } else if (hfFloor < s_al_suppressHFPeak) {
         /* Shorter but deeper — keep existing expiry, deepen the cut */
         s_al_suppressHFPeak = hfFloor;
+    }
+
+    /* Update fire direction: a new directional event overrides the stored
+     * direction; an omnidirectional event clears directionality unless a
+     * stronger directional event is already active. */
+    if (fireDir) {
+        float len = sqrtf(fireDir[0]*fireDir[0] + fireDir[1]*fireDir[1]
+                          + fireDir[2]*fireDir[2]);
+        if (len > 0.001f) {
+            s_al_suppress_dir[0] = fireDir[0] / len;
+            s_al_suppress_dir[1] = fireDir[1] / len;
+            s_al_suppress_dir[2] = fireDir[2] / len;
+        }
+        s_al_suppress_directional = qtrue;
+    } else {
+        s_al_suppress_directional = qfalse;
+    }
+
+    /* Reverb spike: makes the room acoustics "bloom" on impact — the
+     * wet reverb tail briefly dominates, then decays back, selling the
+     * acoustic weight of nearby incoming fire. */
+    reverbBoost = s_alSuppressionReverbBoost
+                  ? s_alSuppressionReverbBoost->value : 0.18f;
+    if (reverbBoost > 0.f && s_al_efx.reverbSlot
+            && s_alReverb && s_alReverb->integer) {
+        float curGain = s_alReverbGain ? s_alReverbGain->value : 0.35f;
+        float peak    = curGain + reverbBoost;
+        if (peak > 1.0f) peak = 1.0f;
+        if (s_al_suppressReverbExpiry == 0 || peak > s_al_suppressReverbPeak)
+            s_al_suppressReverbPeak = peak;
+        s_al_suppressReverbExpiry = expiry;
     }
 }
 
@@ -2293,8 +2347,9 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             VectorSubtract(sndOrigin, s_al_listener_origin, d);
             if (DotProduct(d, d) < radius * radius) {
                 int   durationMs = s_alSuppressionMs    ? (int)s_alSuppressionMs->value    : 220;
-                float hfFloor    = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value : 0.15f;
-                S_AL_TriggerSuppression(durationMs, hfFloor);
+                float hfFloor    = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value : 0.08f;
+                /* Direction toward shooter (unnormalised — function normalises internally) */
+                S_AL_TriggerSuppression(durationMs, hfFloor, d);
             }
         }
     }
@@ -2330,8 +2385,17 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                 while (e > s && *(e-1) == ' ') *--e = '\0';
                 if (*s && Q_stristr(sndName, s)) {
                     int   durMs   = s_alSuppressionMs      ? (int)s_alSuppressionMs->value    : 220;
-                    float hfFloor = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value    : 0.15f;
-                    S_AL_TriggerSuppression(durMs, hfFloor);
+                    float hfFloor = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value    : 0.08f;
+                    /* Use the whiz sound's origin for directionality when
+                     * it is a positional (non-local) source. */
+                    if (!isLocal) {
+                        vec3_t whizDir;
+                        VectorSubtract(sndOrigin, s_al_listener_origin, whizDir);
+                        S_AL_TriggerSuppression(durMs, hfFloor, whizDir);
+                    } else {
+                        /* Local/head-locked whiz — direction unknown */
+                        S_AL_TriggerSuppression(durMs, hfFloor, NULL);
+                    }
                     break;
                 }
             }
@@ -2361,7 +2425,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             if (pat && pat[0] && Q_stristr(sndName, pat)) {
                 int   durMs   = s_alHelmetHitMs    ? (int)s_alHelmetHitMs->value    : 350;
                 float hfFloor = s_alHelmetHFFloor  ? s_alHelmetHFFloor->value       : 0.10f;
-                S_AL_TriggerSuppression(durMs, hfFloor);
+                S_AL_TriggerSuppression(durMs, hfFloor, NULL); /* omnidirectional */
                 S_AL_TriggerTinnitus();
             }
         }
@@ -2373,7 +2437,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             if (pat && pat[0] && Q_stristr(sndName, pat)) {
                 int   durMs   = s_alBareHeadHitMs   ? (int)s_alBareHeadHitMs->value  : 500;
                 float hfFloor = s_alBareHeadHFFloor ? s_alBareHeadHFFloor->value      : 0.03f;
-                S_AL_TriggerSuppression(durMs, hfFloor);
+                S_AL_TriggerSuppression(durMs, hfFloor, NULL); /* omnidirectional */
                 S_AL_TriggerTinnitus();
             }
         }
@@ -3639,14 +3703,25 @@ static void S_AL_Update( int msec )
      * The per-source HF filter (s_al_suppressHF) is now the primary cue —
      * it replaces the "general duck" feel with convincing muffled hearing.
      * ----------------------------------------------------------------------- */
+
+    /* Precompute cone half-cosine for directional per-source scaling. */
+    {
+        float coneAngle = s_alSuppressionConeAngle
+                          ? s_alSuppressionConeAngle->value : 120.f;
+        if (coneAngle < 10.f)  coneAngle = 10.f;
+        if (coneAngle > 360.f) coneAngle = 360.f;
+        s_al_suppress_cone_halfcos = cosf(coneAngle * 0.5f * ((float)M_PI / 180.0f));
+    }
+
     if (s_al_suppressExpiry > 0) {
         int   now2  = Com_Milliseconds();
         int   durMs = s_alSuppressionMs ? (int)s_alSuppressionMs->value : 220;
         float t;
         if (durMs < 50) durMs = 50;
         if (now2 >= s_al_suppressExpiry) {
-            s_al_suppressExpiry = 0;
-            s_al_suppressHFPeak = 1.0f; /* reset peak for next event */
+            s_al_suppressExpiry       = 0;
+            s_al_suppressHFPeak       = 1.0f;
+            s_al_suppress_directional = qfalse;
             t = 1.0f;
         } else {
             int remain = s_al_suppressExpiry - now2;
@@ -3657,7 +3732,7 @@ static void S_AL_Update( int msec )
         /* Volume duck (secondary — kept for the physical "jolt" sensation) */
         if (!s_al_muted) {
             float volFloor = s_alSuppressionFloor
-                             ? s_alSuppressionFloor->value : 0.55f;
+                             ? s_alSuppressionFloor->value : 0.45f;
             if (volFloor < 0.0f)  volFloor = 0.0f;
             if (volFloor > 0.95f) volFloor = 0.95f;
             masterGain *= (volFloor + (1.0f - volFloor) * (1.0f - t));
@@ -3822,6 +3897,31 @@ static void S_AL_Update( int msec )
                     /* t=1 at trigger → peak gain; t=0 at expiry → base gain */
                     slotGain = baseGain + (s_al_bloomPeak - baseGain) * t;
                 }
+                qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot,
+                                        AL_EFFECTSLOT_GAIN, slotGain);
+            }
+        }
+
+        /* Suppression reverb boost decay.
+         * When incoming fire triggers suppression the reverb slot was spiked
+         * in S_AL_TriggerSuppression; decay it back over the suppression
+         * duration.  Grenade bloom takes priority if both are active. */
+        if (s_al_suppressReverbExpiry > 0 && s_al_bloomExpiry == 0
+                && s_alReverb && s_alReverb->integer) {
+            int   now4  = Com_Milliseconds();
+            int   durMs = s_alSuppressionMs ? (int)s_alSuppressionMs->value : 220;
+            if (durMs < 1) durMs = 1;
+            if (now4 >= s_al_suppressReverbExpiry) {
+                s_al_suppressReverbExpiry = 0;
+                s_al_suppressReverbPeak   = 0.f;
+            } else {
+                int   remain   = s_al_suppressReverbExpiry - now4;
+                float t        = (float)remain / (float)durMs;
+                float baseGain = s_alReverbGain ? s_alReverbGain->value : 0.35f;
+                float slotGain;
+                if (t > 1.f) t = 1.f;
+                slotGain = baseGain + (s_al_suppressReverbPeak - baseGain) * t;
+                if (slotGain > 1.f) slotGain = 1.f;
                 qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot,
                                         AL_EFFECTSLOT_GAIN, slotGain);
             }
@@ -4095,19 +4195,59 @@ static void S_AL_Update( int msec )
                 float gain   = gainFloor + (1.0f - gainFloor) * occ;
                 float gainHF = hfFloor   + (1.0f - hfFloor)   * occ;
 
-                /* Bake the hearing-disruption HF multipliers into gainHF.
-                 * Multiplying means occlusion and suppression/grenade/health
-                 * cuts stack correctly: a fully-occluded source behind a wall
-                 * gets no extra HF when you are also concussed, but an
-                 * unoccluded source in the open does get the full HF cut. */
-                gainHF *= s_al_suppressHF * s_al_grenadeHF * s_al_healthHF;
-
                 vec3_t pos;
 
                 /* Position: real origin + gap-hint offset (tracks moving entities) */
                 pos[0] = s_al_src[i].origin[0] + s_al_src[i].acousticOffset[0];
                 pos[1] = s_al_src[i].origin[1] + s_al_src[i].acousticOffset[1];
                 pos[2] = s_al_src[i].origin[2] + s_al_src[i].acousticOffset[2];
+
+                /* Bake hearing-disruption HF multipliers into gainHF.
+                 * For directional suppression (incoming fire) the HF cut is
+                 * cone-weighted: full at the center of the fire cone, tapering
+                 * to zero at the cone edge and in the side quadrants, with a
+                 * secondary partial effect directly behind the listener.
+                 * Omnidirectional events (head hits) apply globally. */
+                {
+                    float srcSuppressHF = s_al_suppressHF;
+                    if (srcSuppressHF < 1.0f && s_al_suppress_directional) {
+                        float dx   = pos[0] - s_al_listener_origin[0];
+                        float dy   = pos[1] - s_al_listener_origin[1];
+                        float dz   = pos[2] - s_al_listener_origin[2];
+                        float dSq  = dx*dx + dy*dy + dz*dz;
+                        /* Skip sources within 1 unit of the listener — at that
+                         * distance the direction vector is numerically unreliable
+                         * (almost always own-entity sounds that shouldn't be here). */
+                        if (dSq > 1.f) {
+                            float rcp      = 1.f / sqrtf(dSq);
+                            float dot      = (dx * s_al_suppress_dir[0]
+                                            + dy * s_al_suppress_dir[1]
+                                            + dz * s_al_suppress_dir[2]) * rcp;
+                            float halfCos  = s_al_suppress_cone_halfcos;
+                            float rearGain = s_alSuppressionRearGain
+                                             ? s_alSuppressionRearGain->value : 0.35f;
+                            float cone_t;
+                            if (dot >= halfCos) {
+                                /* Inside forward cone: 0 at edge, 1 at centre */
+                                cone_t = (halfCos < 0.9999f)
+                                         ? (dot - halfCos) / (1.f - halfCos)
+                                         : 1.f;
+                            } else if (dot < 0.f) {
+                                /* Behind listener: partial effect, peaks at dot=-1 */
+                                cone_t = rearGain * (-dot);
+                            } else {
+                                /* Side quadrant: no suppression */
+                                cone_t = 0.f;
+                            }
+                            if (cone_t > 1.f) cone_t = 1.f;
+                            /* Blend toward 1.0 (flat) outside the effect zones */
+                            srcSuppressHF = 1.0f
+                                            + (s_al_suppressHF - 1.0f) * cone_t;
+                        }
+                    }
+                    gainHF *= srcSuppressHF * s_al_grenadeHF * s_al_healthHF;
+                }
+
                 qalSource3f(s_al_src[i].source, AL_POSITION,
                             pos[0], pos[1], pos[2]);
 
@@ -4153,19 +4293,31 @@ static void S_AL_Update( int msec )
             /* Local (own-player) source: no occlusion, but apply the
              * hearing-disruption HF filter when active.  SRC_CAT_UI sources
              * (tinnitus ring, kill/hit markers) are intentionally excluded —
-             * they are "mental" feedback that should stay crisp. */
+             * they are "mental" feedback that should stay crisp.
+             * During directional suppression, own-player sounds get the rear
+             * fraction of the effect — they have no world direction but the
+             * concussion still partially affects the shooter's own hearing. */
             if (s_al_src[i].category != SRC_CAT_UI) {
-                float combHF = s_al_suppressHF * s_al_grenadeHF * s_al_healthHF;
-                if (combHF < 0.97f) {
-                    qalFilterf(s_al_efx.occlusionFilter[i],
-                               AL_LOWPASS_GAIN,   1.0f);
-                    qalFilterf(s_al_efx.occlusionFilter[i],
-                               AL_LOWPASS_GAINHF, combHF);
-                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
-                               (ALint)s_al_efx.occlusionFilter[i]);
-                } else {
-                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
-                               (ALint)AL_FILTER_NULL);
+                float localSuppressHF = s_al_suppressHF;
+                if (localSuppressHF < 1.0f && s_al_suppress_directional) {
+                    float rearGain = s_alSuppressionRearGain
+                                     ? s_alSuppressionRearGain->value : 0.35f;
+                    localSuppressHF = 1.0f
+                                      + (s_al_suppressHF - 1.0f) * rearGain;
+                }
+                {
+                    float combHF = localSuppressHF * s_al_grenadeHF * s_al_healthHF;
+                    if (combHF < 0.97f) {
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAIN,   1.0f);
+                        qalFilterf(s_al_efx.occlusionFilter[i],
+                                   AL_LOWPASS_GAINHF, combHF);
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)s_al_efx.occlusionFilter[i]);
+                    } else {
+                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                   (ALint)AL_FILTER_NULL);
+                    }
                 }
             }
         }
@@ -4562,27 +4714,50 @@ qboolean S_AL_Init( soundInterface_t *si )
         "CHAN_WEAPON sound triggers the disruption effect. The primary trigger is "
         "the whiz-sound name match (s_alNearMissPattern), which fires reliably for "
         "any bullet that actually passes close by. Default 180 ≈ one room width.");
-    s_alSuppressionFloor = Cvar_Get("s_alSuppressionFloor", "0.55", CVAR_ARCHIVE_ND);
+    s_alSuppressionFloor = Cvar_Get("s_alSuppressionFloor", "0.45", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionFloor, "0", "0.95", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionFloor,
         "Minimum listener gain (volume) during suppression [0–0.95]. "
         "Secondary to the HF filter — this provides the physical 'jolt' while "
         "s_alSuppressionHFFloor provides the muffled-hearing character. "
-        "Default 0.55 (−6 dB, noticeable but not disabling).");
+        "Default 0.45 (≈ −7 dB).");
     s_alSuppressionMs = Cvar_Get("s_alSuppressionMs", "220", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionMs, "50", "800", CV_INTEGER);
     Cvar_SetDescription(s_alSuppressionMs,
         "Duration of the near-miss / incoming-fire hearing disruption in ms. "
         "Both the volume duck and the HF muffling recover linearly over this time. "
         "Default 220 ms — snappy enough to not impede situational awareness.");
-    s_alSuppressionHFFloor = Cvar_Get("s_alSuppressionHFFloor", "0.15", CVAR_ARCHIVE_ND);
+    s_alSuppressionHFFloor = Cvar_Get("s_alSuppressionHFFloor", "0.08", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionHFFloor, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionHFFloor,
         "Minimum AL_LOWPASS_GAINHF during near-miss / incoming-fire suppression [0–1]. "
-        "This is the primary cue: 0.15 cuts ~−17 dB of high-frequency content at peak, "
-        "making all sounds momentarily muffled/bassy. Applies per-source to every "
-        "playing sound (including own weapon and footsteps) except UI/tinnitus. "
-        "0 = fully muffled; 1 = flat (filter disabled). Default 0.15.");
+        "Primary cue: 0.08 ≈ −22 dB HF at peak — sounds in the fire direction go "
+        "noticeably bassy/distorted. Applies only within the directional cone "
+        "(s_alSuppressionConeAngle) plus a rear partial effect (s_alSuppressionRearGain). "
+        "0 = fully muffled; 1 = flat. Default 0.08.");
+    s_alSuppressionConeAngle = Cvar_Get("s_alSuppressionConeAngle", "120", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alSuppressionConeAngle, "10", "360", CV_FLOAT);
+    Cvar_SetDescription(s_alSuppressionConeAngle,
+        "Full cone angle (degrees) of the directional HF suppression effect [10–360]. "
+        "Sources within this cone around the incoming fire direction receive the full "
+        "HF cut; sources outside the cone are unaffected (except the rear partial). "
+        "120 = ±60° half-angle — covers a generous forward wedge. "
+        "360 = omnidirectional (equivalent to old behaviour). Default 120.");
+    s_alSuppressionRearGain = Cvar_Get("s_alSuppressionRearGain", "0.35", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alSuppressionRearGain, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alSuppressionRearGain,
+        "Fraction of the HF suppression applied to sources directly behind the listener "
+        "(opposite the incoming fire) [0–1]. Creates a secondary disruption cue that "
+        "reinforces the fire direction without muffling side-facing sounds. "
+        "0 = no rear effect (strict cone only). Default 0.35.");
+    s_alSuppressionReverbBoost = Cvar_Get("s_alSuppressionReverbBoost", "0.18", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alSuppressionReverbBoost, "0", "0.5", CV_FLOAT);
+    Cvar_SetDescription(s_alSuppressionReverbBoost,
+        "Reverb slot gain spike added when suppression triggers [0–0.5]. "
+        "Briefly boosts the wet reverb tail so the acoustic character of the "
+        "environment 'splashes' with the concussion, then decays back over "
+        "s_alSuppressionMs. Stacks with dynamic reverb — actual peak is "
+        "current slot gain + this value, capped at 1.0. Default 0.18.");
     s_alNearMissPattern = Cvar_Get("s_alNearMissPattern", "whiz1,whiz2", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alNearMissPattern,
         "Comma-separated substrings matched case-insensitively against the sound "

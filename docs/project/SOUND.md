@@ -361,11 +361,14 @@ Multiple triggers can overlap; the system always takes the later expiry and the 
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alSuppression` | `0` | Toggle for near-miss and incoming-fire hearing disruption. Enables: (A) near-miss HF muffling triggered by whiz sounds (`s_alNearMissPattern`); (B) radius-fallback from nearby enemy `CHAN_WEAPON` fire. Teammates and suppressed weapons excluded automatically. Head-hit disruption has its own toggle: `s_alHeadHit`. Default 0 (opt-in). |
+| `s_alSuppression` | `0` | Toggle for near-miss and incoming-fire hearing disruption. Enables: (A) near-miss HF muffling triggered by whiz sounds (`s_alNearMissPattern`); (B) radius-fallback from nearby enemy `CHAN_WEAPON` fire. The HF cut is **directional** — applied only within the cone toward the fire source (front) plus a softer rear contribution, so you retain clarity from sources beside you. Teammates and suppressed weapons excluded automatically. Head-hit disruption has its own toggle: `s_alHeadHit`. Default 0 (opt-in). |
 | `s_alSuppressionRadius` | `180` | Fallback trigger radius for enemy weapon fire (game units). The primary trigger is the whiz-sound name match which is more precise. Default 180 ≈ one room width. |
-| `s_alSuppressionFloor` | `0.55` | Minimum listener `AL_GAIN` (volume) during suppression [0–0.95]. Secondary to the HF filter — provides the physical "jolt". Default 0.55 (≈ −6 dB). |
+| `s_alSuppressionFloor` | `0.45` | Minimum listener `AL_GAIN` (volume) during suppression [0–0.95]. Secondary to the HF filter — provides the physical "jolt". Default 0.45 (≈ −7 dB). |
 | `s_alSuppressionMs` | `220` | Duration of near-miss / incoming-fire hearing disruption in ms. Both the volume duck and the HF muffling recover linearly. Default 220. |
-| `s_alSuppressionHFFloor` | `0.15` | Minimum `AL_LOWPASS_GAINHF` at peak suppression [0–1]. **Primary cue**: 0.15 ≈ −17 dB HF, making all sounds momentarily muffled/bassy. Applied per-source. Default 0.15. |
+| `s_alSuppressionHFFloor` | `0.08` | Minimum `AL_LOWPASS_GAINHF` at peak suppression [0–1]. **Primary cue**: 0.08 ≈ −22 dB HF — sources in the fire direction go noticeably bassy/distorted. Applied per-source within the directional cone. Default 0.08. |
+| `s_alSuppressionConeAngle` | `120` | Full cone angle (degrees) of the directional HF suppression [10–360]. Sources within ±half-angle of the incoming fire direction get the full cut; sources outside get none (except the rear partial). 360 = omnidirectional. Default 120 (±60°). Pairs naturally with `s_alHRTF 1` for maximum directional accuracy. |
+| `s_alSuppressionRearGain` | `0.35` | Fraction of the HF suppression applied behind the listener (opposite the fire direction) [0–1]. Secondary cue: reinforces the direction of fire without muffling side-facing sounds. 0 = strict cone only. Default 0.35. |
+| `s_alSuppressionReverbBoost` | `0.18` | Reverb slot gain spike added when suppression triggers [0–0.5]. Briefly boosts the wet reverb tail so the acoustic space "splashes" with the concussion, then decays back over `s_alSuppressionMs`. Default 0.18. |
 | `s_alNearMissPattern` | `whiz1,whiz2` | Comma-separated sound-name substrings identifying near-miss bullet whiz sounds. Matched case-insensitively. URT uses `sound/weapons/whiz1.wav` and `whiz2.wav`. When matched, immediately triggers the suppression event — more precise than the radius fallback. |
 
 #### Head-hit triggers
@@ -1303,11 +1306,14 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 
 | Cvar | Default | Notes |
 |---|---|---|
-| `s_alSuppression` | `0` | Master toggle for all hearing-disruption effects (near-miss, hit, tinnitus). |
+| `s_alSuppression` | `0` | Near-miss and incoming-fire hearing disruption toggle |
 | `s_alSuppressionRadius` | `180` | Enemy weapon fire radius that triggers suppression fallback (units) |
-| `s_alSuppressionFloor` | `0.55` | Min listener gain during suppression [0–0.95] |
+| `s_alSuppressionFloor` | `0.45` | Min listener gain during suppression [0–0.95] |
 | `s_alSuppressionMs` | `220` | Duration of near-miss / incoming-fire disruption (ms) |
-| `s_alSuppressionHFFloor` | `0.15` | Min AL_LOWPASS_GAINHF at peak suppression [0–1] |
+| `s_alSuppressionHFFloor` | `0.08` | Min AL_LOWPASS_GAINHF at peak suppression (directional cone only) [0–1] |
+| `s_alSuppressionConeAngle` | `120` | Full cone angle (deg) of directional HF suppression around fire direction |
+| `s_alSuppressionRearGain` | `0.35` | Fraction of HF suppression applied behind listener (opposite fire) [0–1] |
+| `s_alSuppressionReverbBoost` | `0.18` | Reverb slot gain spike on suppression trigger [0–0.5] |
 | `s_alNearMissPattern` | `whiz1,whiz2` | Sound-name substrings that trigger a near-miss suppression event |
 | `s_alHelmetHitPattern` | `helmethit` | CHAN_BODY sound name triggering helmet-hit disruption + tinnitus |
 | `s_alHelmetHitMs` | `350` | Helmet-hit disruption duration (ms) |
