@@ -1057,6 +1057,7 @@ typedef struct client_s {
 | `sv_antiwarpTol` | 0 | Antiwarp tolerance ms (0=auto=gameMsec) |
 | `sv_antiwarpExtra` | 0 | Mode 2 extrapolation window ms (0=auto=awTol) |
 | `sv_antiwarpDecay` | 150 | Mode 2 decay duration ms |
+| `sv_allowClientAdaptiveTiming` | 1 | SERVERINFO, ARCHIVE. Allow connected clients to use `cl_adaptiveTiming`. Set to `0` to force all clients onto vanilla Q3e timing regardless of their local setting. Broadcast in SERVERINFO so clients read it from the gamestate on connect. |
 
 > **Full antiwarp documentation:** See [`SV_ANTIWARP.md`](SV_ANTIWARP.md) for mode details, decay timeline, interaction with sv_antilag, and configuration profiles.
 

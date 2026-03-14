@@ -1280,6 +1280,61 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | `s_alDirectChannels` | `1` | Bypass HRTF centre-HRIR for own-player sources. Only active when `s_alHRTF 1`. (LATCH) |
 | `s_alLocalSelf` | `0` | Force own-entity sounds non-spatialized (position 0,0,0). Default 0 — own-player sounds use their world-space origin. Set to 1 if stale-position artefacts occur. |
 | `s_alMaxDist` | `1330` | Override max attenuation distance (floor: 1330 Q3 units) |
+| `s_alMaxSrc` | `512` | Maximum OpenAL source pool size. Grows dynamically on demand up to this cap. (LATCH) |
+| `s_alDedupMs` | `0` | Same-frame dedup window in ms (0 = disabled). Light guard against double-start artefacts. |
+
+#### Volume mixer — per-category controls
+
+| Cvar | Default | Notes |
+|---|---|---|
+| `s_alVolSelf` | `1.0` | Own player movement, breath, general entity sounds [0–10] |
+| `s_alVolWeapon` | `1.0` | Own weapon fire (CHAN_WEAPON from listener entity) [0–10] |
+| `s_alVolOther` | `1.0` | Other players/entities. Anti-cheat cap 2×. [0–2] |
+| `s_alVolImpact` | `1.0` | World entity impacts (brass, explosions). Anti-cheat cap 2×. [0–2] |
+| `s_alVolEnv` | `1.0` | Looping ambient/environmental sounds [0–10] |
+| `s_alVolUI` | `1.0` | Hit-markers, kill-confirmations, menu sounds [0–10] |
+| `s_alVolSuppressedWeapon` | `1.0` | Own suppressed-weapon fire volume [0–10] |
+| `s_alVolEnemySuppressedWeapon` | `1.0` | Enemy suppressed-weapon fire volume. Anti-cheat cap 2×. [0–2] |
+
+> **See also:** `s_alExtraVolEntry1`–`8` and `s_alExtraVol` in the [Per-Category Volume Mixer](#volume-mixer--per-category-controls-0-10-scale) section above.
+
+#### Suppression & combat-feedback cvars
+
+| Cvar | Default | Notes |
+|---|---|---|
+| `s_alSuppression` | `0` | Master toggle for all hearing-disruption effects (near-miss, hit, tinnitus). |
+| `s_alSuppressionRadius` | `180` | Enemy weapon fire radius that triggers suppression fallback (units) |
+| `s_alSuppressionFloor` | `0.55` | Min listener gain during suppression [0–0.95] |
+| `s_alSuppressionMs` | `220` | Duration of near-miss / incoming-fire disruption (ms) |
+| `s_alSuppressionHFFloor` | `0.15` | Min AL_LOWPASS_GAINHF at peak suppression [0–1] |
+| `s_alNearMissPattern` | `whiz1,whiz2` | Sound-name substrings that trigger a near-miss suppression event |
+| `s_alHelmetHitPattern` | `helmethit` | CHAN_BODY sound name triggering helmet-hit disruption + tinnitus |
+| `s_alHelmetHitMs` | `350` | Helmet-hit disruption duration (ms) |
+| `s_alHelmetHFFloor` | `0.10` | Min HF gain for helmet-hit disruption [0–1] |
+| `s_alBareHeadHitPattern` | `headshot` | Sound name triggering bare-head disruption (strongest tier) |
+| `s_alBareHeadHitMs` | `500` | Bare-head disruption duration (ms) |
+| `s_alBareHeadHFFloor` | `0.03` | Min HF gain for bare-head disruption [0–1] |
+| `s_alTinnitusFreq` | `3500` | Tinnitus tone frequency in Hz |
+| `s_alTinnitusDuration` | `700` | Ring duration in ms |
+| `s_alTinnitusVol` | `0.45` | Tinnitus playback volume [0–1] |
+| `s_alTinnitusCooldown` | `800` | Min gap between successive tinnitus plays (ms) |
+| `s_alHealthFade` | `0` | Enable health-based HF fade (audio degrades as HP drops). Default off. |
+| `s_alHealthFadeThreshold` | `30` | HP below which health-fade activates |
+| `s_alHealthFadeFloor` | `0.35` | Min HF gain at 1 HP [0–1] |
+| `s_alGrenadeBloom` | `0` | Grenade-blast concussion effect (reverb spike + HF muffling). Default off. |
+| `s_alGrenadeBloomRadius` | `400` | Blast radius that triggers the bloom effect (units) |
+| `s_alSuppressedSoundPattern` | `silenced,-sil,_sil,...` | Filename substrings identifying suppressed weapons |
+
+> **Full suppression documentation:** See the [Hearing Disruption](#hearing-disruption--incoming-fire-head-hits-and-health-fade) section above.
+
+#### Debug / diagnostic cvars
+
+| Cvar | Default | Notes |
+|---|---|---|
+| `s_alDebugPlayback` | `0` | Log preemptions and rate-mismatches (`1`) or also natural completions (`2`). Not archived. |
+| `s_alDebugOcc` | `0` | Print per-source occlusion state each frame. Not archived. |
+| `s_alDebugReverb` | `0` | Log dynamic reverb probe results (`1`) or raw data (`2`). Not archived. |
+| `s_alTrace` | `0` | Key source lifecycle events (`1`) or verbose (`2`). Not archived. |
 
 - OpenAL Soft selects the native device rate automatically (no `s_khz` needed).
 - `s_doppler` controls `AL_DOPPLER_FACTOR` (1.0 = enabled, 0.0 = disabled).
