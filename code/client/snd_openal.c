@@ -3285,9 +3285,9 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alVolUI = Cvar_Get("s_alVolUI", "0.8", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolUI, "0", "1.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolUI, "Hit-marker / kill-confirmation / UI sound volume multiplier [0.0-1.0]. Default 0.8. Controls non-positional local sounds (StartLocalSound) independently of own-weapon volume (s_alVolSelf).");
-    s_alLocalSelf = Cvar_Get("s_alLocalSelf", "1", CVAR_ARCHIVE_ND);
+    s_alLocalSelf = Cvar_Get("s_alLocalSelf", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alLocalSelf, "0", "1", CV_INTEGER);
-    Cvar_SetDescription(s_alLocalSelf, "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized regardless of any world-space origin supplied by the game. Prevents stale-position artefacts caused by URT jumping/sliding physics. Default 1.");
+    Cvar_SetDescription(s_alLocalSelf, "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized regardless of any world-space origin supplied by the game. Prevents stale-position artefacts caused by URT jumping/sliding physics. Default 0.");
 
     /* Acoustic-environment tuning — all live-tunable; type /s_alReset after
      * changing to hear the effect without a map reload. */

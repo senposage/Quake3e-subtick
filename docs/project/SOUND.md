@@ -124,7 +124,7 @@ If HRTF reports disabled after context creation, calls `alcResetDeviceSoft(devic
 
 Status reported at startup: `s_info` shows `HRTF: enabled (built-in dataset)` or the specific dataset name from `alcGetStringiSOFT`.
 
-Controlled by the `s_alHRTF` cvar (default `1`).
+Controlled by the `s_alHRTF` cvar (default `0` — off; enable with `s_alHRTF 1` for headphone users).
 
 ### Distance Model — Q3/dmaHD-Matching Linear Attenuation
 
@@ -140,19 +140,26 @@ Formula: `gain = 1 - 1.0 * (dist - 80) / (1330 - 80)` — identical to Q3 base.
 
 ### Occlusion — `CM_BoxTrace` + EFX Low-Pass Filter
 
-Every 4 frames, for each playing 3D source, a ray is traced from the listener through solid BSP geometry (`CONTENTS_SOLID | CONTENTS_PLAYERCLIP`):
+At distance-adaptive intervals, for each playing 3D source, a ray is traced from
+the listener through solid BSP geometry (`CONTENTS_SOLID` only —
+`CONTENTS_PLAYERCLIP` is excluded so invisible movement-constraint geometry on
+slopes and ledges does not cause false muffling):
 
 ```c
 CM_BoxTrace(&tr, listenerOrigin, srcOrigin, vec3_origin, vec3_origin,
-            0, CONTENTS_SOLID | CONTENTS_PLAYERCLIP, qfalse);
-occlusion = 0.1 + 0.9 * tr.fraction;  // 1.0 = clear, 0.1 = fully blocked
+            0, CONTENTS_SOLID, qfalse);
+occlusion = tr.fraction;  // 1.0 = clear, 0.0 = fully blocked
 ```
 
-**With EFX** (`ALC_EXT_EFX`): Applied as a per-source `AL_DIRECT_FILTER` low-pass filter:
-- `AL_LOWPASS_GAIN = 0.25 + 0.75 * occlusion` — overall attenuation
-- `AL_LOWPASS_GAINHF = occlusion²` — quadratic high-frequency roll-off
+**With EFX** (`ALC_EXT_EFX`): Applied as a per-source `AL_DIRECT_FILTER` low-pass filter
+using configurable floor curves (see [Occlusion filter tuning](#occlusion-filter-tuning-s_aloccgainfloor-s_alocchffloor)):
+- `AL_LOWPASS_GAIN   = s_alOccGainFloor + (1 - s_alOccGainFloor) * occ`
+- `AL_LOWPASS_GAINHF = s_alOccHFFloor   + (1 - s_alOccHFFloor)   * occ`
 
-This makes occluded sounds lose treble energy (muffled through walls) rather than just becoming quieter — matching real-world acoustics.
+This makes occluded sounds lose treble energy (muffled through walls) rather than
+just becoming quieter — matching real-world acoustics.  The filter is detached
+entirely (`AL_FILTER_NULL`) when `occ > 0.98` to eliminate biquad phase-shift
+coloration on fully-clear sources.
 
 **Without EFX**: Simple `AL_GAIN` scale applied directly to the source.
 
@@ -185,11 +192,17 @@ alSourcei(src,  AL_AUXILIARY_SEND_FILTER_GAINHF_AUTO, AL_TRUE);
 alSourcei(src,  AL_DIRECT_FILTER_GAINHF_AUTO,         AL_FALSE);
 
 /* Local (own-player / weapon) sources: */
-alSourcei(src, AL_DIRECT_FILTER,       AL_FILTER_NULL);  /* clear any inherited filter */
-alSourcei(src, AL_DIRECT_CHANNELS_SOFT, AL_TRUE);        /* bypass HRTF — see below */
+alSourcei(src, AL_DIRECT_FILTER, AL_FILTER_NULL);  /* clear any inherited filter */
+/* AL_DIRECT_CHANNELS_SOFT only set when s_alHRTF 1 — see below */
 ```
 
-> **Why `AL_DIRECT_CHANNELS_SOFT` for local sources**: even a source at `AL_POSITION (0,0,0)` relative to the listener is processed through the HRTF "center" HRIR when HRTF mode is active.  That convolution smears the initial transient attack of weapon sounds (e.g. `de.wav`) and produces a characteristic "wet blanket / lacking punch" coloration.  `AL_DIRECT_CHANNELS_SOFT = AL_TRUE` routes the PCM directly to the stereo output, completely bypassing the HRTF kernel for head-locked sounds.  3D sources (other players' weapons) are not affected — they go through the normal HRTF path for correct directional rendering.
+> **Why `AL_DIRECT_CHANNELS_SOFT` for local sources (when `s_alHRTF 1`)**: even a
+> source at `AL_POSITION (0,0,0)` relative to the listener is processed through the
+> HRTF "center" HRIR when HRTF is enabled.  That convolution smears the initial
+> transient attack of weapon sounds (e.g. `de.wav`).  `AL_DIRECT_CHANNELS_SOFT = AL_TRUE`
+> routes the PCM directly to the stereo output, completely bypassing the HRTF kernel
+> for head-locked sounds.  This is only applied when `s_alHRTF 1` — with HRTF off
+> there is no convolution to bypass so the call is skipped.
 
 > **Why start 3D sources with `AL_FILTER_NULL`**: attaching the occlusion filter object even at GAIN=1/GAINHF=1 (passthrough) still routes the signal through a biquad, which introduces group-delay coloration on the transient attack.  Starting with `AL_FILTER_NULL` (complete signal bypass) lets the occlusion update tick connect the filter only when actual attenuation is needed.
 
@@ -212,7 +225,11 @@ This allows map ambient sounds encoded as WXYZ B-format to provide full 360° HR
 
 ### Source Pool
 
-Up to `MAX_CHANNELS` (96) OpenAL sources are pre-allocated at init. Source stealing (oldest non-looping source) handles overflow gracefully.
+Sources are allocated on demand up to `s_alMaxSrc` (default 512).  `S_AL_GetFreeSource`
+uses a three-pass strategy: find a stopped (free) slot, grow the pool dynamically, or
+steal by priority (world-entity farthest first, then other-entity farthest, then oldest).
+See [Current implementation — slot-based model](#current-implementation--slot-based-model)
+for the full details.
 
 ### Music Streaming
 
@@ -229,7 +246,7 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | `s_alDevice` | `""` | OpenAL output device; empty = system default. Type `/s_devices` for a numbered pick-list. (LATCH) |
 | `s_alHRTF` | `0` | Enable HRTF binaural rendering via OpenAL Soft. **Default 0 (off)** — only enable when using headphones; on speakers HRTF smears weapon transients. (LATCH) |
 | `s_alEFX` | `1` | Enable ALC_EXT_EFX (occlusion filters, reverb aux slots). Set to 0 to skip EFX entirely for diagnostic isolation. (LATCH) |
-| `s_alDirectChannels` | `1` | Route own-player (local) sources directly to the stereo output, bypassing the HRTF centre-HRIR convolution. **Default 1 (on)** — preserves the transient punch of weapon sounds (e.g. de.wav). Set to 0 to route all sources through the full OpenAL pipeline. Requires `AL_SOFT_direct_channels` extension. (LATCH) |
+| `s_alDirectChannels` | `1` | Route own-player (local) sources directly to the stereo output, bypassing the HRTF centre-HRIR convolution. Only active when `s_alHRTF 1` — has no effect when HRTF is off (default). Requires `AL_SOFT_direct_channels` extension. (LATCH) |
 | `s_alMaxDist` | `1330` | Max attenuation distance in game units; matches vanilla dma range |
 | `s_alReverb` | `0` | Master EFX reverb toggle. **Default 0 = vanilla dma behaviour** |
 | `s_alReverbGain` | `0.20` | EFX wet slot gain [0–1]. Ceiling when `s_alDynamicReverb 1` |
@@ -304,13 +321,12 @@ s_alReverb 1  s_alOcclusion 1  →  + static EFX reverb room
 s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment
 ```
 
-#### Channel preemption
+#### Channel preemption / slot model
 
 See [Global Audio Preemption — Design and Implementation](#global-audio-preemption--design-and-implementation)
-for the full description of how `S_AL_StartSound` handles same-channel
-collisions, the `AL_LOOPING` fire-loop mechanism, the 150 ms
-`CHAN_WEAPON` guard cap, and the per-class content guard for impacts and
-ambients.
+for the full description of how `S_AL_StartSound` allocates independent slots
+for every sound submission — no preemption, no guards, each sound plays to
+completion exactly as in the DMA backend.
 
 #### Vanilla-behaviour notes
 
@@ -352,7 +368,7 @@ transitions without per-frame CM_BoxTrace overhead:
 | Source distance | Trace interval | Rationale |
 |---|---|---|
 | < 80 u (full-vol zone) | every frame — no trace | Wall impossible at this range; real position used |
-| CHAN_WEAPON or `sound/weapons/` < `s_alOccWeaponDist` u | every frame — no trace | Gun-muzzle zone; always pass-through; covers CHAN_AUTO weapon layers |
+| CHAN_WEAPON < `s_alOccWeaponDist` u | every frame — no trace | Gun-muzzle zone; always pass-through |
 | 80 – 300 u | every frame | Nearby players — maximum HRTF precision |
 | 300 – 600 u | every 4 frames | Medium range |
 | > 600 u | every 8 frames | Far — distance model dominates |
@@ -421,8 +437,10 @@ DMA-matching mechanisms prevent degradation:
 DMA plays own-entity sounds at `leftvol = rightvol = master_vol` — pure stereo
 mix, no filter, no spatialization.  OpenAL matches this via:
 
-- `s_alLocalSelf 1` (default): own-entity sounds → `AL_SOURCE_RELATIVE=TRUE`,
-  position (0,0,0), no rolloff, `AL_DIRECT_FILTER = AL_FILTER_NULL`.
+- `s_alLocalSelf 0` (default): own-entity sounds use their world-space origin supplied by the game for full 3D spatialization.
+- `s_alLocalSelf 1`: own-entity sounds are forced non-spatialized → `AL_SOURCE_RELATIVE=TRUE`,
+  position (0,0,0), no rolloff, `AL_DIRECT_FILTER = AL_FILTER_NULL`. Use if stale-position
+  artefacts occur from URT jumping/sliding physics.
 - **Stale reverb fix**: when a local source reuses a slot previously used for a
   3D sound, the auxiliary send is now explicitly disconnected — preventing an
   unwanted reverb tail on own-player weapons and footsteps.
@@ -1090,7 +1108,8 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | `s_alDevice` | `""` | OpenAL output device name; empty = OS default |
 | `s_alHRTF` | `0` | Enable three-layer HRTF + higher-order Ambisonic rendering. Off by default (headphones only). (LATCH) |
 | `s_alEFX` | `1` | Enable ALC_EXT_EFX. Set to 0 for diagnostic isolation. (LATCH) |
-| `s_alDirectChannels` | `1` | Route own-player sources directly to stereo output, bypassing HRTF centre-HRIR. (LATCH) |
+| `s_alDirectChannels` | `1` | Bypass HRTF centre-HRIR for own-player sources. Only active when `s_alHRTF 1`. (LATCH) |
+| `s_alLocalSelf` | `0` | Force own-entity sounds non-spatialized (position 0,0,0). Default 0 — own-player sounds use their world-space origin. Set to 1 if stale-position artefacts occur. |
 | `s_alMaxDist` | `1330` | Override max attenuation distance (floor: 1330 Q3 units) |
 
 - OpenAL Soft selects the native device rate automatically (no `s_khz` needed).
