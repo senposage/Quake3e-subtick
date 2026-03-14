@@ -344,6 +344,13 @@ else (slow drift — fractional accumulator):
 - **1** (default): snapshotMsec-scaled thresholds. 1ms commits (jitter-resistant).
 - **2**: proportional. Commits scale to 25% of deltaDelta when error > snapshotMsec. Faster mid-range recovery (0.3s vs 1.3s for a 40ms disturbance), but amplifies random walk under sustained jitter. Best on stable wired connections.
 
+**Server-side control — `sv_allowClientAdaptiveTiming` [CUSTOM]:**
+The server broadcasts `sv_allowClientAdaptiveTiming` in SERVERINFO (default `1`). During `CL_ParseGamestate`, the client reads this key:
+- If absent or `"1"`: `cl.serverForbidsAdaptiveTiming = qfalse` — adaptive timing active (modes 1 and 2 work normally).
+- If `"0"`: `cl.serverForbidsAdaptiveTiming = qtrue` — `cl_adaptiveTiming` is silently suppressed; the client runs pure vanilla Q3e thresholds regardless of the cvar value.
+
+This lets server admins on vanilla Q3e/URT servers (which don't set the cvar at all) automatically fall back to safe vanilla behavior, while FTWGL servers opt in by leaving `sv_allowClientAdaptiveTiming 1` in their config. The `cl.serverForbidsAdaptiveTiming` flag is cleared on disconnect so local settings are restored immediately.
+
 ### CG_CVAR_SET Intercept [CUSTOM]
 
 Inside `CL_CgameSystemCalls`:
@@ -796,7 +803,9 @@ typedef struct {
     qboolean    extrapolatedSnapshot;
     qboolean    newSnapshots;
 
-    int         snapshotMsec;       // [CUSTOM] EMA of snapshot interval
+    int         snapshotMsec;       // [CUSTOM] EMA of snapshot intervals, clamped [8,100]
+    float       frameInterpolation; // [CUSTOM] interpolation fraction for cgame (0.0–1.0)
+    qboolean    serverForbidsAdaptiveTiming; // [CUSTOM] true when server sets sv_allowClientAdaptiveTiming 0
 
     gameState_t gameState;          // configstrings from server
     char        mapname[MAX_QPATH];
