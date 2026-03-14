@@ -272,8 +272,48 @@ All volume cvars use a **0–10 scale** where **1.0 = reference** (the historica
 | `s_alVolImpact` | `1.0` | 0.55 | 2 | World entity impacts: bullet hits, brass casings, explosions. Often disproportionately loud; capped at 2× (anti-cheat) |
 | `s_alVolEnv` | `1.0` | 0.30 | 10 | Looping ambient/environmental sounds |
 | `s_alVolUI` | `1.0` | 0.80 | 10 | Hit-markers, kill-confirmations, menu sounds (`StartLocalSound` with entnum=0) |
+| `s_alExtraVol` | `1.0` | 0.70 | 1 | Volume for sounds matched by `s_alExtraVolList`. **Reduce-only** (max 1.0, floor 0.25). Ref 0.70 means cvar=1.0 already applies a 30% reduction. Power-2 curve below 1.0. |
 
 **Example**: `s_alVolEnv 0.5` reduces ambient volume to 25% of reference (−12 dB); `s_alVolEnv 2.0` doubles it (+6 dB).
+
+#### Extra-vol slots — per-player custom loud-sound group
+
+Eight individual cvars — `s_alExtraVolEntry1` through `s_alExtraVolEntry8` — each hold one sound path pattern. Because they use plain `CVAR_ARCHIVE` (no `CVAR_NODEFAULT`), **all eight slots always appear in the config file**, one line each, making them trivial to find and edit without touching the console.
+
+**Slot syntax** (one pattern per cvar):
+
+| Value | Effect |
+|-------|--------|
+| `sound/feedback/hit.wav` | Include only that specific file |
+| `sound/feedback` | Include every sound under that directory |
+| `sound/feedback/hit.wav:-2.5` | Include and apply an extra **−2.5 dB** (≈25% amplitude) cut on top of `s_alExtraVol` |
+| `!sound/feedback/quiet.wav` | **Exclude** that file even if a positive slot matched it |
+| *(empty)* | Slot unused — skipped |
+
+A sound is routed to the extra-vol group when **at least one positive slot matches** and **no exclusion slot matches**. The `:-N` suffix is a per-sample dB cut (≤ 0; floor −40 dB; fractional values OK) applied on top of the global `s_alExtraVol` scalar.
+
+**Config file appearance** (default):
+```
+seta s_alExtraVolEntry1 "sound/feedback/hit.wav:-2.5"
+seta s_alExtraVolEntry2 "sound/feedback/kill.wav:-2.5"
+seta s_alExtraVolEntry3 ""
+seta s_alExtraVolEntry4 ""
+seta s_alExtraVolEntry5 ""
+seta s_alExtraVolEntry6 ""
+seta s_alExtraVolEntry7 ""
+seta s_alExtraVolEntry8 ""
+seta s_alExtraVol "1.0"
+```
+
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `s_alExtraVolEntry1`–`8` | slots 1–2 pre-filled, 3–8 empty | One pattern per slot. Prefix `!` to exclude. Append `:-N` (dB ≤ 0) for a per-sample cut on top of `s_alExtraVol`. |
+| `s_alExtraVol` | `1.0` | Global scalar for all matched sounds [0.25–1.0]. At default (1.0) no extra reduction beyond per-slot `:-N` cuts. Floored at 0.25 so matched sounds are never fully silenced. |
+
+**Examples**:
+- Edit `s_alExtraVolEntry1` to `sound/feedback/hit.wav:-5` for a deeper cut on hit sounds
+- Set `s_alExtraVolEntry3` to `sound/feedback` to catch any other feedback sounds
+- Set `s_alExtraVolEntry4` to `!sound/feedback/quiet.wav` to exclude a specific file
 
 #### Loop-sound fade controls
 
