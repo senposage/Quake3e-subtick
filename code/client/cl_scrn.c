@@ -625,8 +625,12 @@ void SCR_NetMonitorAddSnapInterval( int measured, int expected ) {
 		netMonSnapGapMax = gap;
 }
 
+// Per-connection cap-hit total; resets in SCR_LogConnectInfo on each new gamestate.
+static int netMonCapHitsSession;
+
 void SCR_NetMonitorAddCapHit( void ) {
 	netMonCapHits++;
+	netMonCapHitsSession++;
 }
 
 void SCR_NetMonitorAddExtrap( void ) {
@@ -694,7 +698,9 @@ static void SCR_OpenNetLog( void ) {
 	if ( netLogFile ) {
 		Com_sprintf( header, sizeof(header),
 			"=== Quake3e Net Debug Log  %04d-%02d-%02d %02d:%02d:%02d ===\n"
-			"  cl_netlog=%d  (1=cmds, 2=cmds+periodic stats)\n\n",
+			"  cl_netlog=%d"
+			"  (1=CONNECT+SVCMD+FAST/RESET+SNAPLATE+TIMEOUT+DISCONNECT"
+			"  2=+SNAP+STATS)\n\n",
 			1900 + t.tm_year, 1 + t.tm_mon, t.tm_mday,
 			t.tm_hour, t.tm_min, t.tm_sec,
 			cl_netlog->integer );
@@ -757,6 +763,277 @@ void SCR_CloseNetLog( void ) {
 		FS_FCloseFile( netLogFile );
 		netLogFile = 0;
 	}
+}
+
+/*
+========================
+SCR_LogConnectInfo
+
+Called from CL_ParseServerInfo on every gamestate receive.
+Logs the detected server type and timing seed.  Level 1.
+========================
+*/
+void SCR_LogConnectInfo( const char *svFps, const char *snapFps,
+                          const char *allowAt, int snapshotMsec,
+                          qboolean vanilla, qboolean forbids ) {
+	qtime_t t;
+	char line[256];
+
+	// Always reset the session cap counter so SCR_LogDisconnect reports
+	// accurate per-connection totals even when cl_netlog is toggled mid-session.
+	netMonCapHitsSession = 0;
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] CONNECT  sv_fps=%s  sv_snapshotFps=%s"
+		"  sv_allowClientAdaptiveTiming=%s"
+		"  snapshotMsec=%d  vanilla=%d  forbidsAdaptive=%d\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		svFps[0]    ? svFps    : "(none)",
+		snapFps[0]  ? snapFps  : "(none)",
+		allowAt[0]  ? allowAt  : "(none)",
+		snapshotMsec, (int)vanilla, (int)forbids );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogServerCmd
+
+Called from CL_ParseCommandString for every new server command.
+Logs sequence numbers and the command text (first 80 chars).  Level 1.
+========================
+*/
+void SCR_LogServerCmd( int seq, int storedSeq, const char *text ) {
+	qtime_t t;
+	char line[256];
+	char truncated[81];
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Q_strncpyz( truncated, text, sizeof(truncated) );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] SVCMD  seq=%d  stored=%d  \"%s\"\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		seq, storedSeq, truncated );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogSnapState
+
+Called from CL_ParseSnapshot after each accepted snapshot.
+Logs reliable-command sequence state to detect command-buffer flooding.  Level 2.
+========================
+*/
+void SCR_LogSnapState( int snapTime, int ping, int msgSeq,
+                        int cmdSeq, int relSeq, int relAck ) {
+	qtime_t t;
+	char line[192];
+
+	if ( !cl_netlog || cl_netlog->integer < 2 )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] SNAP  t=%d  ping=%d  msg=%d"
+		"  cmdSeq=%d  relSeq=%d  relAck=%d\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		snapTime, ping, msgSeq, cmdSeq, relSeq, relAck );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogTimeout
+
+Called from CL_CheckTimeout on every timeout counter increment.
+Logs count, elapsed silence, and the configured limit.  Level 1.
+========================
+*/
+void SCR_LogTimeout( int count, int elapsed, int limit ) {
+	qtime_t t;
+	char line[128];
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] TIMEOUT  count=%d  elapsed=%dms  limit=%dms\n",
+		t.tm_hour, t.tm_min, t.tm_sec, count, elapsed, limit );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogNote
+
+Generic one-line event annotation.  Level 1.
+Used for warning-level events that are not themselves disconnects
+(e.g. reliable-command overflow recovery).
+========================
+*/
+void SCR_LogNote( const char *tag, const char *msg ) {
+	qtime_t t;
+	char line[256];
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line), "[%02d:%02d:%02d] %s  %s\n",
+		t.tm_hour, t.tm_min, t.tm_sec, tag, msg );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogPacketDrop
+
+Called from CL_ParseServerMessage when clc.netchan.dropped > 0.
+Netchan drops mean sequence-number gaps: the server sent UDP packets that
+never arrived at the client.  Each dropped server-to-client packet may
+contain a snapshot; missing snapshots force delta-invalidation, which the
+QVM lagometer shows as black bars.  Level 1.
+
+Fields:
+  dropped  — netchan gap (packets lost in this delivery)
+  seq      — clc.serverMessageSequence (sequence number of the packet we DID receive)
+  ping     — cl.snap.ping at the moment of detection
+  snapMs   — cl.snapshotMsec (helps judge how many snap intervals were lost)
+========================
+*/
+void SCR_LogPacketDrop( int dropped, int seq ) {
+	qtime_t t;
+	char line[128];
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] DROP  dropped=%d  seq=%d  ping=%d  snapMs=%d\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		dropped, seq, cl.snap.ping, cl.snapshotMsec );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogCapRelease
+
+Called from CL_SetCGameTime when the safety cap releases because the
+server has been silent for >= 2 000 ms.  At this point cl.serverTime
+is allowed to advance freely beyond snap.serverTime until the next
+snapshot triggers a hard-reset via CL_AdjustTimeDelta.  Level 1,
+rate-limited to one entry per 500 ms to avoid per-frame spam.
+========================
+*/
+void SCR_LogCapRelease( int drift ) {
+	static int lastLogRealtime = -99999;
+	qtime_t t;
+	char line[128];
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	/* rate-limit: log at most once per 500 ms */
+	if ( cls.realtime - lastLogRealtime < 500 )
+		return;
+	lastLogRealtime = cls.realtime;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] CAP_RELEASE  drift=%dms  snapMs=%d  snapT=%d  svrT=%d\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		drift, cl.snapshotMsec, cl.snap.serverTime, cl.serverTime );
+	SCR_WriteLog( line );
+}
+
+/*
+========================
+SCR_LogDisconnect
+
+Called immediately before any client disconnect or ERR_DROP/ERR_SERVERDISCONNECT
+that is triggered by server action.  Always prints the context dump to the console
+(visible even when cl_netlog is 0) and also writes to the session log file when
+cl_netlog >= 1.
+
+Fields logged:
+  reason        - server-supplied disconnect reason string
+  snapT         - cl.snap.serverTime (last received snapshot time)
+  svrT          - cl.serverTime (computed cgame time at disconnect)
+  dT            - cl.serverTimeDelta
+  ping          - cl.snap.ping (999 = server-side negative-ping kick suspected)
+  cmdSeq        - clc.serverCommandSequence (last server command received)
+  relSeq        - clc.reliableSequence (last client reliable command sent)
+  relAck        - clc.reliableAcknowledge (last client cmd acked by server)
+  snapMs        - cl.snapshotMsec (EMA of snapshot interval)
+  vanilla       - cl.vanillaServer (1 = server lacks sv_snapshotFps)
+  forbids       - cl.serverForbidsAdaptiveTiming
+  timeout       - cl.timeoutcount
+  silenceMs     - ms since last packet from server
+  capHits       - cap firings since last gamestate (cl.serverTime was capped)
+========================
+*/
+void SCR_LogDisconnect( const char *reason ) {
+	qtime_t t;
+	char line[640];
+	int elapsed;
+
+	elapsed = ( clc.lastPacketTime > 0 ) ? ( cls.realtime - clc.lastPacketTime ) : -1;
+
+	/* Always print context to console so it is visible even without cl_netlog. */
+	Com_Printf( S_COLOR_YELLOW
+		"[DISCONNECT TRACE] reason=\"%s\""
+		" snapT=%d svrT=%d dT=%d ping=%d"
+		" cmdSeq=%d relSeq=%d relAck=%d"
+		" snapMs=%d vanilla=%d forbids=%d"
+		" timeout=%d silence=%dms caps=%d\n",
+		reason ? reason : "(none)",
+		cl.snap.serverTime, cl.serverTime, cl.serverTimeDelta, cl.snap.ping,
+		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge,
+		cl.snapshotMsec, (int)cl.vanillaServer, (int)cl.serverForbidsAdaptiveTiming,
+		cl.timeoutcount, elapsed, netMonCapHitsSession );
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] DISCONNECT  reason=\"%s\"\n"
+		"  snapT=%d  svrT=%d  dT=%d  ping=%d\n"
+		"  cmdSeq=%d  relSeq=%d  relAck=%d\n"
+		"  snapMs=%d  vanilla=%d  forbidsAdaptive=%d\n"
+		"  timeout=%d  silenceMs=%d  capHits=%d\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		reason ? reason : "(none)",
+		cl.snap.serverTime, cl.serverTime, cl.serverTimeDelta, cl.snap.ping,
+		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge,
+		cl.snapshotMsec, (int)cl.vanillaServer, (int)cl.serverForbidsAdaptiveTiming,
+		cl.timeoutcount, elapsed, netMonCapHitsSession );
+	SCR_WriteLog( line );
 }
 
 /* ----- netgraph_dump command ----- */
@@ -1162,10 +1439,12 @@ void SCR_Init( void ) {
 
 	cl_netlog = Cvar_Get( "cl_netlog", "0", 0 );
 	Cvar_SetDescription( cl_netlog,
-		"Net debug session logging.\n"
+		"Net debug session logging to netdebug_YYYYMMDD_HHMMSS.log.\n"
 		"0 = off\n"
-		"1 = log FAST/RESET delta events + SNAP LATE + PING JITTER\n"
-		"2 = log level 1 events + periodic per-second stats\n"
+		"1 = CONNECT info, every server command (SVCMD), FAST/RESET delta,\n"
+		"    SNAP LATE, PING JITTER, TIMEOUT counter, DISCONNECT context dump\n"
+		"2 = level 1 + per-snapshot state (SNAP) + periodic per-second stats\n"
+		"Note: DISCONNECT context is always printed to console regardless of this setting.\n"
 		"Default: 0" );
 
 	cl_laggotannounce = Cvar_Get( "cl_laggotannounce", "1", 0 );
