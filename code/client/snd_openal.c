@@ -454,6 +454,63 @@ typedef struct {
 
 static alEfx_t s_al_efx;
 
+/* =========================================================================
+ * BSP map entity data — extracted from the entity lump once per map load.
+ *
+ * alMapHints_t holds acoustic-relevant worldspawn keys used to bias the
+ * dynamic reverb classifier (e.g. a map with a skybox is an outdoor/urban
+ * layout, not an underground cave).
+ *
+ * alBspSpeaker_t stores every target_speaker entity with a "noise" key so
+ * that S_AL_StartSound can resolve the correct world position for cold-start
+ * sounds that arrive before S_UpdateEntityPosition has been called for the
+ * entity (e.g. the very first frame of a new map).
+ * ========================================================================= */
+#define S_AL_BSP_SPEAKERS_MAX 256
+
+typedef struct {
+    char   noise[MAX_QPATH]; /* "noise" key value — sound file path */
+    vec3_t origin;           /* "origin" key parsed into world coords */
+    int    spawnflags;       /* bit 0 = GLOBAL (plays everywhere)    */
+} alBspSpeaker_t;
+
+typedef struct {
+    qboolean parsed;                  /* qtrue after S_AL_ParseMapEntities ran */
+    qboolean hasSky;                  /* worldspawn "sky" key present */
+    char     skyShader[64];           /* sky shader name (empty if none) */
+    char     worldAmbient[MAX_QPATH]; /* worldspawn "ambient" key value */
+    char     worldMusic[MAX_QPATH];   /* worldspawn "music" key value */
+    int      globalSpeakerCount;      /* target_speaker entities with spawnflags & 1 */
+    int      totalSpeakerCount;       /* all target_speaker entities with a noise key */
+} alMapHints_t;
+
+static alMapHints_t   s_al_mapHints;
+static alBspSpeaker_t s_al_bspSpeakers[S_AL_BSP_SPEAKERS_MAX];
+static int            s_al_numBspSpeakers;
+
+/* Per-map normalization cache.
+ *
+ * Loaded from normcache/<mapname>.cfg at BeginRegistration so that
+ * RegisterSound picks up the override before cgame registers its sounds.
+ * Written to the same file after the first map load once every BSP sound has
+ * been decoded and its normGain computed.
+ *
+ * Entries are matched case-insensitively against the sfx path.  The table is
+ * cleared in StopAllSounds so stale entries from a previous map never bleed
+ * into the next one. */
+#define S_AL_NORMCACHE_MAX 512
+
+typedef struct {
+    char  path[MAX_QPATH]; /* sfx path key                            */
+    float normGain;        /* override value written to r->normGain   */
+} alNormCacheEntry_t;
+
+static alNormCacheEntry_t s_al_normCache[S_AL_NORMCACHE_MAX];
+static int                s_al_normCacheCount;
+/* qtrue once the cache has been written for the current map so we don't
+ * rewrite on every probe cycle. */
+static qboolean           s_al_normCacheWritten;
+
 /* Cvars */
 static cvar_t *s_alDevice;
 static cvar_t *s_alHRTF;
@@ -548,6 +605,7 @@ static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest 
 static cvar_t *s_alOccSearchRadius; /* tangent-plane probe radius for gap finding [units] */
 static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each frame */
 static cvar_t *s_alDebugPlayback;  /* 0=off 1=rate-mismatch+preemption 2=+natural-stop */
+static cvar_t *s_alDebugNorm;      /* 0=off 1=print normGain for all active ambient sources */
 static cvar_t *s_alMaxSrc;         /* max source pool size (LATCH) */
 static cvar_t *s_alDedupMs;        /* same-frame dedup window in ms (live) */
 static cvar_t *s_alTrace;          /* 0=off 1=key lifecycle events 2=verbose */
@@ -816,58 +874,88 @@ static alSfxRec_t *S_AL_AllocSfx( void )
     }
 }
 
-/* Compute a per-sample RMS loudness-normalisation gain for ambient sources.
+/* Compute a per-sample RMS ceiling limiter gain for ambient sources.
  *
- * Scans the decoded PCM data (up to S_AL_NORM_SCAN_SAMPLES per channel),
- * calculates the root-mean-square level, and returns the gain multiplier
- * required to bring that level to S_AL_AMBIENT_TARGET_RMS.
+ * Samples the decoded PCM file at a regular stride so that the ENTIRE loop
+ * body is represented, not just the opening seconds.  The old approach (scan
+ * only the first S_AL_NORM_SCAN_SAMPLES frames) produced incorrect results
+ * for ambient tracks with a quiet intro followed by a loud main body — the
+ * quiet intro inflated normGain and the rest of the loop played too loud.
+ *
+ * The stride is chosen so that at most S_AL_NORM_SCAN_SAMPLES frames are
+ * examined.  For files shorter than the cap, stride = 1 (every frame).
+ *
+ * DESIGN: one-sided ceiling, not a bidirectional normalizer.
+ *
+ *   normGain = min( 1.0,  S_AL_NORM_CEILING / RMS )
+ *
+ *   • Sounds with RMS ≤ S_AL_NORM_CEILING  → normGain = 1.0  (natural level,
+ *     no boost, no cut).  A quiet breeze stays quiet; a moderately loud
+ *     waterfall stays at its intended loudness.
+ *   • Sounds with RMS  > S_AL_NORM_CEILING  → normGain < 1.0  (proportional
+ *     cut that brings the sound DOWN to the ceiling level).  Only genuine
+ *     outliers — heavily-compressed, broadcast-hot, or clipped ambient WAVs
+ *     — receive any attenuation.
+ *
+ * This preserves the relative loudness relationship between different ambient
+ * sounds on the same map (intended-to-be-louder sounds stay louder) while
+ * preventing any single excessively-recorded loop from dominating the mix.
  *
  * Returns 1.0 (no adjustment) for:
  *   • empty or silent files
- *   • unsupported bit depths
- *
- * The result is clamped to [0.25, 4.0] (±12 dB) so very quiet or very loud
- * outliers are still audible / not ear-splitting after normalization. */
-#define S_AL_NORM_SCAN_SAMPLES  (44100 * 4)   /* at most 4 s worth of samples */
+ *   • unsupported bit depths */
+#define S_AL_NORM_SCAN_SAMPLES  (44100 * 4)   /* max sample frames to analyse */
+#define S_AL_NORM_CEILING       0.316f         /* ≈ −10 dBFS; sounds above cut to here */
 
 static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
 {
-    double       sumSq = 0.0;
-    long         count, i;
-    float        rms, normGain;
-    long         maxSamples;
+    double   sumSq = 0.0;
+    long     count = 0;
+    float    rms, normGain;
+    long     totalFrames, stride, scanFrames, i;
 
     if (!pcm || info->samples <= 0 || info->size <= 0)
         return 1.0f;
 
-    /* Cap scan length to keep load times short on very long ambient loops. */
-    maxSamples = info->samples;
-    if (maxSamples > S_AL_NORM_SCAN_SAMPLES)
-        maxSamples = S_AL_NORM_SCAN_SAMPLES;
+    /* Clamp totalFrames to what info->size actually allows — guards against
+     * codec-reported sample counts that exceed the allocated buffer. */
+    {
+        long maxFromSize = (long)(info->size / ((long)info->width * info->channels));
+        totalFrames = (info->samples < maxFromSize) ? info->samples : maxFromSize;
+    }
+    if (totalFrames <= 0) return 1.0f;
+
+    /* Stride: evenly spaced across the full file.  stride=1 when the file
+     * fits within the scan cap so no precision is lost on short sounds. */
+    stride     = (totalFrames > S_AL_NORM_SCAN_SAMPLES)
+                 ? (totalFrames / S_AL_NORM_SCAN_SAMPLES) : 1;
+    scanFrames = totalFrames / stride;
+    if (scanFrames < 1) scanFrames = 1;
 
     if (info->width == 2) {
         /* 16-bit signed PCM */
         const short *s = (const short *)pcm;
-        long n = maxSamples * info->channels;
-        /* guard against size underflow */
-        if (n > (long)(info->size / 2))
-            n = (long)(info->size / 2);
-        for (i = 0; i < n; i++) {
-            double v = s[i] / 32768.0;
-            sumSq += v * v;
+        long ch;
+        for (i = 0; i < scanFrames; i++) {
+            long base = (i * stride) * info->channels;
+            for (ch = 0; ch < info->channels; ch++) {
+                double v = s[base + ch] / 32768.0;
+                sumSq += v * v;
+            }
         }
-        count = n;
+        count = scanFrames * info->channels;
     } else if (info->width == 1) {
         /* 8-bit unsigned PCM (centre = 128) */
         const byte *s = (const byte *)pcm;
-        long n = maxSamples * info->channels;
-        if (n > (long)info->size)
-            n = (long)info->size;
-        for (i = 0; i < n; i++) {
-            double v = (s[i] - 128) / 128.0;
-            sumSq += v * v;
+        long ch;
+        for (i = 0; i < scanFrames; i++) {
+            long base = (i * stride) * info->channels;
+            for (ch = 0; ch < info->channels; ch++) {
+                double v = (s[base + ch] - 128) / 128.0;
+                sumSq += v * v;
+            }
         }
-        count = n;
+        count = scanFrames * info->channels;
     } else {
         return 1.0f;  /* unsupported depth */
     }
@@ -877,13 +965,14 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     rms = (float)sqrt(sumSq / (double)count);
     if (rms < 1e-6f) return 1.0f;   /* silent — don't amplify noise floor */
 
-    normGain = S_AL_AMBIENT_TARGET_RMS / rms;
-    /* Clamp: boost quiet sounds up to 4× (+12 dB), cut loud sounds by up to
-     * 10× (−20 dB).  The wider reduction range prevents very loud ambient WAVs
-     * (e.g. ut4_turnpike traffic) from overwhelming other sounds even after the
-     * lower TARGET_RMS ceiling is applied. */
-    if (normGain > 4.0f)   normGain = 4.0f;
-    if (normGain < 0.10f)  normGain = 0.10f;
+    /* One-sided ceiling: only cut sounds that exceed the ceiling.
+     * Sounds at or below the ceiling play at their natural level (1.0).
+     * The hard floor at 0.05 is a safety net for truly pathological files
+     * (e.g. fully-clipped square waves); it is never reached by normally
+     * encoded audio since ceiling/1.0 = 0.316 > 0.05 at maximum RMS. */
+    normGain = S_AL_NORM_CEILING / rms;
+    if (normGain > 1.0f)  normGain = 1.0f;   /* below ceiling — no change */
+    if (normGain < 0.05f) normGain = 0.05f;  /* safety floor */
 
     return normGain;
 }
@@ -940,6 +1029,23 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     /* Analyse PCM while it is still in the temp allocation. */
     r->normGain = S_AL_CalcNormGain(pcm, &info);
 
+    /* Per-map normcache override: if the player has an existing cache entry
+     * for this sound (loaded by S_AL_BeginRegistration before cgame registers
+     * its sounds), prefer it over the freshly computed gain.  This lets the
+     * cache drive normGain even when the sfx record is reused from a previous
+     * map session (S_AL_FindSfx returned an existing record above and skipped
+     * this code path — those records are updated in S_AL_BeginRegistration
+     * directly, so this branch only fires for genuinely new registrations). */
+    {
+        int ci;
+        for (ci = 0; ci < s_al_normCacheCount; ci++) {
+            if (!Q_stricmp(s_al_normCache[ci].path, sample)) {
+                r->normGain = s_al_normCache[ci].normGain;
+                break;
+            }
+        }
+    }
+
     S_AL_ClearError("RegisterSound");
     qalGenBuffers(1, &r->buffer);
     if (S_AL_CheckError("alGenBuffers")) {
@@ -962,19 +1068,20 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     r->lastTimeUsed = Com_Milliseconds();
 
     idx = (int)(r - s_al_sfx);
-    Com_DPrintf("S_AL: loaded %s (%d Hz, %d ch, %d smp)\n",
-        sample, info.rate, info.channels, info.samples);
+    Com_DPrintf("S_AL: loaded %s (%d Hz, %d ch, %d smp, normGain=%.3f)\n",
+        sample, info.rate, info.channels, info.samples, r->normGain);
 
     /* Playback debug: warn when the file's sample rate doesn't match the
      * device's mixing rate — this is the condition that forces the internal
      * resampler to run and is the root cause of the Gaussian-filter quality
-     * loss described in kcat/openal-soft#985. */
+     * loss described in kcat/openal-soft#985.
+     * Also report normGain so outlier ambient loops can be identified. */
     if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1 &&
             s_al_deviceFreq > 0 && info.rate != (int)s_al_deviceFreq) {
         Com_Printf(S_COLOR_YELLOW
             "[alDbg] rate mismatch: %s  file=%d Hz  device=%d Hz"
-            "  — resampler will run\n",
-            sample, info.rate, (int)s_al_deviceFreq);
+            "  normGain=%.3f  — resampler will run\n",
+            sample, info.rate, (int)s_al_deviceFreq, r->normGain);
     }
 
     return (sfxHandle_t)idx;
@@ -2335,6 +2442,35 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             VectorCopy(s_al_entity_origins[entnum], sndOrigin);
         else
             VectorClear(sndOrigin);
+
+        /* BSP cold-start fallback: if the entity origin cache is still at
+         * world-origin (0,0,0) — which happens on the very first frame before
+         * S_UpdateEntityPosition has been called for static map entities —
+         * look for a target_speaker in the parsed BSP list whose noise file
+         * matches this sound.  Only resolve when exactly ONE speaker uses this
+         * file; if multiple speakers share the same noise we cannot know which
+         * entity number maps to which BSP entity, so we leave the origin alone
+         * and let it update naturally on the next frame. */
+        if (VectorCompare(sndOrigin, vec3_origin)
+                && s_al_numBspSpeakers > 0
+                && sfx >= 0 && sfx < s_al_numSfx) {
+            const char *sfxName = s_al_sfx[sfx].name;
+            int  matchIdx   = -1;
+            int  matchCount = 0;
+            int  bk;
+            for (bk = 0; bk < s_al_numBspSpeakers; bk++) {
+                /* Match on the base filename portion so that path differences
+                 * between the BSP noise value and the registered sfx path
+                 * (with or without leading "sound/") still resolve. */
+                if (Q_stristr(sfxName, s_al_bspSpeakers[bk].noise) ||
+                        Q_stristr(s_al_bspSpeakers[bk].noise, sfxName)) {
+                    matchCount++;
+                    matchIdx = bk;
+                }
+            }
+            if (matchCount == 1)
+                VectorCopy(s_al_bspSpeakers[matchIdx].origin, sndOrigin);
+        }
         isLocal = qfalse;
     }
 
@@ -2716,6 +2852,295 @@ static void S_AL_StopAllSounds( void )
     /* Reset entity-origin cache so stale positions don't bleed in. */
     Com_Memset(s_al_entity_origins, 0, sizeof(s_al_entity_origins));
     s_al_listener_entnum = -1;
+
+    /* Reset per-map BSP state so the next map load re-parses and re-caches. */
+    Com_Memset(&s_al_mapHints, 0, sizeof(s_al_mapHints));
+    s_al_numBspSpeakers  = 0;
+    s_al_normCacheCount  = 0;
+    s_al_normCacheWritten = qfalse;
+}
+
+
+/* =========================================================================
+ * Per-map BSP entity parsing and normalization cache
+ * =========================================================================
+ *
+ * Order of operations at map load:
+ *   1. S_AL_StopAllSounds()     — clears mapHints, bspSpeakers, normCache
+ *   2. S_AL_BeginRegistration() — loads existing normcache if present so
+ *                                  RegisterSound calls pick up overrides
+ *   3. cgame registers sounds   — normcache override applied per-sound
+ *   4. First UpdateDynamicReverb snap cycle:
+ *        → S_AL_InitMapAudio()  — parses BSP, pre-registers remaining
+ *                                  sounds, writes cache if none existed
+ */
+
+/* Extract the bare map name from cl.mapname.
+ * "maps/ut4_turnpike.bsp" → "ut4_turnpike"                              */
+static void S_AL_MapBaseName( char *out, int outLen )
+{
+    const char *p  = cl.mapname;
+    const char *sl = strrchr(p, '/');
+    const char *dot;
+    if (sl) p = sl + 1;
+    Q_strncpyz(out, p, outLen);
+    dot = strrchr(out, '.');
+    if (dot) *(char *)dot = '\0';
+}
+
+/* Parse the BSP entity lump (requires CM_NumInlineModels() > 0) and fill
+ * s_al_mapHints and s_al_bspSpeakers[].                                  */
+static void S_AL_ParseMapEntities( void )
+{
+    const char *p;
+    const char *tok;
+    char key[256], val[256];
+    char blkClass[64], blkSky[64];
+    char blkAmbient[MAX_QPATH], blkMusic[MAX_QPATH];
+    char blkNoise[MAX_QPATH], blkOriginStr[96];
+    int  blkFlags;
+
+    Com_Memset(&s_al_mapHints, 0, sizeof(s_al_mapHints));
+    s_al_numBspSpeakers  = 0;
+    s_al_mapHints.parsed = qtrue;
+
+    p = CM_EntityString();
+    if (!p || !*p) return;
+
+    for (;;) {
+        tok = COM_ParseExt(&p, qtrue);
+        if (!tok || !tok[0]) break;
+        if (tok[0] != '{') continue;
+
+        blkClass[0] = blkSky[0] = blkAmbient[0] = blkMusic[0] = '\0';
+        blkNoise[0] = blkOriginStr[0] = '\0';
+        blkFlags = 0;
+
+        for (;;) {
+            tok = COM_ParseExt(&p, qtrue);
+            if (!tok || !tok[0] || tok[0] == '}') break;
+            Q_strncpyz(key, tok, sizeof(key));
+            tok = COM_ParseExt(&p, qtrue);
+            if (!tok || !tok[0]) break;
+            Q_strncpyz(val, tok, sizeof(val));
+
+            if      (!Q_stricmp(key, "classname"))  Q_strncpyz(blkClass,     val, sizeof(blkClass));
+            else if (!Q_stricmp(key, "spawnflags"))  blkFlags = atoi(val);
+            else if (!Q_stricmp(key, "sky"))         Q_strncpyz(blkSky,       val, sizeof(blkSky));
+            else if (!Q_stricmp(key, "ambient"))     Q_strncpyz(blkAmbient,   val, sizeof(blkAmbient));
+            else if (!Q_stricmp(key, "music"))       Q_strncpyz(blkMusic,     val, sizeof(blkMusic));
+            else if (!Q_stricmp(key, "noise"))       Q_strncpyz(blkNoise,     val, sizeof(blkNoise));
+            else if (!Q_stricmp(key, "origin"))      Q_strncpyz(blkOriginStr, val, sizeof(blkOriginStr));
+        }
+
+        if (!Q_stricmp(blkClass, "worldspawn")) {
+            if (blkSky[0]) {
+                Q_strncpyz(s_al_mapHints.skyShader, blkSky,
+                           sizeof(s_al_mapHints.skyShader));
+                s_al_mapHints.hasSky = qtrue;
+            }
+            if (blkAmbient[0])
+                Q_strncpyz(s_al_mapHints.worldAmbient, blkAmbient,
+                           sizeof(s_al_mapHints.worldAmbient));
+            if (blkMusic[0])
+                Q_strncpyz(s_al_mapHints.worldMusic, blkMusic,
+                           sizeof(s_al_mapHints.worldMusic));
+        } else if (!Q_stricmp(blkClass, "target_speaker") && blkNoise[0]) {
+            s_al_mapHints.totalSpeakerCount++;
+            if (blkFlags & 1) s_al_mapHints.globalSpeakerCount++;
+
+            if (s_al_numBspSpeakers < S_AL_BSP_SPEAKERS_MAX) {
+                alBspSpeaker_t *sp = &s_al_bspSpeakers[s_al_numBspSpeakers++];
+                Q_strncpyz(sp->noise, blkNoise, sizeof(sp->noise));
+                sp->spawnflags = blkFlags;
+                if (blkOriginStr[0])
+                    sscanf(blkOriginStr, "%f %f %f",
+                           &sp->origin[0], &sp->origin[1], &sp->origin[2]);
+            }
+        }
+    }
+
+    Com_DPrintf("S_AL: map hints: sky=%s ambient=[%s] music=[%s] "
+                "speakers=%d (%d global)\n",
+        s_al_mapHints.hasSky ? s_al_mapHints.skyShader : "none",
+        s_al_mapHints.worldAmbient, s_al_mapHints.worldMusic,
+        s_al_mapHints.totalSpeakerCount, s_al_mapHints.globalSpeakerCount);
+}
+
+/* Force-register every sound referenced in the BSP entity lump so that
+ * normGain is computed for all of them before WriteMapNormCache runs.    */
+static void S_AL_PreRegisterMapSounds( void )
+{
+    int i;
+    if (s_al_mapHints.worldAmbient[0])
+        S_AL_RegisterSound(s_al_mapHints.worldAmbient, qfalse);
+    if (s_al_mapHints.worldMusic[0])
+        S_AL_RegisterSound(s_al_mapHints.worldMusic,   qfalse);
+    for (i = 0; i < s_al_numBspSpeakers; i++) {
+        if (s_al_bspSpeakers[i].noise[0])
+            S_AL_RegisterSound(s_al_bspSpeakers[i].noise, qfalse);
+    }
+}
+
+/* Write normcache/<mapbase>.cfg with the normGain for every BSP sound.
+ * The file is human-editable; players/admins can hand-tune per-map levels
+ * then type snd_normcache_rebuild to push the new values live.            */
+static void S_AL_WriteMapNormCache( const char *mapbase )
+{
+    char        path[MAX_QPATH];
+    char       *buf;
+    int         bufLen, written, i;
+    /* Collect unique paths: worldAmbient + worldMusic + all speaker noises */
+    const char *sndPaths[S_AL_BSP_SPEAKERS_MAX + 2];
+    int         numPaths = 0;
+
+    if (!mapbase || !mapbase[0]) return;
+
+    if (s_al_mapHints.worldAmbient[0])
+        sndPaths[numPaths++] = s_al_mapHints.worldAmbient;
+    if (s_al_mapHints.worldMusic[0])
+        sndPaths[numPaths++] = s_al_mapHints.worldMusic;
+    for (i = 0; i < s_al_numBspSpeakers; i++)
+        if (s_al_bspSpeakers[i].noise[0])
+            sndPaths[numPaths++] = s_al_bspSpeakers[i].noise;
+
+    if (!numPaths) return;
+
+    Com_sprintf(path, sizeof(path), "normcache/%s.cfg", mapbase);
+
+    bufLen  = 512 + numPaths * 96;
+    buf     = (char *)Z_Malloc(bufLen);
+    written = 0;
+
+    written += Com_sprintf(buf + written, bufLen - written,
+        "// Quake3e-urt per-map ambient normalisation cache\n"
+        "// map: %s\n"
+        "// normGain 0.05–1.00  (1.0 = natural level; lower = quieter)\n"
+        "// Edit values to tune loudness. Delete file to regenerate.\n"
+        "// Reload with: snd_normcache_rebuild\n",
+        cl.mapname[0] ? cl.mapname : mapbase);
+
+    for (i = 0; i < numPaths; i++) {
+        alSfxRec_t *r = S_AL_FindSfx(sndPaths[i]);
+        float ng = (r && r->inMemory && !r->defaultSound) ? r->normGain : 1.0f;
+        written += Com_sprintf(buf + written, bufLen - written,
+            "%s %.4f\n", sndPaths[i], ng);
+    }
+
+    FS_WriteFile(path, buf, written);
+    Z_Free(buf);
+
+    s_al_normCacheWritten = qtrue;
+    Com_Printf("S_AL: wrote normcache %s  (%d sounds)\n", path, numPaths);
+}
+
+/* Load normcache/<mapbase>.cfg.
+ * Populates s_al_normCache[] for RegisterSound overrides and immediately
+ * applies entries to sfx records already in the cache from a previous map. */
+static qboolean S_AL_LoadMapNormCache( const char *mapbase )
+{
+    char        path[MAX_QPATH];
+    char       *buf;
+    const char *p;
+    const char *tok;
+    int         fileLen, applied;
+
+    if (!mapbase || !mapbase[0]) return qfalse;
+
+    Com_sprintf(path, sizeof(path), "normcache/%s.cfg", mapbase);
+    fileLen = FS_ReadFile(path, (void **)&buf);
+    if (fileLen <= 0 || !buf) return qfalse;
+
+    s_al_normCacheCount = 0;
+    applied = 0;
+    p = buf;
+
+    while (*p) {
+        char        sfxPath[MAX_QPATH];
+        float       ng;
+        alSfxRec_t *r;
+
+        tok = COM_ParseExt(&p, qtrue);
+        if (!tok || !tok[0]) break;
+
+        /* Skip comment lines */
+        if (tok[0] == '/') {
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+
+        Q_strncpyz(sfxPath, tok, sizeof(sfxPath));
+
+        tok = COM_ParseExt(&p, qfalse);   /* normGain on same line */
+        if (!tok || !tok[0]) continue;
+        ng = (float)atof(tok);
+        if (ng < 0.05f) ng = 0.05f;
+        if (ng > 1.0f)  ng = 1.0f;
+
+        /* Store in pending table — RegisterSound checks this for new loads */
+        if (s_al_normCacheCount < S_AL_NORMCACHE_MAX) {
+            Q_strncpyz(s_al_normCache[s_al_normCacheCount].path,
+                       sfxPath, MAX_QPATH);
+            s_al_normCache[s_al_normCacheCount].normGain = ng;
+            s_al_normCacheCount++;
+        }
+
+        /* Apply to sfx records already in memory from a previous session */
+        r = S_AL_FindSfx(sfxPath);
+        if (r && r->inMemory) {
+            r->normGain = ng;
+            applied++;
+        }
+    }
+
+    FS_FreeFile(buf);
+
+    /* Mark written so we don't accidentally overwrite a user-edited cache */
+    s_al_normCacheWritten = qtrue;
+    Com_Printf("S_AL: loaded normcache %s  (%d entries, %d applied)\n",
+               path, s_al_normCacheCount, applied);
+    return qtrue;
+}
+
+/* Called once per map on the first dynamic-reverb probe cycle after the BSP
+ * is loaded.  Parses BSP entities, then either loads the existing normcache
+ * (if present) or decodes all BSP sounds and writes a fresh one.         */
+static void S_AL_InitMapAudio( void )
+{
+    char mapbase[MAX_QPATH];
+
+    S_AL_ParseMapEntities();
+
+    S_AL_MapBaseName(mapbase, sizeof(mapbase));
+    if (!mapbase[0]) return;
+
+    if (!S_AL_LoadMapNormCache(mapbase)) {
+        S_AL_PreRegisterMapSounds();
+        S_AL_WriteMapNormCache(mapbase);
+    }
+}
+
+/* Console command: regenerate the normcache for the current map.
+ * Use after manually editing a cache file to push the values live, or to
+ * discard a bad cache and let the engine recompute from the audio files.  */
+static void S_AL_RebuildNormCache_f( void )
+{
+    char mapbase[MAX_QPATH];
+
+    if (!s_al_started || CM_NumInlineModels() <= 0) {
+        Com_Printf("S_AL: snd_normcache_rebuild — no map loaded\n");
+        return;
+    }
+    s_al_normCacheCount   = 0;
+    s_al_normCacheWritten = qfalse;
+
+    S_AL_MapBaseName(mapbase, sizeof(mapbase));
+    if (!mapbase[0]) {
+        Com_Printf("S_AL: snd_normcache_rebuild — cannot determine map name\n");
+        return;
+    }
+    S_AL_PreRegisterMapSounds();
+    S_AL_WriteMapNormCache(mapbase);
 }
 
 static void S_AL_ClearLoopingSounds( qboolean killall )
