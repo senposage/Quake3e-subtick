@@ -138,7 +138,7 @@ Uses `AL_LINEAR_DISTANCE_CLAMPED` with parameters derived from Q3/dmaHD constant
 
 Formula: `gain = 1 - 1.0 * (dist - 80) / (1330 - 80)` — identical to Q3 base.
 
-### Occlusion — `CM_BoxTrace` + EFX Low-Pass Filter
+### Occlusion — `CM_BoxTrace` + EFX Low-Pass Filter + HRTF Gap Projection
 
 At distance-adaptive intervals, for each playing 3D source, a ray is traced from
 the listener through solid BSP geometry (`CONTENTS_SOLID` only —
@@ -163,6 +163,27 @@ coloration on fully-clear sources.
 
 **Without EFX**: Simple `AL_GAIN` scale applied directly to the source.
 
+**HRTF gap direction projection** (`s_alOccPosBlend`, `s_alOccSearchRadius`):
+When the direct path is blocked, `S_AL_ComputeAcousticPosition` searches for the
+nearest acoustic gap in 8 tangent-plane directions displaced `s_alOccSearchRadius`
+units (default 120 u — approximately one URT doorway half-width) from the source.
+
+The old approach placed the virtual `AL_POSITION` only `SEARCH_RADIUS` units from
+the real source, which gave < 5° apparent HRTF direction shift even at full blend
+— acoustically imperceptible.  The new approach **projects the gap direction onto
+the source's actual distance** from the listener:
+
+```
+gapDir = normalize(acousticGap − listenerOrigin)
+virtualPos = listenerOrigin + gapDir × distance(listener → source)
+```
+
+This means `s_alOccPosBlend` now directly controls an angular shift.  At the
+default 0.40, a doorway 45° off the direct line produces a ~16° perceptible HRTF
+direction change — the player hears the sound arriving *around the corner* rather
+than straight through the wall.  The old hard-coded radius of 80 u has been
+replaced with the tunable `s_alOccSearchRadius` (default 120 u).
+
 ### EFX Environmental Effects (`ALC_EXT_EFX`)
 
 All EFX entry points are loaded via `alcGetProcAddress(device, ...)` at runtime — no link-time EFX dependency.
@@ -174,9 +195,11 @@ All EFX entry points are loaded via `alcGetProcAddress(device, ...)` at runtime 
 | Reverb slot | EAX reverb (or plain AL_EFFECT_REVERB fallback) | always — medium indoor room preset |
 | Underwater slot | EAX reverb, heavy HF cut (GAINHF=0.1) | listener inside water volume |
 
-**Indoor reverb preset** (EAX parameters, tuned for URT urban maps):
-- Density 0.5, Diffusion 0.85, Gain 0.32, Decay 1.49s, HF ratio 0.83
-- Reflections gain 0.25, Reflections delay 7ms, Late reverb gain 0.50, Late reverb delay 11ms, Air absorption 0.994
+**Indoor reverb initial preset** (EAX parameters — used as starting values and as the static baseline when `s_alDynamicReverb 0`):
+- Density 0.5, Diffusion 0.85, Gain 0.32, Decay 1.49 s, HF ratio 0.83
+- Reflections gain 0.25, Reflections delay 7 ms, Late reverb gain 0.50, Late reverb delay 11 ms, Air absorption 0.994
+
+> When `s_alDynamicReverb 1` (default), **all nine EFX parameters are overridden every 16 frames** by the probe-derived environment classifier — the initial preset above is only a reasonable starting state before the first probe fires.  See [Dynamic acoustic environment](#dynamic-acoustic-environment-s_aldynamicreverb-1) for the full parameter list and formulas.
 
 **Per-source occlusion filters**: One `AL_FILTER_LOWPASS` is allocated per source slot at init. The filter is updated by the occlusion trace and attached via `AL_DIRECT_FILTER`.  When a source slot is reused, the filter is **explicitly reset to pass-through** before being attached so that stale attenuation from a previous (possibly occluded) sound never bleeds into the new sound — this was the cause of the sporadic "suppressor" effect on multi-layer weapon events.
 
@@ -256,7 +279,8 @@ Background music is streamed via a dedicated AL source and `S_AL_MUSIC_BUFFERS` 
 | `s_alOcclusion` | `1` | Wall-occlusion tracing with HRTF direction correction |
 | `s_alOccGainFloor` | `0.55` | Floor of `AL_LOWPASS_GAIN` for fully-blocked sources [0–1]. `1.0` = no volume change through walls (vanilla-like). `0.0` = can go fully silent. Default 0.55 keeps occluded sounds audible with a modest volume jump at line-of-sight. |
 | `s_alOccHFFloor` | `0.50` | Floor of `AL_LOWPASS_GAINHF` (high-frequency content) for fully-blocked sources [0–1]. `1.0` = no HF filtering (only volume changes). `0.0` = bass-only thud through walls. Default 0.50 preserves enough weapon crack to remain recognisable. Old formula `occ²` reached near-zero HF even at moderate occlusion — this was the main cause of the "tinny pop" corner transition. |
-| `s_alOccPosBlend` | `0.25` | How far to redirect HRTF apparent-source position towards the nearest acoustic gap [0–1]. `0.0` = always true source position (best direction accuracy). `1.0` = full gap redirect (old behaviour — confused weapon direction). Default 0.25: subtle gap hint that aids "around the corner" perception without sacrificing localizability. |
+| `s_alOccPosBlend` | `0.40` | How far to redirect the HRTF apparent-source position towards the nearest acoustic gap when a source is occluded [0–1]. The gap position is **projected to the source's actual distance** so the value directly controls an angular shift: at 0.40 a doorway 45° off the direct line gives ~16° apparent HRTF direction change. `0.0` = always true source position (no gap hint). `1.0` = full redirect to gap direction. Default 0.40 (raised from 0.25 — the projection makes larger values perceptually meaningful). |
+| `s_alOccSearchRadius` | `120` | Tangent-plane probe radius (game units) used to find the nearest acoustic gap when a source is occluded. Default 120 ≈ URT door half-width. Increase to 160–200 for wide doorways or thick pillars; decrease for tighter gap sensitivity. |
 | `s_alDebugOcc` | `0` | Print per-source occlusion state each frame. Each occluded source shows entity, distance, trace target, smoothed gain, GAIN and GAINHF values. Use to identify which sounds are being filtered and by how much. Not archived. |
 | `s_alDebugPlayback` | `0` | Playback diagnostics for isolating audio quality issues. **`1`** = log every **PREEMPT** (sound cut short by a new sound on the same channel) and every **rate-mismatch** at load time (file Hz ≠ device Hz, which forces the internal resampler). **`2`** = also log every natural completion. Each line shows sound name, samples played / total, % consumed, file rate, and device rate. Use `1` to determine whether the DE-50 boom is being **truncated** (preempt line, low %) or **degraded** by the resampler (rate-mismatch lines at registration). Not archived — set before loading a map to catch registration warnings. |
 
@@ -331,7 +355,7 @@ Looping ambient sources fade in when an entity enters the player's PVS and fade 
 |------|---------|-------------|
 | `s_alEcho` | `1` | Geometry-driven echo on EFX auxiliary send 1. Adds a discrete reflection layer to 3D sources in enclosed spaces. Slot gain is driven automatically by `s_alDynamicReverb` room classification. Requires `maxSends >= 2`. Default 1 (on). |
 | `s_alEchoGain` | `0.10` | Maximum wet gain for the echo slot [0–0.3]. Actual gain is scaled by enclosure. Default 0.10. |
-| `s_alFireImpactReverb` | `1` | Transient early-reflection boost on weapon fire — **own fire and incoming enemy fire**. Own fire: casts 3 rays in aim direction; a wall within 400 units boosts `targetRefl`/`targetDecay`. Incoming enemy fire: uses the normalised distance to scale a proportional boost (half the own-fire max) without ray casting. Suppressed weapons are excluded from both paths. Requires `s_alDynamicReverb 1`. Default 1 (on). |
+| `s_alFireImpactReverb` | `1` | Transient early-reflection boost on weapon fire — **own fire and incoming enemy fire**. Own fire: casts 3 rays in aim direction; a wall within 400 units boosts `curRefl`/`curDecay`/`curSlot` **directly on the smoothed output** so the spike is immediate and classifier-independent (a weapon fired at a wall always produces an audible muzzle report regardless of what environment the probe is reporting). Incoming enemy fire: uses normalised distance for a proportional boost (half the own-fire max). Suppressed weapons excluded from both paths. **When `s_alDynamicReverb 0`** a dedicated static-mode path (`S_AL_UpdateStaticFireBoost`) provides the same muzzle-report spike directly against the EFX baseline — so the effect works in any reverb mode. Default 1 (on). |
 | `s_alFireImpactMaxBoost` | `0.25` | Maximum reflections gain for own-fire boost [0–0.5]. Incoming-enemy boost is capped at half this value. Default 0.25. |
 
 #### Grenade-concussion EFX bloom
@@ -470,10 +494,10 @@ system-default device name (resolved at runtime after the library loads).
 #### Audio enhancement ladder
 
 ```
-s_alReverb 0  s_alOcclusion 0  →  vanilla dma: distance-only, no wall effects
-s_alReverb 0  s_alOcclusion 1  →  occlusion + HRTF direction fix
-s_alReverb 1  s_alOcclusion 1  →  + static EFX reverb room
-s_alReverb 1  s_alDynamicReverb 1  →  + dynamic ray-traced reverb environment (default)
+s_alReverb 0  s_alOcclusion 0                        →  vanilla dma: distance-only, no wall effects
+s_alReverb 0  s_alOcclusion 1                        →  occlusion + HRTF gap-direction correction
+s_alReverb 1  s_alOcclusion 1  s_alDynamicReverb 0  →  static EFX reverb + fire-impact boost (all environments)
+s_alReverb 1  s_alDynamicReverb 1                    →  dynamic ray-traced reverb, 9 env profiles, 9 EFX params (default)
 ```
 
 #### Channel preemption / slot model
@@ -485,10 +509,13 @@ completion exactly as in the DMA backend.
 
 #### Vanilla-behaviour notes
 
-- **`s_alReverb 1` (default)**: EFX reverb enabled with dynamic ray-traced environment.
+- **`s_alReverb 1` (default)**: EFX reverb enabled with dynamic ray-traced environment (9 profiles, 9 EFX params).
 - **`s_alOcclusion 1` (default)**: sources behind walls are gain-attenuated and their
-  apparent HRTF direction is partially redirected towards the nearest audible gap
-  (controlled by `s_alOccPosBlend`).  Only `CONTENTS_SOLID` brushes are tested —
+  apparent HRTF direction is corrected toward the nearest acoustic gap
+  (`s_alOccPosBlend`, default 0.40; `s_alOccSearchRadius`, default 120 u).
+  The gap position is projected to the source's actual distance before blending,
+  producing a clear angular shift rather than a small positional nudge.
+  Only `CONTENTS_SOLID` brushes are tested —
   `CONTENTS_PLAYERCLIP` is excluded so invisible movement-constraint geometry on
   slopes and ledges does not cause false muffling of nearby weapon fire.
 - **CHAN_WEAPON proximity bypass**: weapon-channel sources within
@@ -619,6 +646,39 @@ mix, no filter, no spatialization.  OpenAL matches this via:
   unwanted reverb tail on own-player weapons and footsteps.
 
 #### Dynamic acoustic environment (`s_alDynamicReverb 1`)
+
+##### Design rationale — why URT needed more than 4 EFX parameters
+
+Urban Terror maps cover an unusually wide range of acoustic environments:
+rooftops with no ceiling, cave-like underground passages, short hallways with
+multiple doorways into wider spaces, narrow alleys, large atria, and dense urban
+courtyards.  The original dynamic reverb drove only four parameters (decay, late
+gain, reflections, slot gain), which produced a recognisable but **flat** acoustic
+texture because:
+
+- Every environment shared the same HF ratio, density, and diffusion — the reverb
+  tail always had the same spectral colour and echo density regardless of whether
+  the player was in a stone tunnel or on a tiled rooftop.
+- `corrFactor > 0.40` was the only trigger for corridor-mode reflections, so
+  short hallways with doorways on both sides — where no single axis pair is
+  dominant — fell through to generic MEDIUM_ROOM behaviour.
+- Open-top walled spaces ("open box") — where `vertOpenFrac` is high but
+  `horizOpenFrac` is low — were misclassified as TRANSITION or SEMI_OPEN because
+  no metric distinguished sky-open from wall-open.
+- LARGE_ROOM, MEDIUM_ROOM, and SMALL_ROOM were the only purely indoor labels; there
+  was no concept of a HALLWAY, LARGE_HALL, CAVE, or OPEN_BOX.
+
+The new classifier addresses each issue specifically:
+
+| Problem | Solution |
+|---|---|
+| Short hallways with doorways fall to MEDIUM_ROOM | New `HALLWAY` label: corrFactor > 0.20 & openFrac < 0.45 — lower threshold catches multi-opening passages |
+| Open-box rooftops misclassified | New `openBoxFrac` metric: vertOpenFrac − horizOpenFrac excess; new `OPEN_BOX` label |
+| Caves/tunnels identical to large halls | New `caveBonus` metric: sizeFactor × solid-overhead fraction; new `CAVE` label |
+| Flat spectral quality everywhere | 5 new EFX params driven by probe metrics: HF ratio, density, diffusion, gainHF, gainLF |
+| Fire-impact inconsistent across env types | Boost now written to `cur*` (output) not `target*` (pre-blend dead-write) |
+| Fire-impact absent in static reverb mode | New `S_AL_UpdateStaticFireBoost` function — runs when `s_alDynamicReverb 0` |
+| HRTF gap hint < 5° due to short probe | Gap position now projected to source distance before blending |
 
 Casts **14 world-space rays** from the listener every **16 frames** plus up to **2 look-ahead rays** when the player is moving (≈ 1.0 traces/frame average, zero when the movement cache is active):
 - 8 horizontal (every 45°) — max `s_alEnvHorizDist` u (default 1330)
@@ -1330,6 +1390,8 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | `s_alEFX` | `1` | Enable ALC_EXT_EFX. Set to 0 for diagnostic isolation. (LATCH) |
 | `s_alDirectChannels` | `1` | Bypass HRTF centre-HRIR for own-player sources. Only active when `s_alHRTF 1`. (LATCH) |
 | `s_alLocalSelf` | `0` | Force own-entity sounds non-spatialized (position 0,0,0). Default 0 — own-player sounds use their world-space origin. Set to 1 if stale-position artefacts occur. |
+| `s_alOccPosBlend` | `0.40` | Gap-hint blend weight for HRTF direction correction when a source is occluded [0–1]. Default 0.40; see [HRTF directional accuracy](#hrtf-directional-accuracy-s_alocclusion-1). |
+| `s_alOccSearchRadius` | `120` | Tangent-plane probe radius (units) for gap search. Default 120 ≈ URT door half-width. |
 | `s_alMaxDist` | `1330` | Override max attenuation distance (floor: 1330 Q3 units) |
 | `s_alMaxSrc` | `512` | Maximum OpenAL source pool size. Grows dynamically on demand up to this cap. (LATCH) |
 | `s_alDedupMs` | `0` | Same-frame dedup window in ms (0 = disabled). Light guard against double-start artefacts. |
@@ -1379,6 +1441,16 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | `s_alGrenadeBloomRadius` | `400` | Blast radius that triggers the bloom effect (units) |
 | `s_alHeadHit` | `1` | Standalone helmet/bare-head hit disruption + tinnitus. Default on. |
 | `s_alSuppressedSoundPattern` | `silenced,-sil,_sil,...` | Filename substrings identifying suppressed weapons |
+| `s_alFireImpactReverb` | `1` | Muzzle-report reverb boost on own/enemy weapon fire. Applied to smoothed output — classifier-independent. Also active in static reverb mode (`s_alDynamicReverb 0`). |
+| `s_alFireImpactMaxBoost` | `0.25` | Max reflections gain boost from fire-impact [0–0.5]. Incoming-enemy boost capped at half. |
+| `s_alEnvHorizDist` | `1330` | Horizontal probe ray max distance (u). |
+| `s_alEnvVertDist` | `400` | Diagonal-up / straight-up probe ray max distance (u). |
+| `s_alEnvDownDist` | `160` | Straight-down probe ray max distance (u). |
+| `s_alEnvHorizWeight` | `0.70` | Fraction of openFrac from horizontal rays (vs. vertical). |
+| `s_alEnvSmoothPole` | `0.92` | IIR blend pole for EFX param transitions; lower = snappier. |
+| `s_alEnvHistorySize` | `3` | Rolling history window size [1–8]; higher = less flicker but slower response. |
+| `s_alEnvVelThresh` | `48` | Movement threshold (u/probe-cycle) to activate look-ahead blending. |
+| `s_alEnvVelWeight` | `0.30` | Max look-ahead blend weight when moving fast [0–0.5]. |
 
 > **Full suppression documentation:** See the [Hearing Disruption](#hearing-disruption--incoming-fire-head-hits-and-health-fade) section above.
 
@@ -1395,7 +1467,7 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 - `s_doppler` controls `AL_DOPPLER_FACTOR` (1.0 = enabled, 0.0 = disabled).
 - HRTF uses OpenAL Soft's built-in CIPIC / MIT KEMAR datasets — no custom DSP code.
 - EFX (`ALC_EXT_EFX`) is detected and enabled when `s_alEFX 1`; set to 0 to bypass entirely.
-- Occlusion traced via `CM_BoxTrace` every 4 frames per source; applied as EFX low-pass filter if available, else gain scale.
+- Occlusion traced via `CM_BoxTrace` at distance-adaptive intervals (every frame < 300 u, every 4 frames 300–600 u, every 8 frames > 600 u) per source; applied as EFX low-pass filter if available, else gain scale.  Gap direction projected to source distance (`s_alOccSearchRadius 120` u probe, `s_alOccPosBlend 0.40` angular blend).
 - Ambisonic order for HRTF rendering auto-detected from `ALC_MAX_AMBISONIC_ORDER_SOFT` (capped at 3rd order).
 
 Build flags:
