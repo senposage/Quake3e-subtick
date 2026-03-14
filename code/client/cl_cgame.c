@@ -254,6 +254,11 @@ static qboolean CL_GetServerCommand( int serverCommandNumber ) {
 			Cmd_Clear();
 			return qfalse;
 		}
+		SCR_LogNote( "WARN:CMDCYCLED",
+			va( "reliable cmd cycled out: req=%d stored=%d gap=%d",
+				serverCommandNumber, clc.serverCommandSequence,
+				clc.serverCommandSequence - serverCommandNumber ) );
+		SCR_LogDisconnect( "reliable cmd cycled out (ERR_DROP)" );
 		Com_Error( ERR_DROP, "CL_GetServerCommand: a reliable command was cycled out" );
 		return qfalse;
 	}
@@ -282,6 +287,7 @@ rescan:
 	if ( !strcmp( cmd, "disconnect" ) ) {
 		// https://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=552
 		// allow server to indicate why they were disconnected
+		SCR_LogDisconnect( argc >= 2 ? Cmd_Argv( 1 ) : "(no reason)" );
 		if ( argc >= 2 )
 			Com_Error( ERR_SERVERDISCONNECT, "Server disconnected - %s", Cmd_Argv( 1 ) );
 		else
@@ -490,9 +496,25 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		Cvar_Update( VMA(1), cgvm->privateFlag );
 		return 0;
 	case CG_CVAR_SET:
-		// Prevent QVM from overriding snaps and cg_smoothClients
-		if ( Q_stricmp( (const char *)VMA(1), "snaps" ) != 0
-			&& Q_stricmp( (const char *)VMA(1), "cg_smoothClients" ) != 0 ) {
+		// Prevent QVM from overriding snaps and cg_smoothClients.
+		// Log every interception so we can see what the vanilla QVM is requesting.
+		if ( Q_stricmp( (const char *)VMA(1), "snaps" ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "cg_smoothClients" ) == 0 ) {
+			SCR_LogNote( "QVM:SET_INTERCEPTED",
+				va( "\"%s\" = \"%s\" (silently ignored)",
+					(const char *)VMA(1), (const char *)VMA(2) ) );
+		} else {
+			// Check whether Cvar_SetSafe will block it (CVAR_PROTECTED/PRIVATE)
+			// before calling it, so we can log the attempt regardless.
+			{
+				unsigned cvFlags = Cvar_Flags( (const char *)VMA(1) );
+				if ( cvFlags != CVAR_NONEXISTENT
+					&& ( cvFlags & ( CVAR_PROTECTED | CVAR_PRIVATE ) ) ) {
+					SCR_LogNote( "QVM:SET_BLOCKED",
+						va( "\"%s\" = \"%s\" (protected)",
+							(const char *)VMA(1), (const char *)VMA(2) ) );
+				}
+			}
 			Cvar_SetSafe( VMA(1), VMA(2) );
 		}
 		return 0;
@@ -1283,6 +1305,8 @@ void CL_SetCGameTime( void ) {
 				if ( drift < 2000 ) { // release after 2s of silence (server presumed dead)
 					cl.serverTime = cl.snap.serverTime - capMs;
 					SCR_NetMonitorAddCapHit();
+				} else {
+					SCR_LogCapRelease( drift );
 				}
 			}
 		}

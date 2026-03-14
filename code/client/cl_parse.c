@@ -253,12 +253,20 @@ static void CL_ParseSnapshot( msg_t *msg ) {
 		if ( !old->valid ) {
 			// should never happen
 			Com_Printf ("Delta from invalid frame (not supposed to happen!).\n");
+			SCR_LogNote( "SNAP:DELTA_INVALID",
+				va( "msgNum=%d deltaNum=%d", newSnap.messageNum, newSnap.deltaNum ) );
 		} else if ( old->messageNum != newSnap.deltaNum ) {
 			// The frame that the server did the delta from
 			// is too old, so we can't reconstruct it properly.
 			Com_Printf ("Delta frame too old.\n");
+			SCR_LogNote( "SNAP:DELTA_OLD",
+				va( "msgNum=%d deltaNum=%d oldMsg=%d",
+					newSnap.messageNum, newSnap.deltaNum, old->messageNum ) );
 		} else if ( cl.parseEntitiesNum - old->parseEntitiesNum > MAX_PARSE_ENTITIES - MAX_SNAPSHOT_ENTITIES ) {
 			Com_Printf ("Delta parseEntitiesNum too old.\n");
+			SCR_LogNote( "SNAP:DELTA_ENTITIES_OLD",
+				va( "msgNum=%d parseEnts=%d oldParseEnts=%d",
+					newSnap.messageNum, cl.parseEntitiesNum, old->parseEntitiesNum ) );
 		} else {
 			newSnap.valid = qtrue;	// valid delta parse
 		}
@@ -342,6 +350,10 @@ static void CL_ParseSnapshot( msg_t *msg ) {
 	}
 	// save the frame off in the backup array for later delta comparisons
 	cl.snapshots[cl.snap.messageNum & PACKET_MASK] = cl.snap;
+
+	// Log per-snapshot reliable-command state for flood/drift diagnosis (level 2).
+	SCR_LogSnapState( cl.snap.serverTime, cl.snap.ping, cl.snap.messageNum,
+		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge );
 
 	SCR_NetMonitorAddPing( cl.snap.ping );
 
@@ -562,8 +574,8 @@ static void CL_ParseServerInfo( void )
 	}
 
 	// Detect vanilla server: absence of sv_snapshotFps means the server does not
-	// support our adaptive timing protocol — the serverTime cap will be disabled
-	// for this connection; scaled thresholds and extrapolation window still apply.
+	// support our adaptive timing protocol.  Adaptive timing thresholds are
+	// disabled for this connection; the serverTime safety cap still applies.
 	{
 		const char *snapFpsStr = Info_ValueForKey( serverInfo, "sv_snapshotFps" );
 		cl.vanillaServer = ( snapFpsStr[0] == '\0' );
@@ -577,6 +589,13 @@ static void CL_ParseServerInfo( void )
 		cl.serverForbidsAdaptiveTiming = cl.vanillaServer ||
 			( allowAtStr[0] != '\0' && atoi( allowAtStr ) == 0 );
 	}
+
+	// Log the detected server type and timing seed to the session log file.
+	SCR_LogConnectInfo(
+		Info_ValueForKey( serverInfo, "sv_fps" ),
+		Info_ValueForKey( serverInfo, "sv_snapshotFps" ),
+		Info_ValueForKey( serverInfo, "sv_allowClientAdaptiveTiming" ),
+		cl.snapshotMsec, cl.vanillaServer, cl.serverForbidsAdaptiveTiming );
 }
 
 
@@ -892,6 +911,9 @@ static void CL_ParseCommandString( msg_t *msg ) {
 	Q_strncpyz( clc.serverCommands[ index ], s, sizeof( clc.serverCommands[ index ] ) );
 	clc.serverCommandsIgnore[ index ] = qfalse;
 
+	// Log every new server command so we have a full trace before any disconnect.
+	SCR_LogServerCmd( seq, clc.serverCommandSequence, clc.serverCommands[ index ] );
+
 #ifdef USE_CURL
 	if ( !clc.cURLUsed )
 #endif
@@ -901,6 +923,7 @@ static void CL_ParseCommandString( msg_t *msg ) {
 		const char *text;
 		Cmd_TokenizeString( s );
 		if ( !Q_stricmp( Cmd_Argv(0), "disconnect" ) ) {
+			SCR_LogDisconnect( Cmd_Argc() > 1 ? Cmd_Argv( 1 ) : "(no reason — early disconnect)" );
 			text = ( Cmd_Argc() > 1 ) ? va( "Server disconnected: %s", Cmd_Argv( 1 ) ) : "Server disconnected.";
 			Cvar_Set( "com_errorMessage", text );
 			Com_Printf( "%s\n", text );
@@ -981,6 +1004,13 @@ void CL_ParseServerMessage( msg_t *msg ) {
 	/* track raw incoming bytes and any dropped packets for the net monitor */
 	SCR_NetMonitorAddIncoming( msg->cursize, clc.netchan.dropped );
 
+	/* Log netchan drops immediately: each dropped server packet may contain
+	   a snapshot; missing snapshots cause delta-invalidation → black bars on
+	   the lagometer and potential timing instability. */
+	if ( clc.netchan.dropped > 0 && !clc.demoplaying ) {
+		SCR_LogPacketDrop( clc.netchan.dropped, clc.serverMessageSequence );
+	}
+
 	if ( cl_shownet->integer == 1 ) {
 		Com_Printf( "%i ",msg->cursize );
 	} else if ( cl_shownet->integer >= 2 ) {
@@ -996,6 +1026,10 @@ void CL_ParseServerMessage( msg_t *msg ) {
 	if ( clc.reliableSequence - clc.reliableAcknowledge > MAX_RELIABLE_COMMANDS ) {
 		if ( !clc.demoplaying ) {
 			Com_Printf( S_COLOR_YELLOW "WARNING: dropping %i commands from server\n", clc.reliableSequence - clc.reliableAcknowledge );
+			SCR_LogNote( "WARN:RELOVERFLOW",
+				va( "dropped %d unacked client cmds (relSeq=%d relAck=%d)",
+					clc.reliableSequence - clc.reliableAcknowledge,
+					clc.reliableSequence, clc.reliableAcknowledge ) );
 		}
 		clc.reliableAcknowledge = clc.reliableSequence;
 	} else if ( clc.reliableSequence - clc.reliableAcknowledge < 0 ) {

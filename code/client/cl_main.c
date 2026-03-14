@@ -2992,6 +2992,7 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 	if ( !Q_stricmp( c, "disconnect" ) ) {
 		if ( NET_CompareAdr( from, &clc.serverAddress ) ) {
 			if ( cls.state >= CA_CONNECTED ) {
+				SCR_LogDisconnect( "OOB disconnect from server" );
 				Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
 			}
 		}
@@ -3030,6 +3031,10 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 #endif
 
 	Com_Printf( "Unknown connectionless packet from %s: cmd='%s'\n", NET_AdrToStringwPort( from ), c );
+	if ( NET_CompareAdr( from, &clc.serverAddress ) && cls.state >= CA_CONNECTED ) {
+		SCR_LogNote( "OOB:UNKNOWN",
+			va( "from server: cmd='%s'", c ) );
+	}
 	return qfalse;
 }
 
@@ -3067,6 +3072,10 @@ void CL_PacketEvent( const netadr_t *from, msg_t *msg ) {
 			Com_Printf( "%s:sequenced packet without connection\n",
 				NET_AdrToStringwPort( from ) );
 		}
+		SCR_LogNote( "PKT:WRONG_SOURCE",
+			va( "seq pkt from unexpected addr %s (connected to %s)",
+				NET_AdrToStringwPort( from ),
+				NET_AdrToStringwPort( &clc.netchan.remoteAddress ) ) );
 		// FIXME: send a client disconnect?
 		return;
 	}
@@ -3108,7 +3117,12 @@ static void CL_CheckTimeout( void ) {
 	if ( ( !CL_CheckPaused() || !sv_paused->integer )
 		&& cls.state >= CA_CONNECTED && cls.state != CA_CINEMATIC
 		&& cls.realtime - clc.lastPacketTime > cl_timeout->integer * 1000 ) {
-		if ( ++cl.timeoutcount > 5 ) { // timeoutcount saves debugger
+		++cl.timeoutcount;
+		SCR_LogTimeout( cl.timeoutcount,
+			cls.realtime - clc.lastPacketTime,
+			cl_timeout->integer * 1000 );
+		if ( cl.timeoutcount > 5 ) { // timeoutcount saves debugger
+			SCR_LogDisconnect( "connection timed out" );
 			Com_Printf( "\nServer connection timed out.\n" );
 			Cvar_Set( "com_errorMessage", "Server connection timed out." );
 			if ( !CL_Disconnect( qfalse ) ) { // restart client if not done already

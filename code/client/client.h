@@ -601,6 +601,17 @@ void	SCR_NetMonitorAddSlowAdjust( int delta );
 void	SCR_LogTimingEvent( const char *tag, int serverTimeDelta, int deltaDelta );
 void	SCR_LogSnapLate( int measured, int expected );
 void	SCR_LogPingJitter( int ping, int prevPing );
+void	SCR_LogConnectInfo( const char *svFps, const char *snapFps,
+                             const char *allowAt, int snapshotMsec,
+                             qboolean vanilla, qboolean forbids );
+void	SCR_LogServerCmd( int seq, int storedSeq, const char *text );
+void	SCR_LogSnapState( int snapTime, int ping, int msgSeq,
+                          int cmdSeq, int relSeq, int relAck );
+void	SCR_LogTimeout( int count, int elapsed, int limit );
+void	SCR_LogNote( const char *tag, const char *msg );
+void	SCR_LogPacketDrop( int dropped, int seq );
+void	SCR_LogCapRelease( int drift );
+void	SCR_LogDisconnect( const char *reason );
 void	SCR_CloseNetLog( void );
 
 // net monitor cvars
