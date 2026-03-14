@@ -322,7 +322,7 @@ Suppressors in URT are weapon **attachments** — the weapon ID is unchanged; th
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alSuppressedSoundPattern` | `silenced,_sd_,_sd.,suppressed,suppressor` | Comma-separated substrings matched case-insensitively against the sound file path. A match classifies the sound as suppressed, which: (1) routes it through `s_alVolSuppressedWeapon`, (2) skips the near-miss suppression duck, (3) skips the incoming-fire reverb boost. Covers common URT and Q3-mod naming conventions out of the box. |
+| `s_alSuppressedSoundPattern` | `silenced,_sil,_sd_,_sd.,suppressed,suppressor` | Comma-separated substrings matched case-insensitively against the sound file path. URT naming varies: suppressed shots may use `weaponname_silenced` or `weapon_name_sil` — both are covered by the defaults `silenced` and `_sil`. A match classifies the sound as suppressed: routes through `s_alVolSuppressedWeapon`, skips near-miss suppression duck, skips incoming-fire reverb boost. |
 | `s_alVolSuppressedWeapon` | `1.0` | Volume for sounds matching the pattern [0–10, ref 0.55]. The 0.55 reference gain reflects suppressed weapons being inherently quieter. Power-2 curve below 1.0. Default 1.0. |
 
 

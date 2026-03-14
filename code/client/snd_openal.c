@@ -4054,18 +4054,19 @@ qboolean S_AL_Init( soundInterface_t *si )
         "0.82 ≈ −1.7 dB — barely perceptible but adds physical impact. "
         "Hard minimum 0.5 for competitive safety. Default 0.82.");
     s_alSuppressedSoundPattern = Cvar_Get("s_alSuppressedSoundPattern",
-                                          "silenced,_sd_,_sd.,suppressed,suppressor",
+                                          "silenced,_sil,_sd_,_sd.,suppressed,suppressor",
                                           CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alSuppressedSoundPattern,
         "Comma-separated substrings matched (case-insensitive) against the sound "
         "file name to detect suppressed-weapon audio. "
-        "In URT a silencer/suppressor is a weapon ATTACHMENT — the weapon ID is "
-        "unchanged; only the audio asset differs (e.g. 'rifle_silenced_fire.wav'). "
-        "Matching the filename is therefore the correct engine-side detection method. "
+        "In URT a silencer is a weapon ATTACHMENT — the weapon ID is unchanged; "
+        "only the audio asset differs. URT naming conventions vary: sounds may end "
+        "in 'silenced' (e.g. mp5fire_silenced) or use the short '_sil' suffix "
+        "(e.g. mp5_fire_sil) or any combination. Both are covered by the defaults. "
         "Matched sounds: (1) use s_alVolSuppressedWeapon, "
         "(2) skip the near-miss suppression duck, "
         "(3) skip the incoming-fire reverb boost. "
-        "Default patterns cover typical naming conventions. Empty = all unsuppressed.");
+        "Empty = all unsuppressed.");
     s_alVolSuppressedWeapon = Cvar_Get("s_alVolSuppressedWeapon", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolSuppressedWeapon, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolSuppressedWeapon,
