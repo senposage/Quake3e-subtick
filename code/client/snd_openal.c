@@ -392,9 +392,29 @@ static float s_al_bloomPeak   = 0.f;
 /* Audio suppression state: a near-miss tracer briefly ducks the listener
  * gain to simulate the concussive disruption of incoming fire.
  * suppressExpiry: Com_Milliseconds() timestamp when the duck expires (0=off).
- * Depth and duration are controlled entirely by s_alSuppressionFloor and
- * s_alSuppressionMs — no separate strength variable needed. */
-static int s_al_suppressExpiry = 0;
+ * suppressHFPeak: the AL_LOWPASS_GAINHF floor for the active event.
+ *   Multiple overlapping triggers (incoming fire + helmet hit, etc.) take
+ *   the later expiry and the deeper (lower) HF floor. */
+static int   s_al_suppressExpiry = 0;
+static float s_al_suppressHFPeak = 1.0f; /* HF floor set by the last trigger */
+
+/* Per-frame combined hearing-disruption HF multipliers.
+ * 1.0 = flat (no filter); lower values cut high frequencies, turning the
+ * old "general duck" into a convincing muffled/concussed hearing effect.
+ * Computed each frame in S_AL_Update from the active expiry timers and
+ * player health, then applied per-source in the Phase-3 filter block. */
+static float s_al_suppressHF = 1.0f;  /* incoming-fire / head-hit suppression */
+static float s_al_grenadeHF  = 1.0f;  /* grenade-blast concussion            */
+static float s_al_healthHF   = 1.0f;  /* near-death health fade               */
+
+/* Procedurally synthesised tinnitus tone.
+ * Generated once (or on cvar change) via S_AL_BuildTinnitusBuf(), stored
+ * as a raw AL buffer.  Played as a non-positional local source on head hits.
+ * -1 / 0 indicate "not yet built". */
+static ALuint s_al_tinnitusBuf         = 0;
+static int    s_al_tinnitusLastBuiltHz = 0;  /* freq the buffer was built at   */
+static int    s_al_tinnitusLastBuiltMs = 0;  /* duration the buffer was built for */
+static int    s_al_tinnitusLastPlay    = 0;  /* timestamp — spam-guard         */
 
 /* Per-entity origin cache — updated by S_AL_UpdateEntityPosition and
  * S_AL_Respatialize.  Used by S_AL_StartSound when origin is NULL so that
@@ -439,11 +459,30 @@ static cvar_t *s_alSuppression;        /* 0=off, 1=near-miss tracer detection */
 static cvar_t *s_alSuppressionRadius;  /* near-miss detection radius (units) */
 static cvar_t *s_alSuppressionFloor;   /* min listener gain during suppression [0..0.8] */
 static cvar_t *s_alSuppressionMs;      /* suppression duration in ms */
-/* Grenade-concussion EFX bloom — reverb-only, no gain duck, competitive-safe */
+static cvar_t *s_alSuppressionHFFloor; /* min AL_LOWPASS_GAINHF during suppression [0..1] */
+static cvar_t *s_alNearMissPattern;    /* sound-name substrings that identify a near-miss bullet */
+/* Head-hit triggers (helmet and bare-head) */
+static cvar_t *s_alHelmetHitPattern;   /* sound-name substrings that identify a helmet hit */
+static cvar_t *s_alHelmetHitMs;        /* hearing-disruption duration after helmet hit (ms) */
+static cvar_t *s_alHelmetHFFloor;      /* min HF gain for helmet hit [0..1] */
+static cvar_t *s_alBareHeadHitPattern; /* sound-name substrings for a bare-head hit */
+static cvar_t *s_alBareHeadHitMs;      /* hearing-disruption duration for bare-head hit (ms) */
+static cvar_t *s_alBareHeadHFFloor;    /* min HF gain for bare-head hit [0..1] */
+/* Synthesised tinnitus tone */
+static cvar_t *s_alTinnitusFreq;       /* tone frequency in Hz (rebuilt on change) */
+static cvar_t *s_alTinnitusDuration;   /* ring duration in ms (rebuilt on change) */
+static cvar_t *s_alTinnitusVol;        /* playback volume [0..1] */
+static cvar_t *s_alTinnitusCooldown;   /* min ms between successive plays */
+/* Health-based HF fade */
+static cvar_t *s_alHealthFade;           /* 0=off, 1=enable near-death HF fade */
+static cvar_t *s_alHealthFadeThreshold;  /* HP below which fade activates */
+static cvar_t *s_alHealthFadeFloor;      /* HF floor at 1 HP [0..1] */
+/* Grenade-concussion EFX bloom — reverb + HF filter, competitive-safe */
 static cvar_t *s_alGrenadeBloom;        /* 0=off, 1=EFX reverb bloom on nearby enemy grenade */
 static cvar_t *s_alGrenadeBloomRadius;  /* blast radius that triggers the bloom effect (units) */
 static cvar_t *s_alGrenadeBloomGain;    /* peak reverb slot gain boost [0..0.3] */
 static cvar_t *s_alGrenadeBloomMs;      /* bloom decay duration in ms */
+static cvar_t *s_alGrenadeBloomHFFloor; /* min HF gain during grenade blast [0..1] */
 static cvar_t *s_alGrenadeBloomDuck;       /* 0=off, 1=also apply mild listener-gain duck with bloom */
 static cvar_t *s_alGrenadeBloomDuckFloor;  /* min listener gain during grenade duck [0.5..0.95] */
 /* Extra-vol slots: player-configurable sound-path filters with their own volume knob.
@@ -1980,6 +2019,14 @@ static void S_AL_Shutdown( void )
         Com_Memset(&s_al_efx, 0, sizeof(s_al_efx));
     }
 
+    /* Tinnitus PCM buffer (independent of EFX) */
+    if (s_al_tinnitusBuf) {
+        qalDeleteBuffers(1, &s_al_tinnitusBuf);
+        s_al_tinnitusBuf         = 0;
+        s_al_tinnitusLastBuiltHz = 0;
+        s_al_tinnitusLastBuiltMs = 0;
+    }
+
     /* Sfx */
     S_AL_FreeSfx();
 
@@ -1991,6 +2038,161 @@ static void S_AL_Shutdown( void )
     S_AL_UnloadLibrary();
     Com_Memset(&s_al_music, 0, sizeof(s_al_music));
     Com_Memset(&s_al_raw,   0, sizeof(s_al_raw));
+}
+
+/* =========================================================================
+ * Hearing-disruption helpers
+ * =========================================================================
+ */
+
+/* Arm (or extend/deepen) the suppression event.
+ * Takes the later expiry and the lower (more muffling) HF floor so that
+ * overlapping triggers — e.g. incoming fire that arrives while a helmet
+ * hit is still ringing — always favour the worse outcome. */
+static void S_AL_TriggerSuppression( int durationMs, float hfFloor )
+{
+    int expiry;
+    if (durationMs < 50)   durationMs = 50;
+    if (hfFloor   < 0.0f)  hfFloor    = 0.0f;
+    if (hfFloor   > 1.0f)  hfFloor    = 1.0f;
+    expiry = Com_Milliseconds() + durationMs;
+    if (expiry >= s_al_suppressExpiry) {
+        s_al_suppressExpiry = expiry;
+        s_al_suppressHFPeak = hfFloor;
+    } else if (hfFloor < s_al_suppressHFPeak) {
+        /* Shorter but deeper — keep existing expiry, deepen the cut */
+        s_al_suppressHFPeak = hfFloor;
+    }
+}
+
+/* Build (or rebuild) the procedural tinnitus PCM buffer.
+ * Generates a pure sine tone at s_alTinnitusFreq Hz with a short
+ * linear attack and a quadratic decay envelope — no external asset needed.
+ * Called lazily before the first play and whenever freq/duration change. */
+static void S_AL_BuildTinnitusBuf( void )
+{
+    int    freqHz, durationMs, nSamples, i;
+    short *pcm;
+
+    if (!qalGenBuffers || !qalBufferData) return;
+
+    freqHz     = s_alTinnitusFreq     ? (int)s_alTinnitusFreq->value     : 3500;
+    durationMs = s_alTinnitusDuration ? (int)s_alTinnitusDuration->value : 700;
+    if (freqHz     <  200) freqHz     =  200;
+    if (freqHz     > 8000) freqHz     = 8000;
+    if (durationMs <   50) durationMs =   50;
+    if (durationMs > 3000) durationMs = 3000;
+
+    /* Nothing changed — skip rebuild */
+    if (s_al_tinnitusBuf
+            && freqHz     == s_al_tinnitusLastBuiltHz
+            && durationMs == s_al_tinnitusLastBuiltMs)
+        return;
+
+    /* Delete stale buffer */
+    if (s_al_tinnitusBuf) {
+        qalDeleteBuffers(1, &s_al_tinnitusBuf);
+        s_al_tinnitusBuf = 0;
+    }
+
+    /* 22050 Hz mono — plenty of bandwidth for up to 8 kHz */
+#define TIN_RATE 22050
+    nSamples = (TIN_RATE * durationMs) / 1000;
+    if (nSamples < 1) return;
+
+    pcm = (short *)Z_Malloc(nSamples * (int)sizeof(short));
+
+    {
+        /* Attack: first 20 ms linear ramp up */
+        int attackSmp  = (TIN_RATE * 20) / 1000;
+        /* Decay starts right after attack and runs to end */
+        float decayLen = (float)(nSamples - attackSmp);
+
+        for (i = 0; i < nSamples; i++) {
+            float t      = (float)i / TIN_RATE;
+            float sample = sinf(2.0f * M_PI * (float)freqHz * t);
+            float env;
+
+            if (i < attackSmp) {
+                env = (float)i / (float)attackSmp;
+            } else {
+                float d = (float)(i - attackSmp) / decayLen;
+                /* Quadratic decay: 1 → 0, sounds natural */
+                float inv = 1.0f - d;
+                env = inv * inv;
+            }
+            pcm[i] = (short)(sample * env * 26000.0f);
+        }
+    }
+#undef TIN_RATE
+
+    qalGenBuffers(1, &s_al_tinnitusBuf);
+    qalBufferData(s_al_tinnitusBuf, AL_FORMAT_MONO16,
+                  pcm, nSamples * (ALsizei)sizeof(short), 22050);
+    Z_Free(pcm);
+
+    s_al_tinnitusLastBuiltHz = freqHz;
+    s_al_tinnitusLastBuiltMs = durationMs;
+}
+
+/* Play the synthesised tinnitus tone as a non-positional local source.
+ * Rebuilds the PCM buffer if the frequency or duration CVars changed.
+ * The cooldown guard prevents rapid-fire repetition. */
+static void S_AL_TriggerTinnitus( void )
+{
+    int    srcIdx, now, cooldown;
+    float  tinVol;
+    ALuint sid;
+
+    if (!s_al_started) return;
+
+    now      = Com_Milliseconds();
+    cooldown = s_alTinnitusCooldown ? (int)s_alTinnitusCooldown->value : 800;
+    if (cooldown < 0) cooldown = 0;
+    if (now - s_al_tinnitusLastPlay < cooldown) return;
+
+    S_AL_BuildTinnitusBuf();
+    if (!s_al_tinnitusBuf) return;
+
+    srcIdx = S_AL_GetFreeSource();
+    if (srcIdx < 0) return;
+
+    sid    = s_al_src[srcIdx].source;
+    tinVol = s_alTinnitusVol ? s_alTinnitusVol->value : 0.45f;
+    if (tinVol < 0.0f) tinVol = 0.0f;
+    if (tinVol > 1.0f) tinVol = 1.0f;
+
+    /* Wire up the source manually — no sfx record, no category vol,
+     * just the raw buffer at the user-configured volume scaled by the
+     * global listener gain (s_volume is applied via AL_GAIN on the
+     * listener every frame, so we set source gain = tinVol directly). */
+    s_al_src[srcIdx].sfx         = -1;
+    s_al_src[srcIdx].entnum      =  0;
+    s_al_src[srcIdx].entchannel  = CHAN_LOCAL_SOUND;
+    s_al_src[srcIdx].master_vol  = S_AL_MASTER_VOL_FULL;
+    s_al_src[srcIdx].isLocal     = qtrue;
+    s_al_src[srcIdx].loopSound   = qfalse;
+    s_al_src[srcIdx].allocTime   = now;
+    s_al_src[srcIdx].isPlaying   = qtrue;
+    s_al_src[srcIdx].category    = SRC_CAT_UI; /* excluded from HF filter */
+    s_al_src[srcIdx].occlusionGain   = 1.0f;
+    s_al_src[srcIdx].occlusionTarget = 1.0f;
+    s_al_src[srcIdx].occlusionTick   = 0;
+    s_al_src[srcIdx].sampleVol       = 1.0f;
+    VectorClear(s_al_src[srcIdx].origin);
+    s_al_src[srcIdx].fixed_origin    = qfalse;
+
+    qalSourcei(sid, AL_BUFFER,          (ALint)s_al_tinnitusBuf);
+    qalSourcef(sid, AL_GAIN,            tinVol);
+    qalSourcei(sid, AL_LOOPING,         AL_FALSE);
+    qalSourcei(sid, AL_SOURCE_RELATIVE, AL_TRUE);
+    qalSource3f(sid, AL_POSITION,       0.0f, 0.0f, 0.0f);
+    qalSourcef(sid, AL_ROLLOFF_FACTOR,  0.0f);
+    if (s_al_efx.available)
+        qalSourcei(sid, AL_DIRECT_FILTER, (ALint)AL_FILTER_NULL);
+    qalSourcePlay(sid);
+
+    s_al_tinnitusLastPlay = now;
 }
 
 static void S_AL_StartSound( const vec3_t origin, int entnum,
@@ -2070,9 +2272,88 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             vec3_t d;
             VectorSubtract(sndOrigin, s_al_listener_origin, d);
             if (DotProduct(d, d) < radius * radius) {
-                int durationMs = s_alSuppressionMs ? (int)s_alSuppressionMs->value : 220;
-                if (durationMs < 50) durationMs = 50;
-                s_al_suppressExpiry   = Com_Milliseconds() + durationMs;
+                int   durationMs = s_alSuppressionMs    ? (int)s_alSuppressionMs->value    : 220;
+                float hfFloor    = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value : 0.15f;
+                S_AL_TriggerSuppression(durationMs, hfFloor);
+            }
+        }
+    }
+
+    /* Feature D1 — Near-miss whiz trigger.
+     * URT plays sound/weapons/whiz1.wav and whiz2.wav when a bullet passes
+     * close to the listener.  These are the definitive "near miss" audio cues
+     * and the most reliable suppression trigger — more precise than the
+     * CHAN_WEAPON radius fallback above.  The sound may arrive as a local
+     * (head-locked) source OR as a positional world source, so we check on
+     * any sound whose name matches s_alNearMissPattern regardless of isLocal.
+     * Own weapon fire is excluded implicitly: whiz sounds are never played
+     * for the shooter's own projectile. */
+    if (s_alSuppression && s_alSuppression->integer
+            && sfx >= 0 && sfx < s_al_numSfx) {
+        const char *nmPat = s_alNearMissPattern
+                            ? s_alNearMissPattern->string : "whiz1,whiz2";
+        const char *sndName = s_al_sfx[sfx].name;
+        /* Walk the comma-separated pattern list */
+        if (nmPat && nmPat[0]) {
+            const char *p = nmPat;
+            while (*p) {
+                char tok[64];
+                int  ti = 0;
+                char *s, *e;
+                while (*p && *p != ',' && ti < (int)sizeof(tok) - 1)
+                    tok[ti++] = *p++;
+                tok[ti] = '\0';
+                if (*p == ',') p++;
+                s = tok;
+                while (*s == ' ') s++;
+                e = s + strlen(s);
+                while (e > s && *(e-1) == ' ') *--e = '\0';
+                if (*s && Q_stristr(sndName, s)) {
+                    int   durMs   = s_alSuppressionMs      ? (int)s_alSuppressionMs->value    : 220;
+                    float hfFloor = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value    : 0.15f;
+                    S_AL_TriggerSuppression(durMs, hfFloor);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Feature D2 — Head-hit triggers (helmet and bare head).
+     * When the LOCAL player's entity plays a CHAN_BODY sound whose name
+     * matches s_alHelmetHitPattern or s_alBareHeadHitPattern, fire a
+     * hearing-disruption event with its configured HF floor and duration,
+     * then play the synthesised tinnitus ring.
+     *
+     * Wire-up uses only the sound name — no cgame access required.
+     * Both patterns default to the known URT sound file names so the
+     * feature works out of the box with s_alSuppression 1. */
+    if (s_alSuppression && s_alSuppression->integer
+            && isLocal
+            && entchannel == CHAN_BODY
+            && sfx >= 0 && sfx < s_al_numSfx) {
+        const char *sndName = s_al_sfx[sfx].name;
+
+        /* --- Helmet hit -------------------------------------------------- */
+        {
+            const char *pat = s_alHelmetHitPattern
+                              ? s_alHelmetHitPattern->string : "helmethit";
+            if (pat && pat[0] && Q_stristr(sndName, pat)) {
+                int   durMs   = s_alHelmetHitMs    ? (int)s_alHelmetHitMs->value    : 350;
+                float hfFloor = s_alHelmetHFFloor  ? s_alHelmetHFFloor->value       : 0.10f;
+                S_AL_TriggerSuppression(durMs, hfFloor);
+                S_AL_TriggerTinnitus();
+            }
+        }
+
+        /* --- Bare-head hit (no helmet) ------------------------------------ */
+        {
+            const char *pat = s_alBareHeadHitPattern
+                              ? s_alBareHeadHitPattern->string : "headshot";
+            if (pat && pat[0] && Q_stristr(sndName, pat)) {
+                int   durMs   = s_alBareHeadHitMs   ? (int)s_alBareHeadHitMs->value  : 500;
+                float hfFloor = s_alBareHeadHFFloor ? s_alBareHeadHFFloor->value      : 0.03f;
+                S_AL_TriggerSuppression(durMs, hfFloor);
+                S_AL_TriggerTinnitus();
             }
         }
     }
@@ -3295,49 +3576,112 @@ static void S_AL_Update( int msec )
     /* Handle mute */
     masterGain = s_al_muted ? 0.0f : (s_volume ? s_volume->value : 0.8f);
 
-    /* Grenade-bloom optional gain duck (s_alGrenadeBloomDuck).
-     * A very mild supplement to the natural loudness-based ducking that
-     * grenade explosions already produce in URT.  Hard-floored at 0.5 so it
-     * can never silence gameplay-critical audio.  Default OFF. */
-    if (!s_al_muted && s_alGrenadeBloomDuck && s_alGrenadeBloomDuck->integer
+    /* Reset per-frame HF multipliers; each block below may lower them. */
+    s_al_suppressHF = 1.0f;
+    s_al_grenadeHF  = 1.0f;
+    s_al_healthHF   = 1.0f;
+
+    /* -----------------------------------------------------------------------
+     * Grenade-blast concussion effect.
+     * Two components that work together:
+     *   1. masterGain duck (s_alGrenadeBloomDuck, optional, very mild) —
+     *      kept as-is for the physical "pressure" jolt feel.
+     *   2. Per-source HF lowpass (s_alGrenadeBloomHFFloor, always active
+     *      when s_alGrenadeBloom 1) — the dominant cue that transforms
+     *      "volume went down" into "something just exploded near me".
+     * ----------------------------------------------------------------------- */
+    if (!s_al_muted && s_alGrenadeBloom && s_alGrenadeBloom->integer
             && s_al_bloomExpiry > 0) {
         int   nowGD  = Com_Milliseconds();
         int   bMsGD  = s_alGrenadeBloomMs ? (int)s_alGrenadeBloomMs->value : 180;
-        float dFloor = s_alGrenadeBloomDuckFloor
-                       ? s_alGrenadeBloomDuckFloor->value : 0.82f;
-        if (dFloor < 0.5f)  dFloor = 0.5f;   /* hard floor — competitive safety */
-        if (dFloor > 0.98f) dFloor = 0.98f;
         if (bMsGD < 1) bMsGD = 1;
+
         if (nowGD < s_al_bloomExpiry) {
             int   remain = s_al_bloomExpiry - nowGD;
             float t      = (float)remain / (float)bMsGD;
             if (t > 1.f) t = 1.f;
-            masterGain *= (dFloor + (1.0f - dFloor) * (1.0f - t));
+
+            /* HF filter: t=1 at trigger → deep cut; t=0 at expiry → flat */
+            {
+                float hfFloor = s_alGrenadeBloomHFFloor
+                                ? s_alGrenadeBloomHFFloor->value : 0.05f;
+                if (hfFloor < 0.0f) hfFloor = 0.0f;
+                if (hfFloor > 1.0f) hfFloor = 1.0f;
+                s_al_grenadeHF = hfFloor + (1.0f - hfFloor) * (1.0f - t);
+            }
+
+            /* Optional mild gain duck (unchanged behaviour) */
+            if (s_alGrenadeBloomDuck && s_alGrenadeBloomDuck->integer) {
+                float dFloor = s_alGrenadeBloomDuckFloor
+                               ? s_alGrenadeBloomDuckFloor->value : 0.82f;
+                if (dFloor < 0.5f)  dFloor = 0.5f;
+                if (dFloor > 0.98f) dFloor = 0.98f;
+                masterGain *= (dFloor + (1.0f - dFloor) * (1.0f - t));
+            }
         }
     }
 
-    /* Suppression duck: briefly reduce listener gain on near-miss or damage.
-     * The duck is a smooth ramp — full strength at the trigger, linearly
-     * recovering to 1.0 by the expiry time. */
+    /* -----------------------------------------------------------------------
+     * Suppression: incoming-fire / head-hit hearing disruption.
+     * masterGain duck is preserved as the "shock" component.
+     * The per-source HF filter (s_al_suppressHF) is now the primary cue —
+     * it replaces the "general duck" feel with convincing muffled hearing.
+     * ----------------------------------------------------------------------- */
     if (s_al_suppressExpiry > 0) {
-        int   now2    = Com_Milliseconds();
-        int   durMs   = s_alSuppressionMs ? (int)s_alSuppressionMs->value : 220;
-        float floor   = s_alSuppressionFloor
-                        ? s_alSuppressionFloor->value : 0.55f;
+        int   now2  = Com_Milliseconds();
+        int   durMs = s_alSuppressionMs ? (int)s_alSuppressionMs->value : 220;
         float t;
         if (durMs < 50) durMs = 50;
-        if (floor < 0.f) floor = 0.f;
-        if (floor > 0.95f) floor = 0.95f;
         if (now2 >= s_al_suppressExpiry) {
             s_al_suppressExpiry = 0;
+            s_al_suppressHFPeak = 1.0f; /* reset peak for next event */
             t = 1.0f;
         } else {
             int remain = s_al_suppressExpiry - now2;
             t = (float)remain / (float)durMs;
             if (t > 1.f) t = 1.f;
         }
-        /* Duck = lerp from floor to 1.0 as t goes from 1→0 */
-        masterGain *= (floor + (1.0f - floor) * (1.0f - t));
+
+        /* Volume duck (secondary — kept for the physical "jolt" sensation) */
+        if (!s_al_muted) {
+            float volFloor = s_alSuppressionFloor
+                             ? s_alSuppressionFloor->value : 0.55f;
+            if (volFloor < 0.0f)  volFloor = 0.0f;
+            if (volFloor > 0.95f) volFloor = 0.95f;
+            masterGain *= (volFloor + (1.0f - volFloor) * (1.0f - t));
+        }
+
+        /* HF filter (primary — creates the muffled/disrupted hearing feel) */
+        {
+            float hfFloor = s_al_suppressHFPeak; /* set by the trigger */
+            if (hfFloor < 0.0f) hfFloor = 0.0f;
+            if (hfFloor > 1.0f) hfFloor = 1.0f;
+            s_al_suppressHF = hfFloor + (1.0f - hfFloor) * (1.0f - t);
+        }
+    }
+
+    /* -----------------------------------------------------------------------
+     * Health-based HF fade (opt-in, s_alHealthFade 1).
+     * Below s_alHealthFadeThreshold HP the world gradually grows muffled —
+     * a subtle "fading away" effect that scales linearly with how close the
+     * player is to death.  Never affects health above the threshold so it
+     * has zero impact during normal gameplay.
+     * ----------------------------------------------------------------------- */
+    if (!s_al_muted && s_alHealthFade && s_alHealthFade->integer) {
+        int   hp        = (int)cl.snap.ps.stats[STAT_HEALTH];
+        int   threshold = s_alHealthFadeThreshold
+                          ? (int)s_alHealthFadeThreshold->value : 30;
+        if (threshold < 2)  threshold = 2; /* guard against div-by-zero below */
+        if (hp < threshold && hp > 0) {
+            float hfFloor = s_alHealthFadeFloor
+                            ? s_alHealthFadeFloor->value : 0.35f;
+            /* frac = 0 at threshold HP, = 1 at 1 HP.
+             * (threshold - 1) >= 1 because threshold >= 2. */
+            float frac = 1.0f - (float)(hp - 1) / (float)(threshold - 1);
+            if (hfFloor < 0.0f) hfFloor = 0.0f;
+            if (hfFloor > 1.0f) hfFloor = 1.0f;
+            s_al_healthHF = hfFloor + (1.0f - hfFloor) * (1.0f - frac);
+        }
     }
 
     qalListenerf(AL_GAIN, masterGain);
@@ -3738,6 +4082,14 @@ static void S_AL_Update( int msec )
                  * and substantially reduce the wall-to-clear volume jump. */
                 float gain   = gainFloor + (1.0f - gainFloor) * occ;
                 float gainHF = hfFloor   + (1.0f - hfFloor)   * occ;
+
+                /* Bake the hearing-disruption HF multipliers into gainHF.
+                 * Multiplying means occlusion and suppression/grenade/health
+                 * cuts stack correctly: a fully-occluded source behind a wall
+                 * gets no extra HF when you are also concussed, but an
+                 * unoccluded source in the open does get the full HF cut. */
+                gainHF *= s_al_suppressHF * s_al_grenadeHF * s_al_healthHF;
+
                 vec3_t pos;
 
                 /* Position: real origin + gap-hint offset (tracks moving entities) */
@@ -3748,13 +4100,13 @@ static void S_AL_Update( int msec )
                             pos[0], pos[1], pos[2]);
 
                 if (s_al_efx.available) {
-                    if (occ > 0.98f) {
-                        /* Fully clear: remove the lowpass from the signal path
-                         * entirely.  Even a "passthrough" biquad filter object
-                         * can introduce subtle phase-shift coloration that makes
-                         * non-occluded weapon fire sound tinny / bass-light
-                         * compared to vanilla DMA.  AL_FILTER_NULL bypasses the
-                         * filter stage completely, restoring the raw signal. */
+                    if (occ > 0.98f && gainHF > 0.97f) {
+                        /* Fully clear and no disruption: bypass filter entirely.
+                         * Even a passthrough biquad introduces subtle phase-shift
+                         * coloration — AL_FILTER_NULL is the cleanest path.
+                         * 0.98 / 0.97: small epsilon below 1.0 to absorb IIR
+                         * rounding so we don't oscillate between NULL and filter
+                         * on every frame when all values are nominally 1.0. */
                         qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
                                    (ALint)AL_FILTER_NULL);
                     } else {
@@ -3785,8 +4137,28 @@ static void S_AL_Update( int msec )
                         occ, gain, gainHF);
                 }
             }
+        } else if (s_al_efx.available) {
+            /* Local (own-player) source: no occlusion, but apply the
+             * hearing-disruption HF filter when active.  SRC_CAT_UI sources
+             * (tinnitus ring, kill/hit markers) are intentionally excluded —
+             * they are "mental" feedback that should stay crisp. */
+            if (s_al_src[i].category != SRC_CAT_UI) {
+                float combHF = s_al_suppressHF * s_al_grenadeHF * s_al_healthHF;
+                if (combHF < 0.97f) {
+                    qalFilterf(s_al_efx.occlusionFilter[i],
+                               AL_LOWPASS_GAIN,   1.0f);
+                    qalFilterf(s_al_efx.occlusionFilter[i],
+                               AL_LOWPASS_GAINHF, combHF);
+                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                               (ALint)s_al_efx.occlusionFilter[i]);
+                } else {
+                    qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                               (ALint)AL_FILTER_NULL);
+                }
+            }
         }
-    }
+
+    }   /* end for each source */
 
     /* Update looping sounds.
      *
@@ -4163,52 +4535,169 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alSuppression = Cvar_Get("s_alSuppression", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppression, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alSuppression,
-        "Near-miss audio suppression. When an ENEMY fires a CHAN_WEAPON sound "
-        "within s_alSuppressionRadius units of the listener, the overall listener "
-        "gain is briefly ducked to simulate the concussive disruption of incoming "
-        "fire. Teammates are automatically excluded: in team modes (TDM/CTF), "
-        "the shooter's team is read from the player configstring and compared to "
-        "your own team — no cgame changes required. Default 0 (off, opt-in).");
+        "Master toggle for all hearing-disruption effects. When 1, enables: "
+        "(A) near-miss HF muffling when whiz1/whiz2 sounds play, "
+        "(B) additional HF muffling from nearby enemy CHAN_WEAPON fire, "
+        "(C) helmet-hit HF muffling + tinnitus ring (sound/helmethit.wav), "
+        "(D) bare-head-hit HF muffling + tinnitus (sound/headshot.wav). "
+        "Effects apply a per-source AL_LOWPASS_GAINHF cut that creates a "
+        "convincing muffled/concussed hearing feel rather than a simple volume duck. "
+        "Teammates and suppressed weapons are excluded automatically. "
+        "Default 0 (opt-in).");
     s_alSuppressionRadius = Cvar_Get("s_alSuppressionRadius", "180", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionRadius, "50", "400", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionRadius,
-        "Radius (game units) within which another player's CHAN_WEAPON sound "
-        "triggers the suppression duck. Default 180 ≈ one room width.");
+        "Fallback suppression trigger: radius (game units) within which an enemy "
+        "CHAN_WEAPON sound triggers the disruption effect. The primary trigger is "
+        "the whiz-sound name match (s_alNearMissPattern), which fires reliably for "
+        "any bullet that actually passes close by. Default 180 ≈ one room width.");
     s_alSuppressionFloor = Cvar_Get("s_alSuppressionFloor", "0.55", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionFloor, "0", "0.95", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionFloor,
-        "Minimum listener gain during suppression [0–0.95]. "
-        "0 = briefly almost inaudible; 0.95 = barely a duck. "
-        "Default 0.55 — a noticeable −6 dB reduction that recovers quickly.");
+        "Minimum listener gain (volume) during suppression [0–0.95]. "
+        "Secondary to the HF filter — this provides the physical 'jolt' while "
+        "s_alSuppressionHFFloor provides the muffled-hearing character. "
+        "Default 0.55 (−6 dB, noticeable but not disabling).");
     s_alSuppressionMs = Cvar_Get("s_alSuppressionMs", "220", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionMs, "50", "800", CV_INTEGER);
     Cvar_SetDescription(s_alSuppressionMs,
-        "Duration of the suppression duck in milliseconds. "
-        "The gain recovers linearly from floor to full over this time. "
-        "Default 220 ms — short enough to not impede combat awareness.");
+        "Duration of the near-miss / incoming-fire hearing disruption in ms. "
+        "Both the volume duck and the HF muffling recover linearly over this time. "
+        "Default 220 ms — snappy enough to not impede situational awareness.");
+    s_alSuppressionHFFloor = Cvar_Get("s_alSuppressionHFFloor", "0.15", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alSuppressionHFFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alSuppressionHFFloor,
+        "Minimum AL_LOWPASS_GAINHF during near-miss / incoming-fire suppression [0–1]. "
+        "This is the primary cue: 0.15 cuts ~−17 dB of high-frequency content at peak, "
+        "making all sounds momentarily muffled/bassy. Applies per-source to every "
+        "playing sound (including own weapon and footsteps) except UI/tinnitus. "
+        "0 = fully muffled; 1 = flat (filter disabled). Default 0.15.");
+    s_alNearMissPattern = Cvar_Get("s_alNearMissPattern", "whiz1,whiz2", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alNearMissPattern,
+        "Comma-separated substrings matched case-insensitively against the sound "
+        "file name to identify near-miss bullet whiz sounds. When a matching sound "
+        "plays, the hearing-disruption effect fires immediately — this is the precise "
+        "trigger path (vs the radius fallback). URT uses sound/weapons/whiz1.wav and "
+        "whiz2.wav. Default 'whiz1,whiz2'. Empty = disable name-based trigger.");
+    /* Head-hit triggers */
+    s_alHelmetHitPattern = Cvar_Get("s_alHelmetHitPattern", "helmethit", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alHelmetHitPattern,
+        "Comma-separated sound-name substrings for helmet-hit detection. "
+        "When the local player's entity plays a CHAN_BODY sound matching this pattern, "
+        "a hearing-disruption event fires (HF muffling + tinnitus ring). "
+        "URT uses sound/helmethit.wav. Default 'helmethit'. "
+        "Requires s_alSuppression 1.");
+    s_alHelmetHitMs = Cvar_Get("s_alHelmetHitMs", "350", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alHelmetHitMs, "50", "1000", CV_INTEGER);
+    Cvar_SetDescription(s_alHelmetHitMs,
+        "Duration of hearing disruption after a helmet hit (ms). Longer than "
+        "a near-miss (350 vs 220) to reflect the physical impact. Default 350.");
+    s_alHelmetHFFloor = Cvar_Get("s_alHelmetHFFloor", "0.10", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alHelmetHFFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alHelmetHFFloor,
+        "Minimum HF gain for the helmet-hit disruption [0–1]. "
+        "Deeper cut than incoming fire (0.10 vs 0.15) — you were actually hit. "
+        "Default 0.10 (≈ −20 dB HF at peak).");
+    s_alBareHeadHitPattern = Cvar_Get("s_alBareHeadHitPattern", "headshot", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alBareHeadHitPattern,
+        "Comma-separated sound-name substrings for bare-head (no helmet) hit detection. "
+        "When matched on the local player entity CHAN_BODY, fires the strongest "
+        "disruption tier. URT uses sound/headshot.wav for unprotected headshots. "
+        "Default 'headshot'. Requires s_alSuppression 1.");
+    s_alBareHeadHitMs = Cvar_Get("s_alBareHeadHitMs", "500", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alBareHeadHitMs, "50", "1500", CV_INTEGER);
+    Cvar_SetDescription(s_alBareHeadHitMs,
+        "Duration of hearing disruption after a bare-head hit (ms). "
+        "Longest disruption tier — in URT a bare headshot is usually fatal, "
+        "so 500 ms represents the last moments of awareness. Default 500.");
+    s_alBareHeadHFFloor = Cvar_Get("s_alBareHeadHFFloor", "0.03", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alBareHeadHFFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alBareHeadHFFloor,
+        "Minimum HF gain for the bare-head hit disruption [0–1]. "
+        "Most severe cut: 0.03 ≈ −30 dB HF, nearly bass-only at peak. "
+        "Default 0.03.");
+    /* Tinnitus */
+    s_alTinnitusFreq = Cvar_Get("s_alTinnitusFreq", "3500", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alTinnitusFreq, "200", "8000", CV_INTEGER);
+    Cvar_SetDescription(s_alTinnitusFreq,
+        "Frequency of the synthesised tinnitus tone in Hz [200–8000]. "
+        "3500 Hz sits in the most sensitive region of human hearing — clearly "
+        "audible without being ear-piercing. Change takes effect on next "
+        "snd_restart or first play after change. Default 3500.");
+    s_alTinnitusDuration = Cvar_Get("s_alTinnitusDuration", "700", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alTinnitusDuration, "50", "3000", CV_INTEGER);
+    Cvar_SetDescription(s_alTinnitusDuration,
+        "Duration of the synthesised tinnitus ring in ms [50–3000]. "
+        "The tone has a 20 ms linear attack then a quadratic decay to silence. "
+        "Change takes effect on next snd_restart or first play after change. "
+        "Default 700 ms.");
+    s_alTinnitusVol = Cvar_Get("s_alTinnitusVol", "0.45", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alTinnitusVol, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alTinnitusVol,
+        "Volume of the synthesised tinnitus ring [0–1]. Applied directly as "
+        "the OpenAL source AL_GAIN so it is independent of s_alVolUI and other "
+        "category knobs. 0 = silent (disables tinnitus without changing other "
+        "disruption effects). Default 0.45.");
+    s_alTinnitusCooldown = Cvar_Get("s_alTinnitusCooldown", "800", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alTinnitusCooldown, "0", "5000", CV_INTEGER);
+    Cvar_SetDescription(s_alTinnitusCooldown,
+        "Minimum gap between successive tinnitus plays in ms. Prevents rapid "
+        "helmet hits from stacking many simultaneous ring sources. Default 800.");
+    /* Health-based fade */
+    s_alHealthFade = Cvar_Get("s_alHealthFade", "0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alHealthFade, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alHealthFade,
+        "Health-based HF audio fade (opt-in). When enabled, the per-source "
+        "HF filter gradually reduces below s_alHealthFadeThreshold HP — "
+        "the world grows muffled as the player nears death. Zero effect at "
+        "or above the threshold so normal gameplay is unaffected. Default 0.");
+    s_alHealthFadeThreshold = Cvar_Get("s_alHealthFadeThreshold", "30", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alHealthFadeThreshold, "5", "100", CV_INTEGER);
+    Cvar_SetDescription(s_alHealthFadeThreshold,
+        "HP level below which the health-based HF fade activates [5–100]. "
+        "At exactly this HP the filter is flat; at 1 HP it reaches "
+        "s_alHealthFadeFloor. Default 30.");
+    s_alHealthFadeFloor = Cvar_Get("s_alHealthFadeFloor", "0.35", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alHealthFadeFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alHealthFadeFloor,
+        "Minimum HF gain at 1 HP when health-fade is active [0–1]. "
+        "0.35 ≈ −9 dB HF at death's door — noticeably muffled but footsteps "
+        "and shots remain identifiable. Default 0.35.");
     s_alGrenadeBloom = Cvar_Get("s_alGrenadeBloom", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloom, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alGrenadeBloom,
-        "EFX reverb bloom on nearby enemy grenade explosions. "
-        "When enabled, a brief spike in the reverb slot gain gives the blast "
-        "acoustic weight without any listener-gain reduction — no competitive "
-        "disadvantage. Teammate grenades are excluded via configstring team check. "
-        "Requires s_alReverb 1. Default 0 (opt-in).");
+        "Grenade-blast concussion effect. Combines two components: "
+        "(1) EFX reverb slot gain spike (reverb bloom) that makes the room "
+        "sound momentarily bigger/boomer; "
+        "(2) per-source HF lowpass cut (s_alGrenadeBloomHFFloor) that turns "
+        "'volume went down' into 'something just exploded 15 feet from me'. "
+        "Enemy grenades only — teammate grenades excluded via configstring check. "
+        "Requires s_alReverb 1 for the reverb component. Default 0 (opt-in).");
     s_alGrenadeBloomRadius = Cvar_Get("s_alGrenadeBloomRadius", "400", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomRadius, "50", "1200", CV_FLOAT);
     Cvar_SetDescription(s_alGrenadeBloomRadius,
         "Blast radius (game units) within which a grenade explosion triggers the "
-        "reverb bloom. Default 400 ≈ medium room width.");
+        "bloom + HF effect. Default 400 ≈ medium room width.");
     s_alGrenadeBloomGain = Cvar_Get("s_alGrenadeBloomGain", "0.12", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomGain, "0", "0.3", CV_FLOAT);
     Cvar_SetDescription(s_alGrenadeBloomGain,
         "Peak reverb slot gain boost added by the grenade bloom [0–0.3]. "
         "Stacks on top of the current slot gain — actual peak = base + this value. "
         "Default 0.12 (subtle but audible reverb surge).");
-    s_alGrenadeBloomMs = Cvar_Get("s_alGrenadeBloomMs", "180", CVAR_ARCHIVE_ND);
-    Cvar_CheckRange(s_alGrenadeBloomMs, "50", "600", CV_INTEGER);
+    s_alGrenadeBloomMs = Cvar_Get("s_alGrenadeBloomMs", "350", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alGrenadeBloomMs, "50", "1000", CV_INTEGER);
     Cvar_SetDescription(s_alGrenadeBloomMs,
-        "Duration of the grenade reverb bloom decay in ms. Default 180.");
+        "Duration of both the reverb bloom decay and HF muffling recovery in ms. "
+        "Raised from 180 to 350 to give the blast a more convincing physical weight. "
+        "Default 350.");
+    s_alGrenadeBloomHFFloor = Cvar_Get("s_alGrenadeBloomHFFloor", "0.05", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alGrenadeBloomHFFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alGrenadeBloomHFFloor,
+        "Minimum HF gain at the peak of a grenade-blast concussion [0–1]. "
+        "0.05 ≈ −26 dB HF — an explosion 15 feet away strips nearly all high "
+        "frequencies momentarily. Applies per-source (own weapon, footsteps, "
+        "enemy fire all go bassy). Recovers linearly over s_alGrenadeBloomMs. "
+        "Default 0.05. Requires s_alGrenadeBloom 1.");
     s_alGrenadeBloomDuck = Cvar_Get("s_alGrenadeBloomDuck", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomDuck, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alGrenadeBloomDuck,

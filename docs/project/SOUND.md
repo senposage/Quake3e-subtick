@@ -340,21 +340,64 @@ URT grenades are already loud enough to produce natural perceptual ducking via O
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alGrenadeBloom` | `0` | EFX reverb slot gain spike when an **enemy** grenade explodes within `s_alGrenadeBloomRadius`. No listener-gain reduction — footsteps and shots remain at full clarity. Teammates excluded via configstring team check. Requires `s_alReverb 1`. Default 0 (opt-in). |
-| `s_alGrenadeBloomRadius` | `400` | Blast radius (game units) that triggers the bloom. Default 400. |
+| `s_alGrenadeBloom` | `0` | Grenade-blast concussion effect: (1) EFX reverb slot gain spike that makes the room sound momentarily bigger; (2) per-source HF lowpass cut (`s_alGrenadeBloomHFFloor`) that turns the event from "volume went down" into "something just exploded 15 feet from me". Enemy grenades only. Requires `s_alReverb 1` for reverb component. Default 0 (opt-in). |
+| `s_alGrenadeBloomRadius` | `400` | Blast radius (game units) that triggers the bloom + HF effect. Default 400. |
 | `s_alGrenadeBloomGain` | `0.12` | Peak reverb slot gain boost above current level [0–0.3]. Default 0.12. |
-| `s_alGrenadeBloomMs` | `180` | Bloom decay duration in ms. Default 180. |
-| `s_alGrenadeBloomDuck` | `0` | **Opt-in** mild listener-gain duck alongside the bloom. URT's natural grenade loudness is usually sufficient — this is a subtle supplement. Hard-floored at 0.5 (competitive safety). Requires `s_alGrenadeBloom 1`. Default 0. |
-| `s_alGrenadeBloomDuckFloor` | `0.82` | Minimum listener gain during grenade duck [0.5–0.95]. 0.82 ≈ −1.7 dB. Default 0.82. |
+| `s_alGrenadeBloomMs` | `350` | Recovery time for both the reverb bloom decay and the HF muffling in ms. Default 350. |
+| `s_alGrenadeBloomHFFloor` | `0.05` | Minimum `AL_LOWPASS_GAINHF` at peak of a grenade blast [0–1]. 0.05 ≈ −26 dB HF — an explosion nearby strips nearly all high frequencies momentarily, leaving a bassy rumble. Applies per-source to every playing sound. Default 0.05. |
+| `s_alGrenadeBloomDuck` | `0` | **Opt-in** mild listener-gain duck alongside the HF effect. Usually not needed since the HF filter already sells the impact. Default 0. |
+| `s_alGrenadeBloomDuckFloor` | `0.82` | Minimum listener gain during optional grenade duck [0.5–0.95]. Default 0.82. |
 
-#### Audio suppression (near-miss incoming fire)
+#### Hearing disruption — incoming fire, head hits, and health fade
+
+All effects share a single infrastructure: per-source `AL_LOWPASS_GAINHF` cuts applied every frame through the existing occlusion filter path. **This replaces the old "general duck" feel** (listener `AL_GAIN` reduction only) with a convincing muffled/concussed hearing simulation:
+
+- Own weapon fire sounds bassy and clipped
+- Enemy footsteps and callouts become hard to read
+- Recovery is gradual — you hear the world "coming back"
+- `SRC_CAT_UI` sources (kill markers, the tinnitus ring itself) are intentionally excluded — they are mental/HUD feedback that should stay crisp
+
+Multiple triggers can overlap; the system always takes the later expiry and the deeper HF cut.
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alSuppression` | `0` | When enabled, briefly ducks the listener gain when an **enemy** fires a `CHAN_WEAPON` sound within `s_alSuppressionRadius`. **Teammates automatically excluded** (configstring team check, no cgame changes needed). **Suppressed weapons automatically excluded** (sound-name pattern check via `s_alSuppressedSoundPattern`). Default 0 (opt-in). |
-| `s_alSuppressionRadius` | `180` | Detection radius (game units). Default 180 ≈ one room width. |
-| `s_alSuppressionFloor` | `0.55` | Minimum listener gain at peak suppression [0–0.95]. 0.55 ≈ −5 dB. |
-| `s_alSuppressionMs` | `220` | Suppression duration in ms, linear recovery. Default 220. |
+| `s_alSuppression` | `0` | Master toggle for all hearing-disruption effects. Enables: (A) near-miss HF muffling triggered by whiz sounds (`s_alNearMissPattern`); (B) radius-fallback from nearby enemy `CHAN_WEAPON` fire; (C) helmet-hit disruption + tinnitus (`sound/helmethit.wav`); (D) bare-head-hit disruption + tinnitus (`sound/headshot.wav`). Teammates and suppressed weapons excluded automatically. Default 0 (opt-in). |
+| `s_alSuppressionRadius` | `180` | Fallback trigger radius for enemy weapon fire (game units). The primary trigger is the whiz-sound name match which is more precise. Default 180 ≈ one room width. |
+| `s_alSuppressionFloor` | `0.55` | Minimum listener `AL_GAIN` (volume) during suppression [0–0.95]. Secondary to the HF filter — provides the physical "jolt". Default 0.55 (≈ −6 dB). |
+| `s_alSuppressionMs` | `220` | Duration of near-miss / incoming-fire hearing disruption in ms. Both the volume duck and the HF muffling recover linearly. Default 220. |
+| `s_alSuppressionHFFloor` | `0.15` | Minimum `AL_LOWPASS_GAINHF` at peak suppression [0–1]. **Primary cue**: 0.15 ≈ −17 dB HF, making all sounds momentarily muffled/bassy. Applied per-source. Default 0.15. |
+| `s_alNearMissPattern` | `whiz1,whiz2` | Comma-separated sound-name substrings identifying near-miss bullet whiz sounds. Matched case-insensitively. URT uses `sound/weapons/whiz1.wav` and `whiz2.wav`. When matched, immediately triggers the suppression event — more precise than the radius fallback. |
+
+#### Head-hit triggers
+
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `s_alHelmetHitPattern` | `helmethit` | Sound-name substrings for helmet-hit detection. When the local player's entity plays a `CHAN_BODY` sound matching this, fires a hearing-disruption event + tinnitus ring. URT uses `sound/helmethit.wav`. Requires `s_alSuppression 1`. |
+| `s_alHelmetHitMs` | `350` | Duration of helmet-hit hearing disruption (ms). Longer than a near-miss — you were actually struck. Default 350. |
+| `s_alHelmetHFFloor` | `0.10` | Minimum HF gain for helmet-hit disruption [0–1]. Deeper than incoming-fire (0.10 vs 0.15). Default 0.10 (≈ −20 dB HF at peak). |
+| `s_alBareHeadHitPattern` | `headshot` | Sound-name substrings for bare-head (no helmet) hit detection. URT uses `sound/headshot.wav` for unprotected headshots. Fires the strongest disruption tier. Requires `s_alSuppression 1`. |
+| `s_alBareHeadHitMs` | `500` | Duration of bare-head hit disruption (ms). Longest tier. Default 500. |
+| `s_alBareHeadHFFloor` | `0.03` | Minimum HF gain for bare-head hit [0–1]. Most severe: 0.03 ≈ −30 dB HF, nearly bass-only at peak. Default 0.03. |
+
+#### Synthesised tinnitus tone
+
+A pure sine tone generated entirely from PCM at init — **no sound file required**. Played as a non-positional local source (`SRC_CAT_UI`, excluded from HF filter so the ring cuts through the muffling). Rebuilt automatically when frequency or duration CVars change.
+
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `s_alTinnitusFreq` | `3500` | Tone frequency in Hz [200–8000]. 3500 Hz sits in the most sensitive region of human hearing. Default 3500. |
+| `s_alTinnitusDuration` | `700` | Ring duration in ms [50–3000]. 20 ms linear attack then quadratic decay to silence. Default 700. |
+| `s_alTinnitusVol` | `0.45` | Playback volume [0–1], applied as raw `AL_GAIN` independent of category vol knobs. 0 = silent (disables tinnitus without affecting other disruption effects). Default 0.45. |
+| `s_alTinnitusCooldown` | `800` | Minimum gap between successive tinnitus plays in ms. Prevents stacking from rapid hits. Default 800. |
+
+#### Health-based HF fade
+
+| Cvar | Default | Description |
+|------|---------|-------------|
+| `s_alHealthFade` | `0` | Opt-in health-based audio fade. Below `s_alHealthFadeThreshold` HP, the per-source HF filter gradually reduces — the world grows muffled as the player nears death. Zero effect at or above the threshold. Default 0. |
+| `s_alHealthFadeThreshold` | `30` | HP below which the fade activates [5–100]. Filter is flat at this HP and reaches `s_alHealthFadeFloor` at 1 HP. Default 30. |
+| `s_alHealthFadeFloor` | `0.35` | Minimum HF gain at 1 HP [0–1]. 0.35 ≈ −9 dB HF at death's door — noticeably muffled but footsteps and shots remain identifiable. Default 0.35. |
+
 
 #### Suppressed-weapon audio tuning
 
