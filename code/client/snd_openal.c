@@ -267,8 +267,12 @@ typedef enum {
                            * explosions, debris — often disproportionately loud. */
     SRC_CAT_WEAPON_SUPPRESSED = 6, /* own suppressed-attachment weapon fire
                                     * (e.g. M4/MP5 with silencer fitted).
-                                    * Detected by sound-file name pattern:
-                                    * see s_alSuppressedSoundPattern. */
+                                    * Detected via gear-string 'U' flag or
+                                    * sound file name pattern. */
+    SRC_CAT_WORLD_SUPPRESSED  = 7, /* enemy/other-player suppressed weapon fire.
+                                    * Suppressed fire is inherently quieter and
+                                    * harder to locate — tunable via
+                                    * s_alVolEnemySuppressedWeapon. */
 } alSrcCat_t;
 
 /* Per-active-sound source */
@@ -432,7 +436,8 @@ static cvar_t *s_alGrenadeBloomDuck;       /* 0=off, 1=also apply mild listener-
 static cvar_t *s_alGrenadeBloomDuckFloor;  /* min listener gain during grenade duck [0.5..0.95] */
 /* Suppressed weapons: separate volume knob + exclusion from suppression/reverb effects */
 static cvar_t *s_alSuppressedSoundPattern; /* comma-separated substrings matched against sfx name */
-static cvar_t *s_alVolSuppressedWeapon;    /* volume for suppressed-weapon sounds [0..10] */
+static cvar_t *s_alVolSuppressedWeapon;    /* own suppressed-weapon sounds [0..10] */
+static cvar_t *s_alVolEnemySuppressedWeapon; /* enemy suppressed-weapon sounds [0..10] */
 static cvar_t *s_alVolSelf;      /* own player/weapon volume multiplier [0..1.5] */
 static cvar_t *s_alVolOther;     /* other entity/player volume multiplier [0..1.0] */
 static cvar_t *s_alVolEnv;       /* looping ambient volume multiplier [0..1.0] */
@@ -946,50 +951,71 @@ static float S_AL_GetMasterVol( void )
  *   LOCAL   1.00  · AMBIENT 0.30  · UI      0.80
  */
 
-/* Return qtrue when the sound file name contains any of the comma-separated
- * substrings in s_alSuppressedSoundPattern.
+/* Return qtrue when the sound should be treated as suppressed/silenced.
  *
- * Why name-based rather than weapon-ID based: in URT (and most tactical
- * shooters) a suppressor is a WEAPON ATTACHMENT — the weapon ID remains the
- * same whether the suppressor is fitted or not.  What changes is the audio
- * asset: the game selects a different wav file for suppressed shots (typically
- * containing "silenced", "_sd_", "suppressor", etc.).  Matching against the
- * sfx name is therefore the only engine-side approach that correctly handles
- * attachment-based suppression without needing game-module changes.
+ * Both checks always run independently and the result is OR'd together.
+ * Both are cheap string operations (strchr + Q_stristr), so there is no
+ * reason to short-circuit — running both catches edge cases where only
+ * one signal is available.
  *
- * Case-insensitive.  Returns qfalse when the pattern cvar is empty (default). */
-static qboolean S_AL_IsSoundSuppressed( sfxHandle_t sfx )
+ * GEAR CHECK — g_gear configstring 'U' flag:
+ *   The server writes each player's equipped gear into CS_PLAYERS under key
+ *   "g". Character 'U' = suppressor attachment fitted.  Most reliable: directly
+ *   reflects game state regardless of audio asset naming.  Valid for player
+ *   entities only (entnum 0..MAX_CLIENTS-1).  In practice suppressors are
+ *   rarely swapped mid-round, but checking both signals every call costs only
+ *   a strchr and is the correct defensive approach.
+ *
+ * FILENAME CHECK — s_alSuppressedSoundPattern substring match:
+ *   URT suppressed file names from pk3 audit:
+ *     *_sil.wav  — dominant (de_sil, m4_sil, ak103_sil, beretta_sil, …)
+ *     *-sil.wav  — mac11 (mac11-sil.wav)
+ *     *_silenced.wav — p90 (p90_silenced.wav)
+ *   Covered by default tokens: _sil, -sil, silenced.
+ *   Also catches non-player entities that play suppressed audio. */
+static qboolean S_AL_IsSoundSuppressed( sfxHandle_t sfx, int entnum )
 {
-    const char *pat;
-    const char *name;
-    char        tok[64];
-    const char *p;
+    qboolean gearSuppressed = qfalse;
+    qboolean nameSuppressed = qfalse;
 
-    if (!s_alSuppressedSoundPattern) return qfalse;
-    pat = s_alSuppressedSoundPattern->string;
-    if (!pat || !pat[0]) return qfalse;
-    if (sfx < 0 || sfx >= s_al_numSfx) return qfalse;
-
-    name = s_al_sfx[sfx].name;
-    if (!name || !name[0]) return qfalse;
-
-    p = pat;
-    while (*p) {
-        int i = 0;
-        while (*p && *p != ',' && i < (int)sizeof(tok) - 1)
-            tok[i++] = *p++;
-        tok[i] = '\0';
-        if (*p == ',') p++;
-        /* Trim leading/trailing spaces from token */
-        {
-            char *s = tok, *e;
-            while (*s == ' ') s++;
-            e = s + strlen(s);
-            while (e > s && *(e-1) == ' ') *--e = '\0';
-            if (s[0] && Q_stristr(name, s)) return qtrue;
+    /* --- Gear string check (always run for valid player entities) ------- */
+    if (entnum >= 0 && entnum < MAX_CLIENTS) {
+        const char *csStr = cl.gameState.stringData
+                            + cl.gameState.stringOffsets[CS_PLAYERS + entnum];
+        if (csStr && csStr[0]) {
+            const char *gearStr = Info_ValueForKey(csStr, "g");
+            if (gearStr && strchr(gearStr, 'U'))
+                gearSuppressed = qtrue;
         }
     }
-    return qfalse;
+
+    /* --- Filename pattern check (always run) ---------------------------- */
+    if (s_alSuppressedSoundPattern) {
+        const char *pat  = s_alSuppressedSoundPattern->string;
+        const char *name = (sfx >= 0 && sfx < s_al_numSfx)
+                           ? s_al_sfx[sfx].name : NULL;
+        if (pat && pat[0] && name && name[0]) {
+            char        tok[64];
+            const char *p = pat;
+            while (*p && !nameSuppressed) {
+                int i = 0;
+                while (*p && *p != ',' && i < (int)sizeof(tok) - 1)
+                    tok[i++] = *p++;
+                tok[i] = '\0';
+                if (*p == ',') p++;
+                {
+                    char *s = tok, *e;
+                    while (*s == ' ') s++;
+                    e = s + strlen(s);
+                    while (e > s && *(e-1) == ' ') *--e = '\0';
+                    if (s[0] && Q_stristr(name, s))
+                        nameSuppressed = qtrue;
+                }
+            }
+        }
+    }
+
+    return gearSuppressed || nameSuppressed;
 }
 
 /* Anti-cheat: SRC_CAT_WORLD and SRC_CAT_IMPACT are capped at 2.0 so that
@@ -1008,7 +1034,11 @@ static float S_AL_GetCategoryVol( alSrcCat_t cat )
         break;
     case SRC_CAT_WEAPON_SUPPRESSED:
         v    = s_alVolSuppressedWeapon ? s_alVolSuppressedWeapon->value : 1.0f;
-        ref  = 0.55f;  maxV = 10.0f;   /* suppressed: 0.55 ref reflects quieter audio */
+        ref  = 0.55f;  maxV = 10.0f;   /* own suppressed: inherently quieter */
+        break;
+    case SRC_CAT_WORLD_SUPPRESSED:
+        v    = s_alVolEnemySuppressedWeapon ? s_alVolEnemySuppressedWeapon->value : 1.0f;
+        ref  = 0.45f;  maxV = 2.0f;    /* enemy suppressed: quieter + anti-cheat cap */
         break;
     case SRC_CAT_UI:
         v    = s_alVolUI     ? s_alVolUI->value     : 1.0f;
@@ -1297,7 +1327,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     if (isLocal && entnum == 0)
         src->category = SRC_CAT_UI;
     else if (isLocal && entchannel == CHAN_WEAPON)
-        src->category = S_AL_IsSoundSuppressed(sfx)
+        src->category = S_AL_IsSoundSuppressed(sfx, entnum)
                         ? SRC_CAT_WEAPON_SUPPRESSED : SRC_CAT_WEAPON;
     else if (isLocal)
         src->category = SRC_CAT_LOCAL;
@@ -1306,14 +1336,20 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     else if (s_al_listener_entnum >= 0 && entnum == s_al_listener_entnum) {
         /* Own entity in 3D mode — split weapon fire from movement */
         if (entchannel == CHAN_WEAPON)
-            src->category = S_AL_IsSoundSuppressed(sfx)
+            src->category = S_AL_IsSoundSuppressed(sfx, entnum)
                             ? SRC_CAT_WEAPON_SUPPRESSED : SRC_CAT_WEAPON;
         else
             src->category = SRC_CAT_LOCAL;
     } else if (entnum == ENTITYNUM_WORLD)
         src->category = SRC_CAT_IMPACT;  /* bullet impacts, brass, debris */
-    else
-        src->category = SRC_CAT_WORLD;
+    else {
+        /* Other player/entity: check for suppressed weapon fire and route
+         * to SRC_CAT_WORLD_SUPPRESSED so the quieter ref gain applies.
+         * Only CHAN_WEAPON is suppressed; movement/other sounds stay WORLD. */
+        src->category = (entchannel == CHAN_WEAPON
+                         && S_AL_IsSoundSuppressed(sfx, entnum))
+                        ? SRC_CAT_WORLD_SUPPRESSED : SRC_CAT_WORLD;
+    }
 
     catVol = S_AL_GetCategoryVol(src->category);
     /* Ambient sources additionally apply per-sample RMS normalisation so
@@ -1905,7 +1941,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                     isFriendly = qtrue;
             }
         }
-        if (!isFriendly && !S_AL_IsSoundSuppressed(sfx)) {
+        if (!isFriendly && !S_AL_IsSoundSuppressed(sfx, entnum)) {
             float radius = s_alSuppressionRadius ? s_alSuppressionRadius->value : 180.f;
             vec3_t d;
             VectorSubtract(sndOrigin, s_al_listener_origin, d);
@@ -1937,7 +1973,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             && !isLocal
             && entchannel == CHAN_WEAPON
             && entnum != s_al_listener_entnum
-            && !S_AL_IsSoundSuppressed(sfx)) {
+            && !S_AL_IsSoundSuppressed(sfx, entnum)) {
         qboolean friendly = qfalse;
         {
             int ourTeam = (int)cl.snap.ps.persistant[PERS_TEAM];
@@ -3389,18 +3425,20 @@ static void S_AL_Update( int msec )
         static float lastVolWeapon = -1.f;
         static float lastVolImpact = -1.f;
         static float lastVolSupWpn = -1.f;
-        float vSelf   = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
-        float vOther  = S_AL_GetCategoryVol(SRC_CAT_WORLD);
-        float vEnv    = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
-        float vUI     = S_AL_GetCategoryVol(SRC_CAT_UI);
-        float vWeapon = S_AL_GetCategoryVol(SRC_CAT_WEAPON);
-        float vImpact = S_AL_GetCategoryVol(SRC_CAT_IMPACT);
-        float vSupWpn = S_AL_GetCategoryVol(SRC_CAT_WEAPON_SUPPRESSED);
+        static float lastVolESupWpn = -1.f;
+        float vSelf    = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
+        float vOther   = S_AL_GetCategoryVol(SRC_CAT_WORLD);
+        float vEnv     = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
+        float vUI      = S_AL_GetCategoryVol(SRC_CAT_UI);
+        float vWeapon  = S_AL_GetCategoryVol(SRC_CAT_WEAPON);
+        float vImpact  = S_AL_GetCategoryVol(SRC_CAT_IMPACT);
+        float vSupWpn  = S_AL_GetCategoryVol(SRC_CAT_WEAPON_SUPPRESSED);
+        float vESupWpn = S_AL_GetCategoryVol(SRC_CAT_WORLD_SUPPRESSED);
 
-        if (vSelf   != lastVolSelf  || vOther  != lastVolOther  ||
-            vEnv    != lastVolEnv   || vUI     != lastVolUI     ||
-            vWeapon != lastVolWeapon || vImpact != lastVolImpact ||
-            vSupWpn != lastVolSupWpn) {
+        if (vSelf    != lastVolSelf   || vOther   != lastVolOther   ||
+            vEnv     != lastVolEnv    || vUI      != lastVolUI      ||
+            vWeapon  != lastVolWeapon || vImpact  != lastVolImpact  ||
+            vSupWpn  != lastVolSupWpn || vESupWpn != lastVolESupWpn) {
             int j;
             for (j = 0; j < s_al_numSrc; j++) {
                 float catGain;
@@ -3419,13 +3457,14 @@ static void S_AL_Update( int msec )
                 qalSourcef(s_al_src[j].source, AL_GAIN,
                     (s_al_src[j].master_vol / 255.f) * catGain);
             }
-            lastVolSelf   = vSelf;
-            lastVolOther  = vOther;
-            lastVolEnv    = vEnv;
-            lastVolUI     = vUI;
-            lastVolWeapon = vWeapon;
-            lastVolImpact = vImpact;
-            lastVolSupWpn = vSupWpn;
+            lastVolSelf    = vSelf;
+            lastVolOther   = vOther;
+            lastVolEnv     = vEnv;
+            lastVolUI      = vUI;
+            lastVolWeapon  = vWeapon;
+            lastVolImpact  = vImpact;
+            lastVolSupWpn  = vSupWpn;
+            lastVolESupWpn = vESupWpn;
         }
     }
 
@@ -4054,26 +4093,34 @@ qboolean S_AL_Init( soundInterface_t *si )
         "0.82 ≈ −1.7 dB — barely perceptible but adds physical impact. "
         "Hard minimum 0.5 for competitive safety. Default 0.82.");
     s_alSuppressedSoundPattern = Cvar_Get("s_alSuppressedSoundPattern",
-                                          "silenced,_sil,_sd_,_sd.,suppressed,suppressor",
+                                          "silenced,-sil,_sil,_sd_,_sd.,suppressed,suppressor",
                                           CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alSuppressedSoundPattern,
         "Comma-separated substrings matched (case-insensitive) against the sound "
-        "file name to detect suppressed-weapon audio. "
-        "In URT a silencer is a weapon ATTACHMENT — the weapon ID is unchanged; "
-        "only the audio asset differs. URT naming conventions vary: sounds may end "
-        "in 'silenced' (e.g. mp5fire_silenced) or use the short '_sil' suffix "
-        "(e.g. mp5_fire_sil) or any combination. Both are covered by the defaults. "
-        "Matched sounds: (1) use s_alVolSuppressedWeapon, "
-        "(2) skip the near-miss suppression duck, "
-        "(3) skip the incoming-fire reverb boost. "
+        "file name — used as FALLBACK when the gear-string check is unavailable. "
+        "Primary detection reads the 'g' key from the player's CS_PLAYERS configstring; "
+        "if the gear string contains 'U', the suppressor is equipped regardless of filename. "
+        "URT suppressed file names from pk3 audit: de_sil, m4_sil, ak103_sil, beretta_sil, "
+        "glock_sil, g36_sil, psg1_sil, ump45_sil, lr_sil (_sil token), "
+        "mac11-sil (-sil token), p90_silenced (silenced token). "
+        "Matched sounds: (1) use s_alVolSuppressedWeapon volume, "
+        "(2) skip near-miss suppression duck, "
+        "(3) skip incoming-fire reverb boost. "
         "Empty = all unsuppressed.");
     s_alVolSuppressedWeapon = Cvar_Get("s_alVolSuppressedWeapon", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolSuppressedWeapon, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolSuppressedWeapon,
-        "Volume multiplier for suppressed/silenced weapon fire [0–10, ref 0.55]. "
-        "Applies to sounds matching s_alSuppressedSoundPattern. "
+        "Own suppressed weapon fire volume [0–10, ref 0.55]. "
         "Reference gain 0.55 reflects that suppressed weapons are inherently quieter. "
         "Below 1.0 uses power-2 curve for perceptual linearity. Default 1.0.");
+    s_alVolEnemySuppressedWeapon = Cvar_Get("s_alVolEnemySuppressedWeapon", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alVolEnemySuppressedWeapon, "0", "2.0", CV_FLOAT);
+    Cvar_SetDescription(s_alVolEnemySuppressedWeapon,
+        "Enemy / other-player suppressed weapon fire volume [0–2, ref 0.45]. "
+        "Suppressed fire is by design harder to locate — the 0.45 reference gain "
+        "reflects that inherent quietness. Capped at 2× (anti-cheat). "
+        "Default 1.0 (reference level). Reduce to make suppressed enemies even "
+        "harder to detect; raise to compensate if suppressors feel inaudible.");
     s_alOcclusion = Cvar_Get("s_alOcclusion", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOcclusion, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alOcclusion, "Per-source occlusion tracing. Sounds behind walls are gain-attenuated and their apparent HRTF direction is corrected to the nearest audible gap. Close sources (<300 u) update every frame; distant sources update less often. Default 1.");

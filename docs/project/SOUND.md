@@ -318,12 +318,18 @@ URT grenades are already loud enough to produce natural perceptual ducking via O
 
 #### Suppressed-weapon audio tuning
 
-Suppressors in URT are weapon **attachments** — the weapon ID is unchanged; the game selects a different audio asset for suppressed shots. Detection is therefore based on the sound **file name**, not the weapon ID.
+Suppressors in URT are weapon **attachments** — the weapon ID is unchanged. Detection uses two independent signals OR'd together (both are cheap string lookups):
+
+1. **Gear string** (`g` key in `CS_PLAYERS` configstring, character `'U'` = suppressor fitted) — authoritative game state, always checked for player entities
+2. **Sound file name** pattern match (`s_alSuppressedSoundPattern`) — catches non-player entities and cases where the gear string is absent
+
+Both checks always run. URT suppressed file names confirmed from pk3 audit: `de_sil`, `m4_sil`, `ak103_sil`, `beretta_sil`, `g36_sil`, `glock_sil`, `psg1_sil`, `ump45_sil`, `lr_sil` (`_sil`), `mac11-sil` (`-sil`), `p90_silenced` (`silenced`).
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alSuppressedSoundPattern` | `silenced,_sil,_sd_,_sd.,suppressed,suppressor` | Comma-separated substrings matched case-insensitively against the sound file path. URT naming varies: suppressed shots may use `weaponname_silenced` or `weapon_name_sil` — both are covered by the defaults `silenced` and `_sil`. A match classifies the sound as suppressed: routes through `s_alVolSuppressedWeapon`, skips near-miss suppression duck, skips incoming-fire reverb boost. |
-| `s_alVolSuppressedWeapon` | `1.0` | Volume for sounds matching the pattern [0–10, ref 0.55]. The 0.55 reference gain reflects suppressed weapons being inherently quieter. Power-2 curve below 1.0. Default 1.0. |
+| `s_alSuppressedSoundPattern` | `silenced,-sil,_sil,_sd_,_sd.,suppressed,suppressor` | Filename substrings for the name-based fallback check. Both `-sil` (mac11) and `_sil` (all others) are included to cover every URT suppressed weapon. Matched sounds: route through `s_alVolSuppressedWeapon` (own) or `s_alVolEnemySuppressedWeapon` (enemy), skip near-miss suppression duck, skip incoming-fire reverb boost. |
+| `s_alVolSuppressedWeapon` | `1.0` | Own suppressed weapon fire volume [0–10, ref 0.55]. Suppressed weapons are inherently quieter — ref 0.55 reflects this. Power-2 curve below 1.0. Default 1.0. |
+| `s_alVolEnemySuppressedWeapon` | `1.0` | Enemy suppressed weapon fire volume [0–2, ref 0.45]. Lower reference (0.45) than own suppressed (0.55) — enemy suppressed fire is designed to be harder to locate. Capped at 2× (anti-cheat). Default 1.0. |
 
 
 #### Diagnosing weapon-sound quality with `s_alDebugPlayback`
