@@ -3170,11 +3170,13 @@ static void S_AL_UpdateDynamicReverb( void )
     static float curLate     =  0.f;
     static float curRefl     =  0.f;
     static float curSlot     =  0.f;
-    static float curHFRatio  = -1.f;  /* decay HF ratio — surface hardness  */
-    static float curDensity  = -1.f;  /* echo density                        */
-    static float curDiffusion = -1.f; /* wall diffusion (flutter vs scatter) */
-    static float curGainHF   = -1.f;  /* reverb tail treble level (EQ)       */
-    static float curGainLF   = -1.f;  /* reverb tail bass level (EQ)         */
+    static float curHFRatio  = -1.f;  /* decay HF ratio — surface hardness   */
+    static float curDensity  = -1.f;  /* echo density                         */
+    static float curDiffusion = -1.f; /* wall diffusion (flutter vs scatter)  */
+    static float curGainHF   = -1.f;  /* reverb tail treble level (EQ)        */
+    static float curGainLF   = -1.f;  /* reverb tail bass level (EQ)          */
+    /* All five start at -1 so the curDecay < 0 snap check (line below) also
+     * initialises them on the very first probe cycle, just like curDecay. */
     static int   lastFrame = -(S_AL_ENV_RATE);
 
     /* Rolling environment history — averages the last S_AL_ENV_HISTORY probe
@@ -3702,7 +3704,10 @@ static void S_AL_UpdateDynamicReverb( void )
             float boost     = maxBoost * proximity;
             curRefl += boost;
             if (curRefl > 1.f) curRefl = 1.f;
-            /* Short decay bump — muzzle blast echo decays fast */
+            /* Short decay bump — muzzle blast echo decays fast.
+             * 3.0 s is the absolute ceiling for fire-boosted decay — it exceeds
+             * the typical environment-driven maximum (~2.5 s for large caves) to
+             * ensure a perceptible spike even on top of an already-long tail. */
             curDecay += boost * 0.3f;
             if (curDecay > 3.0f) curDecay = 3.0f;
             /* Slot gain spike so the muzzle report is audible even when the
@@ -3894,8 +3899,9 @@ static void S_AL_UpdateStaticFireBoost( void )
     if ((s_al_loopFrame - s_al_incoming_fire_frame) <= S_AL_ENV_RATE * 2
             && s_al_incoming_fire_frame != lastBoostInFire) {
         float inBoostMax = maxBoost * 0.5f;
-        float inBoost    = inBoostMax * (1.0f - s_al_incoming_fire_dist);
-        if (inBoostMax > 0.25f) inBoostMax = 0.25f;
+        float inBoost;
+        if (inBoostMax > 0.25f) inBoostMax = 0.25f;   /* cap before use */
+        inBoost = inBoostMax * (1.0f - s_al_incoming_fire_dist);
         if (inBoost > boost) {
             boost = inBoost;
             lastBoostInFire = s_al_incoming_fire_frame;

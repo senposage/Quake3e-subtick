@@ -670,10 +670,10 @@ The following EFX parameters are now all driven by the probe metrics every 16 fr
 
 #### Fire-impact reverb (consistency fix)
 
-The muzzle-report and incoming-fire reverb boosts (`s_alFireImpactReverb`) are now applied directly to the **smoothed output values** (`cur*`) rather than to the intermediate targets after the IIR blend.  This means:
-- The boost is **immediate** — it takes effect in the same probe cycle it is detected.
-- It is **classifier-independent** — a weapon fired at a wall produces an audible spike regardless of whether the environment probe reports CORRIDOR, OUTDOOR, or any other type.
-- It includes a **slot gain spike** so the muzzle report is audible even in dry outdoor or semi-open environments where the base slot gain is low.
+The muzzle-report and incoming-fire reverb boosts (`s_alFireImpactReverb`) are now applied directly to the **smoothed output values** (`cur*`) rather than to the intermediate targets after the IIR blend.  In the old code the fire-boost sections ran after the blend had already computed `curRefl`/`curDecay` from the environment targets, making the boost modifications to those target variables a dead-write — `cur*` was already set and was what actually got pushed to EFX.  The new code writes directly to `cur*` after the blend, so the effect is:
+- **Immediate** — takes effect in the same probe cycle it is detected.
+- **Classifier-independent** — a weapon fired at a wall produces an audible spike regardless of whether the environment probe reports CORRIDOR, OUTDOOR, or any other type.
+- **Includes a slot gain spike** so the muzzle report is audible even in dry outdoor or semi-open environments where the base slot gain is low.
 - When `s_alDynamicReverb 0` (static reverb mode), a dedicated `S_AL_UpdateStaticFireBoost` function provides the same muzzle-report and incoming-fire enhancement directly against the static EFX baseline.
 
 #### Live tuning with `/s_alReset`
