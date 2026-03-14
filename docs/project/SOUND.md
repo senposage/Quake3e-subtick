@@ -276,32 +276,44 @@ All volume cvars use a **0–10 scale** where **1.0 = reference** (the historica
 
 **Example**: `s_alVolEnv 0.5` reduces ambient volume to 25% of reference (−12 dB); `s_alVolEnv 2.0` doubles it (+6 dB).
 
-#### Extra-vol list — per-player custom loud-sound group
+#### Extra-vol slots — per-player custom loud-sound group
 
-`s_alExtraVolList` defines a **comma-separated list of path patterns**. Any sound whose file name contains a matching token is moved into the `s_alExtraVol` gain group, independently of how it was triggered (local, world, or ambient).
+Eight individual cvars — `s_alExtraVolEntry1` through `s_alExtraVolEntry8` — each hold one sound path pattern. Because they use plain `CVAR_ARCHIVE` (no `CVAR_NODEFAULT`), **all eight slots always appear in the config file**, one line each, making them trivial to find and edit without touching the console.
 
-**Syntax**:
+**Slot syntax** (one pattern per cvar):
 
-| Token | Effect |
+| Value | Effect |
 |-------|--------|
-| `sound/feedback` | Include every sound under that directory |
 | `sound/feedback/hit.wav` | Include only that specific file |
-| `sound/feedback/hit.wav:-3` | Include and apply an extra **−3 dB** cut to that file on top of `s_alExtraVol` |
-| `!sound/feedback/quiet.wav` | **Exclude** that file even if another positive token matched it |
+| `sound/feedback` | Include every sound under that directory |
+| `sound/feedback/hit.wav:-2.5` | Include and apply an extra **−2.5 dB** (≈25% amplitude) cut on top of `s_alExtraVol` |
+| `!sound/feedback/quiet.wav` | **Exclude** that file even if a positive slot matched it |
+| *(empty)* | Slot unused — skipped |
 
-A sound is included when at least one positive token matches **and** no `!` exclusion token matches. A list of only exclusion tokens matches nothing. The `:-N` suffix is a **per-sample dB cut** (≤ 0 only; floor −40 dB; fractional values allowed) applied on top of the global `s_alExtraVol` reduction, giving independent fine-grained control over each listed file.
+A sound is routed to the extra-vol group when **at least one positive slot matches** and **no exclusion slot matches**. The `:-N` suffix is a per-sample dB cut (≤ 0; floor −40 dB; fractional values OK) applied on top of the global `s_alExtraVol` scalar.
+
+**Config file appearance** (default):
+```
+seta s_alExtraVolEntry1 "sound/feedback/hit.wav:-2.5"
+seta s_alExtraVolEntry2 "sound/feedback/kill.wav:-2.5"
+seta s_alExtraVolEntry3 ""
+seta s_alExtraVolEntry4 ""
+seta s_alExtraVolEntry5 ""
+seta s_alExtraVolEntry6 ""
+seta s_alExtraVolEntry7 ""
+seta s_alExtraVolEntry8 ""
+seta s_alExtraVol "1.0"
+```
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `s_alExtraVolList` | `sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5` | Comma-separated sound path patterns. Case-insensitive substring match. Prefix with `!` to exclude. Append `:-N` (dB ≤ 0) to apply a per-sample cut on top of the global knob. Default applies an extra −2.5 dB (≈25% amplitude cut) to each of the two disproportionately loud URT feedback sounds. |
-| `s_alExtraVol` | `1.0` | Global volume for all matched sounds [0.25–1.0, reduce-only, ref 0.70]. At default (1.0) matched sounds are already 30% quieter than unmodified playback. Floored at 0.25 so matched sounds are never fully silenced. |
+| `s_alExtraVolEntry1`–`8` | slots 1–2 pre-filled, 3–8 empty | One pattern per slot. Prefix `!` to exclude. Append `:-N` (dB ≤ 0) for a per-sample cut on top of `s_alExtraVol`. |
+| `s_alExtraVol` | `1.0` | Global scalar for all matched sounds [0.25–1.0]. At default (1.0) no extra reduction beyond per-slot `:-N` cuts. Floored at 0.25 so matched sounds are never fully silenced. |
 
 **Examples**:
-- `s_alExtraVol 0.7` — cuts all matched sounds to about 49% of original (power-2 curve: 0.7² × 0.70 ref ≈ −6 dB on top of the built-in reduction)
-- `s_alExtraVolList "sound/feedback/hit.wav:-2.5,sound/feedback/kill.wav:-2.5"` — default: extra −2.5 dB (≈25% amplitude cut) on each file
-- `s_alExtraVolList "sound/feedback/hit.wav:-5,sound/feedback/kill.wav:-5"` — deeper cut if still too loud
-- `s_alExtraVolList "sound/feedback"` — widen the group to cover every sound under that directory
-- `s_alExtraVolList "sound/feedback,!sound/feedback/hit.wav"` — all feedback except hit.wav
+- Edit `s_alExtraVolEntry1` to `sound/feedback/hit.wav:-5` for a deeper cut on hit sounds
+- Set `s_alExtraVolEntry3` to `sound/feedback` to catch any other feedback sounds
+- Set `s_alExtraVolEntry4` to `!sound/feedback/quiet.wav` to exclude a specific file
 
 #### Loop-sound fade controls
 
