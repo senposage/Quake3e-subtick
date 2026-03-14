@@ -679,31 +679,26 @@ Add a new section after the existing **"Key Sound Cvars"** table:
 | normcache override in `RegisterSound` | code block | ✅ done |
 | BSP origin fallback in `StartSound` | code block | ✅ done |
 | `StopAllSounds` reset additions | code block | ✅ done |
-| `S_AL_MapBaseName` | function | ❌ not written |
-| `S_AL_ParseMapEntities` | function | ❌ not written |
-| `S_AL_PreRegisterMapSounds` | function | ❌ not written |
-| `S_AL_WriteMapNormCache` | function | ❌ not written |
-| `S_AL_LoadMapNormCache` | function | ❌ not written |
-| `S_AL_InitMapAudio` | function | ❌ not written |
-| `S_AL_RebuildNormCache_f` | function | ❌ not written |
-| `BeginRegistration` normcache load | code block | ❌ not done |
-| `UpdateDynamicReverb` snap + hasSky | code block | ❌ not done |
-| `s_alDebugNorm` cvar registration | code block | ❌ not done |
-| `snd_normcache_rebuild` cmd | code block | ❌ not done |
-| per-frame `s_alDebugNorm` output | code block | ❌ not done |
+| `S_AL_MapBaseName` | function | ✅ done |
+| `S_AL_ParseMapEntities` | function | ✅ done |
+| `S_AL_PreRegisterMapSounds` | function | ✅ done |
+| `S_AL_WriteMapNormCache` | function | ✅ done |
+| `S_AL_LoadMapNormCache` | function | ✅ done |
+| `S_AL_InitMapAudio` | function | ✅ done |
+| `S_AL_RebuildNormCache_f` | function | ✅ done |
+| `BeginRegistration` normcache load | code block | ✅ done |
+| `UpdateDynamicReverb` snap + hasSky | code block | ✅ done |
+| `s_alDebugNorm` cvar registration | code block | ✅ done |
+| `snd_normcache_rebuild` cmd | code block | ✅ done |
+| per-frame `s_alDebugNorm` output | code block | ✅ done |
 | `SOUND.md` updates | doc | ❌ not done |
 
 ---
 
 ## Continuing from here
 
-If you are picking this up mid-session, the immediate next step is **G.1**:
-write all seven functions from section G into `snd_openal.c` between
-`S_AL_StopAllSounds` and `S_AL_ClearLoopingSounds` (currently around line
-2863).  The functions must appear in the order G.1 → G.7 because each calls
-the previous ones.
+**All code changes are complete.**  The only remaining item is **K** (SOUND.md
+documentation update).  Add the three sections described in K to
+`docs/project/SOUND.md` and mark this document's K item ✅.
 
-After that, complete H, I, J, K in order.
-
-When all items are ✅, run a build and verify the binary compiles without
-warnings before pushing.
+After that, run `code_review` then `codeql_checker` to finalise the PR.

@@ -2157,6 +2157,7 @@ static void S_AL_Shutdown( void )
 
     Cmd_RemoveCommand("s_devices");
     Cmd_RemoveCommand("s_alReset");
+    Cmd_RemoveCommand("snd_normcache_rebuild");
 
     /* Stop all sources */
     for (i = 0; i < s_al_numSrc; i++)
@@ -3662,6 +3663,12 @@ static void S_AL_UpdateDynamicReverb( void )
         histIdx    = 0;
         haveCache  = qfalse;
         cachedVelSpeed = 0.f;
+
+        /* Parse BSP entities and load/write the per-map normcache the first
+         * time we probe after a new map is loaded.  CM_NumInlineModels() > 0
+         * at this point so CM_EntityString() is safe to call. */
+        if (!s_al_mapHints.parsed)
+            S_AL_InitMapAudio();
     }
 
     if ((s_al_loopFrame - lastFrame) < S_AL_ENV_RATE)
@@ -3934,6 +3941,17 @@ static void S_AL_UpdateDynamicReverb( void )
         caveBonus = sizeFactor * coveredCeiling;
         if (caveBonus > 1.f) caveBonus = 1.f;
     }
+
+    /* ---- BSP sky hint: dampen cave bonus for outdoor/urban maps -----------
+     * A map with a worldspawn "sky" key is an outdoor or urban layout —
+     * it will never be a true underground cave regardless of what the local
+     * geometry looks like.  If the probe fires inside a basement or narrow
+     * stairwell the caveBonus would otherwise trigger stone-tunnel reverb,
+     * which sounds wrong in a building that opens to sky.  Reduce it to 35%
+     * so enclosed sub-areas still get some reverb body without the full
+     * mine-shaft character. */
+    if (s_al_mapHints.hasSky && caveBonus > 0.f)
+        caveBonus *= 0.35f;
 
     /* ---- Open-box fraction: walls all around but open sky above ----------
      * Detects URT "open box" designs: rooftops, open-top courtyards, walled
@@ -4531,6 +4549,22 @@ static void S_AL_Update( int msec )
         /* Dynamic acoustic environment: updates EFX params + slot gain */
         S_AL_UpdateDynamicReverb();
 
+        /* Ambient normalisation diagnostics: one line per active loop source.
+         * Helps identify which map sounds are outliers and verify the normcache
+         * is having the intended effect.  Enable with s_alDebugNorm 1. */
+        if (s_alDebugNorm && s_alDebugNorm->integer) {
+            int j;
+            for (j = 0; j < s_al_numSrc; j++) {
+                const alSrc_t    *src = &s_al_src[j];
+                const alSfxRec_t *r;
+                if (!src->isPlaying || !src->loopSound) continue;
+                if (src->sfx < 0 || src->sfx >= s_al_numSfx) continue;
+                r = &s_al_sfx[src->sfx];
+                Com_Printf("[alNorm] ent=%4d  %-48s  normGain=%.4f\n",
+                    src->entnum, r->name, r->normGain);
+            }
+        }
+
         /* Fire-impact reverb in static mode (s_alDynamicReverb 0).
          * When the dynamic probe is active it handles fire boosts internally;
          * this call is a no-op in that case (guarded inside the function). */
@@ -5079,6 +5113,8 @@ static void S_AL_DisableSounds( void )
 
 static void S_AL_BeginRegistration( void )
 {
+    char mapbase[MAX_QPATH];
+
     s_al_muted = qfalse;
 
     /* Slot 0 must be reserved as the default/failure placeholder on every
@@ -5093,6 +5129,17 @@ static void S_AL_BeginRegistration( void )
     S_AL_RegisterSound( "sound/feedback/hit.wav", qfalse );
 
     Com_DPrintf("S_AL: BeginRegistration -- slot 0 reserved\n");
+
+    /* Load any existing per-map normcache now, before cgame registers its
+     * sounds, so every subsequent RegisterSound call picks up the override
+     * values immediately.  Also applies to sfx records still in memory from
+     * a previous map session (FindSfx returns them early, bypassing the
+     * CalcNormGain path — we fix those normGain values here instead). */
+    s_al_normCacheCount   = 0;
+    s_al_normCacheWritten = qfalse;
+    S_AL_MapBaseName(mapbase, sizeof(mapbase));
+    if (mapbase[0])
+        S_AL_LoadMapNormCache(mapbase);
 }
 
 static void S_AL_ClearSoundBuffer( void )
@@ -5873,6 +5920,16 @@ qboolean S_AL_Init( soundInterface_t *si )
         "or degraded by the resampler (rate mismatch). "
         "Not archived. Set before loading a map to catch registration warnings.");
 
+    s_alDebugNorm = Cvar_Get("s_alDebugNorm", "0", CVAR_TEMP);
+    Cvar_CheckRange(s_alDebugNorm, "0", "1", CV_INTEGER);
+    Cvar_SetDescription(s_alDebugNorm,
+        "Per-map ambient normalisation diagnostics [0/1]. "
+        "When 1, prints one line per active looping ambient source each frame: "
+        "entity number, sfx path, and the normGain being applied. "
+        "Use on a specific map (e.g. ut4_turnpike) to identify which sounds are "
+        "too loud and verify that the normcache is having the intended effect. "
+        "Not archived.");
+
     /* Source pool size.  The pool starts at this size and grows dynamically
      * on demand up to S_AL_MAX_SRC.  Reduce if your audio driver struggles
      * (extremely rare on modern hardware).  Requires vid_restart (LATCH). */
@@ -6179,8 +6236,9 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_al_started = qtrue;
     s_al_muted   = qfalse;
 
-    Cmd_AddCommand("s_devices", S_AL_ListDevicesCmd);
-    Cmd_AddCommand("s_alReset",  S_AL_ReverbReset_f);
+    Cmd_AddCommand("s_devices",              S_AL_ListDevicesCmd);
+    Cmd_AddCommand("s_alReset",              S_AL_ReverbReset_f);
+    Cmd_AddCommand("snd_normcache_rebuild",  S_AL_RebuildNormCache_f);
 
     /* Populate the soundInterface_t */
     si->Shutdown             = S_AL_Shutdown;
