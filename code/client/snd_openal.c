@@ -2461,7 +2461,13 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             VectorCopy(origin, sndOrigin);
         isLocal = qfalse;
     } else {
-        if (entnum >= 0 && entnum < MAX_GENTITIES)
+        /* origin == NULL: use the entity-origin cache.  For the listener
+         * entity additionally prefer s_al_listener_origin over the cache
+         * so that even if S_UpdateEntityPosition hasn't run yet this frame
+         * (early-in-frame sound) we still use the Pmove-predicted position. */
+        if (entnum == s_al_listener_entnum && s_al_listener_entnum >= 0)
+            VectorCopy(s_al_listener_origin, sndOrigin);
+        else if (entnum >= 0 && entnum < MAX_GENTITIES)
             VectorCopy(s_al_entity_origins[entnum], sndOrigin);
         else
             VectorClear(sndOrigin);
@@ -3180,7 +3186,12 @@ static void S_AL_AddLoopingSound( int entityNum, const vec3_t origin,
     lp->kill     = qfalse;
     lp->active   = qtrue;
     lp->framenum = s_al_loopFrame;
-    VectorCopy(origin,   lp->origin);
+    /* For the listener entity use the engine's predicted position so that
+     * lp->origin is already correct if anything reads it before UpdateLoops. */
+    if (entityNum == s_al_listener_entnum && s_al_listener_entnum >= 0)
+        VectorCopy(s_al_listener_origin, lp->origin);
+    else
+        VectorCopy(origin, lp->origin);
     VectorCopy(velocity, lp->velocity);
 }
 
@@ -3310,6 +3321,15 @@ static void S_AL_UpdateLoops( void )
         }
 
         /* ---- Step 4: Start a new source if needed ---- */
+        /* S_AL_UpdateLoops runs from S_Update, which is called after the full
+         * cgame frame (SCR_UpdateScreen) — meaning S_Respatialize has already
+         * refreshed s_al_listener_origin to the Pmove-predicted position this
+         * frame.  For the listener entity, prefer that authoritative origin
+         * over lp->origin (which is the cgame-supplied network position, lagging
+         * by sv_bufferMs when sv_smoothClients is active). */
+        {
+        const float *loopOrigin = (i == s_al_listener_entnum && s_al_listener_entnum >= 0)
+                                  ? s_al_listener_origin : lp->origin;
         if (lp->srcIdx < 0 || !s_al_src[lp->srcIdx].isPlaying) {
             /* Dedup: mirror DMA S_AddLoopSounds() merge behaviour.
              * When two or more map entities reference the same sfx (e.g.
@@ -3341,7 +3361,7 @@ static void S_AL_UpdateLoops( void )
             if (srcIdx < 0) continue;
             {
                 float vol = S_AL_GetMasterVol();
-                S_AL_SrcSetup(srcIdx, lp->sfx, lp->origin, qtrue,
+                S_AL_SrcSetup(srcIdx, lp->sfx, loopOrigin, qtrue,
                               i, CHAN_AUTO, vol, qfalse,
                               qtrue /* looping ambient */);
             }
@@ -3361,7 +3381,7 @@ static void S_AL_UpdateLoops( void )
                     float ref     = S_AL_SOUND_FULLVOLUME;
                     vec3_t d;
                     float  dist;
-                    VectorSubtract(lp->origin, s_al_listener_origin, d);
+                    VectorSubtract(loopOrigin, s_al_listener_origin, d);
                     dist = VectorLength(d);
                     if (dist >= maxDist)
                         startGain = 0.0f;
@@ -3389,10 +3409,11 @@ static void S_AL_UpdateLoops( void )
         } else {
             /* Update position and velocity every frame. */
             qalSource3f(s_al_src[lp->srcIdx].source, AL_POSITION,
-                        lp->origin[0], lp->origin[1], lp->origin[2]);
+                        loopOrigin[0], loopOrigin[1], loopOrigin[2]);
             qalSource3f(s_al_src[lp->srcIdx].source, AL_VELOCITY,
                         lp->velocity[0], lp->velocity[1], lp->velocity[2]);
         }
+        } /* end loopOrigin scope */
 
         /* ---- Step 5: Apply fade-in gain ramp ---- */
         if (lp->fadeStartMs > 0) {
