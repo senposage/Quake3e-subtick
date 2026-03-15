@@ -51,17 +51,19 @@ typedef enum {
 	UT_WP_GLOCK,
 	UT_WP_COLT1911,
 	UT_WP_MAC11,
-	/*UT_WP_P90,
-	UT_WP_BENELLI,
-	UT_WP_MAGNUM,
+	UT_WP_P90,		/* 23 — FN P90 (activated in 4.3) */
+	UT_WP_BENELLI,		/* 24 — Benelli M4 Super 90 (activated in 4.3) */
+	UT_WP_MAGNUM,		/* 25 — .44 Magnum (activated in 4.3) */
+	UT_WP_FRF1,		/* 26 — FR-F1 sniper rifle (new in 4.3) */
+	UT_WP_TOD50,		/* 27 — reserved; weapon not shipped in 4.3.4 (slot exists, no data) */
 
-    // Dualies
-	UT_WP_DUAL_BERETTA,
+	/* Dual weapons remain disabled */
+	/*UT_WP_DUAL_BERETTA,
 	UT_WP_DUAL_DEAGLE,
 	UT_WP_DUAL_GLOCK,
 	UT_WP_DUAL_MAGNUM,*/
 
-	UT_WP_NUM_WEAPONS,
+	UT_WP_NUM_WEAPONS,	/* 28 — confirmed from 4.3.4 QVM bytecode analysis */
 	UT_WP_KICK,
 	UT_WP_KNIFE_THROWN,
 } weapon_t;

@@ -36,6 +36,10 @@
 #define INVENTORY_GLOCK 			 25
 #define INVENTORY_COLT1911           26
 #define INVENTORY_MAC11              27
+#define INVENTORY_P90                28
+#define INVENTORY_BENELLI            29
+#define INVENTORY_MAGNUM             30
+#define INVENTORY_FRF1               31
 
 //ammo
 
@@ -61,6 +65,10 @@
 #define INVENTORY_GLOCK_AMMO		 49
 #define INVENTORY_COLT1911_AMMO      50
 #define INVENTORY_MAC11_AMMO         51
+#define INVENTORY_P90_AMMO           52
+#define INVENTORY_BENELLI_AMMO       53
+#define INVENTORY_MAGNUM_AMMO        54
+#define INVENTORY_FRF1_AMMO          55
 
 //enemy stuff
 

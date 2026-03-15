@@ -744,9 +744,10 @@ typedef enum {
 	UT_MOD_GOOMBA,
 	UT_MOD_MELT,		/* frozen player melted — new in 4.3 Freeze Tag */
 	UT_MOD_FREEZE,		/* killed by being frozen (via g_combat freeze kill) */
-	/*UT_MOD_P90,
-	UT_MOD_BENELLI,
-	UT_MOD_MAGNUM,*/
+	UT_MOD_P90,		/* FN P90 (activated in 4.3) */
+	UT_MOD_BENELLI,		/* Benelli M4 Super 90 (activated in 4.3) */
+	UT_MOD_MAGNUM,		/* .44 Magnum (activated in 4.3) */
+	UT_MOD_FRF1,		/* FR-F1 sniper rifle (new in 4.3) */
 } meansOfDeath_t;
 
 /* gitem_t->type */

@@ -238,11 +238,14 @@ static char  *modNames[] = {
 	"UT_MOD_GLOCK",
 	"UT_MOD_COLT1911",
 	"UT_MOD_MAC11",
-	/*"UT_MOD_P90",
-	"UT_MOD_BENELLI",
-	"UT_MOD_MAGNUM",*/
 	"UT_MOD_FLAG",
-	"UT_MOD_GOOMBA"
+	"UT_MOD_GOOMBA",
+	"UT_MOD_MELT",
+	"UT_MOD_FREEZE",
+	"UT_MOD_P90",
+	"UT_MOD_BENELLI",
+	"UT_MOD_MAGNUM",
+	"UT_MOD_FRF1",
 };
 
 /*

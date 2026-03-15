@@ -64,7 +64,7 @@ vmCvar_t	 bot_nochat;
 vmCvar_t	 bot_testrchat;
 vmCvar_t	 bot_challenge;
 vmCvar_t	 bot_predictobstacles;
-vmCvar_t	 g_spSkill;
+extern vmCvar_t	 g_spSkill;
 
 extern vmCvar_t  bot_developer;
 
@@ -6600,7 +6600,7 @@ void BotSetupDeathmatchAI(void)
 	trap_Cvar_Register(&bot_testrchat, "bot_testrchat", "0", 0);
 	trap_Cvar_Register(&bot_challenge, "bot_challenge", "0", 0);
 	trap_Cvar_Register(&bot_predictobstacles, "bot_predictobstacles", "1", 0);
-	trap_Cvar_Register(&g_spSkill, "g_spSkill", "2", 0);
+	/* g_spSkill registered by g_main.c cvarTable */
 
 	//
 	if (gametype == GT_CTF)
