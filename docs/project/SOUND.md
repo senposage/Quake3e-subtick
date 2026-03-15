@@ -637,17 +637,17 @@ DMA-matching mechanisms prevent degradation:
 DMA plays own-entity sounds at `leftvol = rightvol = master_vol` — pure stereo
 mix, no filter, no spatialization.  OpenAL matches this via:
 
-- `s_alLocalSelf 0` (default): own-entity sounds are placed at the engine's
+- `s_alLocalSelf 1` (default): own-entity sounds are forced non-spatialized →
+  `AL_SOURCE_RELATIVE=TRUE`, position (0,0,0), no rolloff,
+  `AL_DIRECT_FILTER = AL_FILTER_NULL`.  Own-player sounds are head-locked by
+  default, matching the DMA behaviour.
+  `s_alVolSelf` **always** controls own-entity volume regardless of this
+  setting.
+- `s_alLocalSelf 0`: own-entity sounds are placed at the engine's
   authoritative predicted listener position (`s_al_listener_origin`, set by
   `S_AL_Respatialize` from Pmove each frame) for full 3D spatialization.
-  `s_alVolSelf` **always** controls own-entity volume regardless of this
-  setting — in 3D mode the source is classified `SRC_CAT_LOCAL` based on
+  In 3D mode the source is classified `SRC_CAT_LOCAL` based on
   entity-number match with the listener, not on the `isLocal` flag.
-- `s_alLocalSelf 1`: own-entity sounds are forced non-spatialized →
-  `AL_SOURCE_RELATIVE=TRUE`, position (0,0,0), no rolloff,
-  `AL_DIRECT_FILTER = AL_FILTER_NULL`.  No longer needed to work around
-  position staleness (that is now fixed in the engine — see below).  Exists
-  for users who prefer fully head-locked own-player sounds.
 - **Stale reverb fix**: when a local source reuses a slot previously used for a
   3D sound, the auxiliary send is now explicitly disconnected — preventing an
   unwanted reverb tail on own-player weapons and footsteps.
@@ -1427,7 +1427,7 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 | `s_alHRTF` | `0` | Enable three-layer HRTF + higher-order Ambisonic rendering. Off by default (headphones only). (LATCH) |
 | `s_alEFX` | `1` | Enable ALC_EXT_EFX. Set to 0 for diagnostic isolation. (LATCH) |
 | `s_alDirectChannels` | `1` | Bypass HRTF centre-HRIR for own-player sources. Only active when `s_alHRTF 1`. (LATCH) |
-| `s_alLocalSelf` | `0` | Force own-entity sounds non-spatialized (position 0,0,0). Default 0 — own-player sounds use their world-space origin. Set to 1 if stale-position artefacts occur. |
+| `s_alLocalSelf` | `1` | Force own-entity sounds non-spatialized (head-locked, position 0,0,0). Default 1 — own-player sounds are head-locked matching DMA behaviour. Set to 0 for full 3D spatialization of own-player sounds. |
 | `s_alOccPosBlend` | `0.40` | Gap-hint blend weight for HRTF direction correction when a source is occluded [0–1]. Default 0.40; see [HRTF directional accuracy](#hrtf-directional-accuracy-s_alocclusion-1). |
 | `s_alOccSearchRadius` | `120` | Tangent-plane probe radius (units) for gap search. Default 120 ≈ URT door half-width. |
 | `s_alMaxDist` | `1330` | Override max attenuation distance (floor: 1330 Q3 units) |

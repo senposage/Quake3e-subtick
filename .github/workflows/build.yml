@@ -219,3 +219,29 @@ jobs:
           tag: ${{ github.ref }}
           overwrite: true
           file: ${{ matrix.artifact_name }}
+
+  cleanup-old-runs:
+    name: Delete old workflow runs
+    if: >-
+      always() && !cancelled() &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/re-impl'
+    needs: [windows-msys32, ubuntu-x86]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete old workflow runs (keep latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: build.yml
+          KEEP: 1
+        run: |
+          run_ids=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW/runs" \
+            --jq --argjson keep "$KEEP" '.workflow_runs | sort_by(.run_number) | reverse | .[$keep:] | .[].id')
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            echo "Deleting run $id"
+            gh api "repos/$REPO/actions/runs/$id" -X DELETE || true
+          done <<< "$run_ids"

@@ -5873,16 +5873,16 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alVolImpact,
         "World-entity impact sound volume (bullet hits, shell brass, explosions) [0–2, ref 1.0]. "
         "Capped at 2.0 (anti-cheat). Below 1.0 uses power-2 curve. Default 1.0.");
-    s_alLocalSelf = Cvar_Get("s_alLocalSelf", "0", CVAR_ARCHIVE_ND);
+    s_alLocalSelf = Cvar_Get("s_alLocalSelf", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alLocalSelf, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alLocalSelf,
         "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized "
         "(head-locked at the listener position) regardless of any world-space origin "
         "supplied by the game. "
         "Note: position-staleness artefacts caused by TR_LINEAR trajectory lag or "
-        "sv_bufferMs position delay are now corrected automatically in the engine — "
-        "s_alLocalSelf 1 is no longer needed for correct audio and exists only for "
-        "users who prefer fully head-locked own-player sounds. Default 0.");
+        "sv_bufferMs position delay are now corrected automatically in the engine. "
+        "Default 1 — own-player sounds are head-locked by default. "
+        "Set to 0 to use full 3D spatialization for own-player sounds.");
 
     /* Acoustic-environment tuning — all live-tunable; type /s_alReset after
      * changing to hear the effect without a map reload. */
