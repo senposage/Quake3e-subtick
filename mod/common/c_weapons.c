@@ -1888,9 +1888,277 @@ weaponData_t bg_weaponlist[] = {
     },
 
 //@Barbatos we don't use these weapons in 4.2
-#if 0
+/* P90, BENELLI, MAGNUM activated in 4.3; DUAL weapons remain disabled */
 
 	/* P90 */
+	{
+		"FN P90",		 /* Name */
+		"p90",
+		0,			 /* Flags */
+		UT_WPTYPE_MEDIUM_GUN,	 /* Type */
+		POWERUP(PW_SILENCER) |
+		POWERUP(PW_LASER),	 /* Available powerups */
+
+		INVENTORY_P90,
+		INVENTORY_P90_AMMO,
+
+		2,    /* Clips */
+		50,   /* Bullets */
+		4200, /* reload time */
+		0,    /* reload start time */
+		0,    /* reload finish time */
+
+		/* damage */
+		{
+			{ 0.58f, qtrue },  /* HL_UNKNOWN */
+			{ 1.00f, qfalse }, /* HL_HEAD    */
+			{ 0.34f, qfalse }, /* HL_HELMET  */
+			{ 0.30f, qtrue },  /* HL_TORSO   */
+			{ 0.20f, qfalse }, /* HL_VEST    */
+			{ 0.11f, qtrue },  /* HL_ARML    */
+			{ 0.11f, qtrue },  /* HL_ARMR    */
+			{ 0.11f, qtrue },  /* HL_GROIN   */
+			{ 0.11f, qtrue },  /* HL_BUTT    */
+			{ 0.11f, qtrue },  /* HL_LEGUL   */
+			{ 0.11f, qtrue },  /* HL_LEGUR   */
+			{ 0.11f, qtrue },  /* HL_LEGLL   */
+			{ 0.11f, qtrue },  /* HL_LEGLR   */
+			{ 0.11f, qtrue },  /* HL_FOOTL   */
+			{ 0.11f, qtrue },  /* HL_FOOTR   */
+		},
+
+		650,		/* effective range */
+		15.0f,		/* knockback */
+
+		UT_WP_P90,
+		UT_MOD_P90,
+
+		0,		/* Delay for brass eject */
+		0.5f,		/* Brass length scale */
+		1.0f,		/* Brass diameter scale */
+		0.30f,		/* Silencer world scale */
+		0.75f,		/* Silencer view scale */
+		0.5f,		/* Flash Scale */
+
+		{      0 },
+
+		{
+			{
+				"Automatic",
+				0,
+				100,
+				0,
+				1.3f,
+				0.300f,
+				{ 130, 100, 1.5f, 3.5f, 1.0f, }
+			},
+			{ NULL }
+		},
+	},
+
+	/* Benelli M4 Super 90 */
+	{
+		"Benelli M4 Super 90",
+		"benellim9",
+		0,
+		UT_WPTYPE_LARGE_GUN,
+		0,
+
+		INVENTORY_BENELLI,
+		INVENTORY_BENELLI_AMMO,
+
+		4,    /* Clips */
+		8,    /* Shots per clip */
+		2400, /* reload time */
+		0,    /* reload start time */
+		0,    /* reload finish time */
+
+		/* damage — per pellet (8 pellets per shot) */
+		{
+			{ 0.08f, qtrue },  /* HL_UNKNOWN */
+			{ 0.08f, qtrue },  /* HL_HEAD    */
+			{ 0.05f, qfalse }, /* HL_HELMET  */
+			{ 0.04f, qtrue },  /* HL_TORSO   */
+			{ 0.03f, qfalse }, /* HL_VEST    */
+			{ 0.03f, qtrue },  /* HL_ARML    */
+			{ 0.03f, qtrue },  /* HL_ARMR    */
+			{ 0.03f, qtrue },  /* HL_GROIN   */
+			{ 0.03f, qtrue },  /* HL_BUTT    */
+			{ 0.03f, qtrue },  /* HL_LEGUL   */
+			{ 0.03f, qtrue },  /* HL_LEGUR   */
+			{ 0.03f, qtrue },  /* HL_LEGLL   */
+			{ 0.03f, qtrue },  /* HL_LEGLR   */
+			{ 0.03f, qtrue },  /* HL_FOOTL   */
+			{ 0.03f, qtrue },  /* HL_FOOTR   */
+		},
+
+		300,		/* effective range */
+		5.0f,		/* knockback */
+
+		UT_WP_BENELLI,
+		UT_MOD_BENELLI,
+
+		0,		/* Delay for brass eject */
+		0.75f,		/* Brass length scale */
+		0.75f,		/* Brass diameter scale */
+		0,		/* Silencer world scale */
+		0,		/* Silencer view scale */
+		1.25f,		/* Flash Scale */
+
+		{      0 },
+
+		{
+			{
+				"Semi-Automatic",
+				UT_WPMODEFLAG_NOHOLD,
+				350,
+				0,
+				3.0f,
+				0.0f,
+				{ 0, 15, 42.5f, 2.0f, 1.0f, }
+			},
+			{ NULL }
+		},
+	},
+
+	/* .44 Magnum */
+	{
+		"Magnum",
+		"magnum",
+		0,
+		UT_WPTYPE_SMALL_GUN,
+		0,
+
+		INVENTORY_MAGNUM,
+		INVENTORY_MAGNUM_AMMO,
+
+		3,    /* Clips */
+		6,    /* Shots per clip */
+		1640, /* reload time */
+		0,    /* reload start time */
+		0,    /* reload finish time */
+
+		/* damage */
+		{
+			{ 1.10f, qtrue },  /* HL_UNKNOWN */
+			{ 1.00f, qfalse }, /* HL_HEAD    */
+			{ 0.66f, qfalse }, /* HL_HELMET  */
+			{ 0.57f, qtrue },  /* HL_TORSO   */
+			{ 0.38f, qfalse }, /* HL_VEST    */
+			{ 0.22f, qtrue },  /* HL_ARML    */
+			{ 0.22f, qtrue },  /* HL_ARMR    */
+			{ 0.22f, qtrue },  /* HL_GROIN   */
+			{ 0.22f, qtrue },  /* HL_BUTT    */
+			{ 0.22f, qtrue },  /* HL_LEGUL   */
+			{ 0.22f, qtrue },  /* HL_LEGUR   */
+			{ 0.22f, qtrue },  /* HL_LEGLL   */
+			{ 0.22f, qtrue },  /* HL_LEGLR   */
+			{ 0.22f, qtrue },  /* HL_FOOTL   */
+			{ 0.22f, qtrue },  /* HL_FOOTR   */
+		},
+
+		700,		/* effective range */
+		100.0f,		/* knockback */
+
+		UT_WP_MAGNUM,
+		UT_MOD_MAGNUM,
+
+		0,		/* Delay for brass eject */
+		0.5f,		/* Brass length scale */
+		1.0f,		/* Brass diameter scale */
+		0.27f,		/* Silencer world scale */
+		0.75f,		/* Silencer view scale */
+		0.35f,		/* Flash Scale */
+
+		{      0 },
+
+		{
+			{
+				"Semi-Automatic",
+				UT_WPMODEFLAG_NOHOLD,
+				120,
+				0,
+				0.7f,
+				0.05f,
+				{ 0, 50, 3.0f, 10.0f, 1.0f, }
+			},
+			{ NULL }
+		},
+	},
+
+	/* FR-F1 — bolt-action sniper rifle (new in 4.3).
+	 * Damage estimates based on position in 4.3.4 QVM bg_weaponlist[];
+	 * tune with cg_showbullethits 2. */
+	{
+		"FR-F1",
+		"frf1",
+		0,
+		UT_WPTYPE_LARGE_GUN,
+		POWERUP(PW_LASER),
+
+		INVENTORY_SR8,		/* reuses sniper inventory slot */
+		INVENTORY_SR8_AMMO,
+
+		3,    /* Clips */
+		5,    /* Shots per clip (bolt-action) */
+		3000, /* reload time */
+		0,    /* reload start time */
+		0,    /* reload finish time */
+
+		/* damage — bolt-action sniper; tune with cg_showbullethits 2 */
+		{
+			{ 1.40f, qtrue },  /* HL_UNKNOWN */
+			{ 1.00f, qfalse }, /* HL_HEAD    */
+			{ 0.90f, qfalse }, /* HL_HELMET  */
+			{ 0.95f, qtrue },  /* HL_TORSO   */
+			{ 0.76f, qtrue },  /* HL_VEST    — confirmed */
+			{ 0.50f, qtrue },  /* HL_ARML    — confirmed */
+			{ 0.50f, qtrue },  /* HL_ARMR    — confirmed */
+			{ 0.31f, qtrue },  /* HL_GROIN   — confirmed */
+			{ 0.76f, qtrue },  /* HL_BUTT    — confirmed */
+			{ 0.50f, qtrue },  /* HL_LEGUL   — confirmed */
+			{ 0.50f, qtrue },  /* HL_LEGUR   — confirmed */
+			{ 0.40f, qtrue },  /* HL_LEGLL   — confirmed */
+			{ 0.40f, qtrue },  /* HL_LEGLR   — confirmed */
+			{ 0.30f, qtrue },  /* HL_FOOTL   — estimate  */
+			{ 0.30f, qtrue },  /* HL_FOOTR   — estimate  */
+		},
+
+		2000,		/* effective range */
+		200.0f,		/* knockback */
+
+		UT_WP_FRF1,
+		UT_MOD_FRF1,
+
+		0,		/* Delay for brass eject */
+		0.9f,		/* Brass length scale */
+		1.0f,		/* Brass diameter scale */
+		0,		/* Silencer world scale */
+		0,		/* Silencer view scale */
+		0.5f,		/* Flash Scale */
+
+		{ 2, 4, 0 },	/* Zoom levels */
+
+		{
+			{
+				"Bolt-Action",
+				UT_WPMODEFLAG_NOHOLD,
+				1200,		/* fire time — bolt-action */
+				0,
+				0.1f,		/* tight spread */
+				0.05f,
+				{ 0, 200, 5.0f, 2.0f, 1.0f, }
+			},
+			{ NULL }
+		},
+	},
+
+	/* UT_WP_TOD50 (27) — placeholder slot; weapon not shipped in 4.3.4.
+	 * The enum slot exists (NUM_WEAPONS = 28) but has no bg_weaponlist data.
+	 * bg_weaponlist[27] is intentionally zero-initialised (BSS). */
+
+#if 0
+	/* Dual weapons — disabled */
 	{
 		"FN P90",		 /* Name */
 		"p90",
