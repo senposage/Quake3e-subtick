@@ -979,7 +979,7 @@ void CL_InitCGame( void ) {
 	// CVAR_PROTECTED prevents the QVM from disabling its own patches.
 	// Bitmask: bit0=frameInterpolation clamp, bit1=nextSnap null crash fix,
 	//          bit2=TR_INTERPOLATE velocity extrapolation (disabled by default:
-	//          causes invisible/warping bots when bot velocity data is stale)
+	//          causes invisible/warping of bots and players when velocity data is stale)
 	Cvar_Get( "cl_urt43cgPatches", "3", CVAR_ARCHIVE | CVAR_PROTECTED );
 
 	cgvm = VM_Create( VM_CGAME, CL_CgameSystemCalls, CL_DllSyscall, interpret );
