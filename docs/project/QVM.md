@@ -282,21 +282,36 @@ This is how `sv_fps`, `sv_gameHz`, and other custom cvars are protected from bei
 
 This is the engine-level support for the Ghidra binary patches described in `archive/docs/ghidra-cgame-patches.md`. Rather than editing the `.qvm` file directly, a patch can be applied in memory after load.
 
-### UrbanTerror 4.3 cgame patches (`cl_urt43cgPatches`)
+### UrbanTerror 4.3 cgame patches
 
-The three patches from the Ghidra analysis are now applied automatically at runtime when the official UrbanTerror 4.3 `cgame.qvm` is loaded (CRC32 `0x1289DB6B`, `instructionCount` 258563, `exactDataLength` 38055548). All patches are gated behind the **`cl_urt43cgPatches`** bitmask cvar (default `7` = all bits enabled, `CVAR_ARCHIVE | CVAR_PROTECTED` so the QVM cannot override it).
+The three patches from the Ghidra analysis are applied automatically at runtime when the official UrbanTerror 4.3 `cgame.qvm` is loaded (CRC32 `0x1289DB6B`, `instructionCount` 258563, `exactDataLength` 38055548).
 
-| Bit | Name | What it fixes | Default |
-|---|---|---|---|
-| 0 (1) | **Patch 2 — frameInterpolation clamp** | The existing QVM clamp is wrong: lower threshold is `0.1f` (should be `0.0f`) and upper clamped value is `~0.99f` (should be `1.0f`). Fixes two constants at instruction indices `0xa688` and `0xa692`. | ✅ enabled |
-| 1 (2) | **Patch 3 — nextSnap NULL crash fix** | `CG_InterpolateEntityPosition` calls `CG_Error()` (fatal crash) when `cg.nextSnap == NULL` during lag spikes. Replaces the 5-instruction error path with a `CONST`+`JUMP` early return to the function's `PUSH`+`LEAVE` (instr `0x1594d`). | ✅ enabled |
-| 2 (4) | **Patch 1 — TR_INTERPOLATE velocity extrapolation** | The BG_EvaluateTrajectory switch-table entry for `trType == TR_INTERPOLATE` (case 1, data addr `0xdbb4`) points to the `TR_STATIONARY` handler (VectorCopy only). Redirects it to the `TR_LINEAR` handler (`instr 0x3ab15`) so velocity-based forward extrapolation is used when the next snapshot is unavailable. Safe because the server now anchors `pos.trTime = sv.time` for every `TR_INTERPOLATE` snapshot entity — the TR_LINEAR formula produces dt ≈ 0 during normal interpolation (identical to the original VectorCopy path) and correct forward extrapolation otherwise. | ✅ enabled |
+#### Server-type gating — vanilla vs. custom server
+
+**Patch 1** (bit 2, TR_LINEAR) requires the server to anchor `pos.trTime = sv.time` for every `TR_INTERPOLATE` snapshot entity.  Our custom server does this unconditionally; vanilla URT servers never do, so the patch produces enormous `dt` values that teleport all entities every frame on vanilla servers.
+
+The engine detects server type in `CL_ParseServerInfo()` (the same detection used by `cl_adaptiveTiming`) and automatically selects the appropriate patch bitmask:
+
+| Situation | Cvar used | Default value |
+|---|---|---|
+| Custom server (`sv_snapshotFps` present in serverinfo) | `cl_urt43cgPatches` | `7` (all three patches) |
+| Vanilla server (`sv_snapshotFps` absent) | `cl_qvmPatchVanilla` | `0` (no patches — safe baseline for A/B testing) |
+
+The bridge is a `CVAR_TEMP` cvar **`cl_urt43serverIsVanilla`** set to `1` or `0` by `CL_ParseServerInfo()` immediately after `cl.vanillaServer` is determined.  `VM_URT43_CgamePatches()` reads it at VM load time to choose which user cvar to apply.  The TEMP flag ensures it never persists to the config file.
+
+#### Bitmask layout (shared by both cvars)
+
+| Bit | Name | What it fixes | Custom server | Vanilla server |
+|---|---|---|---|---|
+| 0 (1) | **Patch 2 — frameInterpolation clamp** | The existing QVM clamp is wrong: lower threshold is `0.1f` (should be `0.0f`) and upper clamped value is `~0.99f` (should be `1.0f`). Fixes two constants at instruction indices `0xa688` and `0xa692`. Safe on any server — no server-side dependency. | ✅ enabled | ⬜ off by default (`cl_qvmPatchVanilla 0`) |
+| 1 (2) | **Patch 3 — nextSnap NULL crash fix** | `CG_InterpolateEntityPosition` calls `CG_Error()` (fatal crash) when `cg.nextSnap == NULL` during lag spikes. Replaces the 5-instruction error path with a `CONST`+`JUMP` early return to the function's `PUSH`+`LEAVE` (instr `0x1594d`). Safe on any server — no server-side dependency. | ✅ enabled | ⬜ off by default (`cl_qvmPatchVanilla 0`) |
+| 2 (4) | **Patch 1 — TR_INTERPOLATE velocity extrapolation** | The `BG_EvaluateTrajectory` switch-table entry for `trType == TR_INTERPOLATE` (case 1, data addr `0xdbb4`) points to the `TR_STATIONARY` handler (VectorCopy only). Redirects it to the `TR_LINEAR` handler (`instr 0x3ab15`) so velocity-based forward extrapolation is used when the next snapshot is unavailable. **Requires server-side `trTime` anchor** — vanilla servers leave `trTime = 0`, causing `(evalTime − 0) / 1000` → enormous `dt` → entity teleportation every frame. Auto-suppressed on vanilla servers via `cl_qvmPatchVanilla`. | ✅ enabled | ❌ unsafe — leave unset |
 
 The function `VM_URT43_CgamePatches()` in `vm.c` prints verbose diagnostic output for every patch attempt (instruction opcodes and values before patching, applied/skipped result) to aid debugging if a future QVM version changes the binary layout.
 
-**Debug output example** (with default `cl_urt43cgPatches 7`):
+**Debug output example** — custom server (all patches, `cl_urt43cgPatches 7`):
 ```
-UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x7
+UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x7 (custom server → cl_urt43cgPatches)
   [Patch2] frameInterpolation clamp:
     [0xa688] op=0x08 val=0x3dcccccd (expect op=0x08 val=0x3dcccccd)
     [0xa692] op=0x08 val=0x3f7d70a4 (expect op=0x08 val=0x3f7d70a4)
@@ -309,6 +324,17 @@ UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x7
     [Patch1] APPLIED: TR_INTERPOLATE now uses TR_LINEAR extrapolation
 UrT43 cgame patch: applied=0x7 skipped=0x0
 ```
+
+**Debug output example** — vanilla server (no patches by default, `cl_qvmPatchVanilla 0`):
+```
+UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x0 (vanilla server → cl_qvmPatchVanilla)
+  [Patch2] DISABLED by cvar (bit 0 not set)
+  [Patch3] DISABLED by cvar (bit 1 not set)
+  [Patch1] DISABLED by cvar (bit 2 not set)
+UrT43 cgame patch: applied=0x0 skipped=0x0
+```
+
+To enable Patches 2+3 on vanilla servers for testing: `cl_qvmPatchVanilla 3`
 
 If the loaded QVM does not match the expected CRC/size, a `DPrintf` warning identifies the actual fingerprint so a new patch entry can be written.
 

@@ -582,6 +582,13 @@ static void CL_ParseServerInfo( void )
 		cl.vanillaServer = ( snapFpsStr[0] == '\0' );
 	}
 
+	// Bridge for vm.c: VM_URT43_CgamePatches reads this TEMP cvar to decide
+	// whether to use cl_urt43cgPatches (custom server) or cl_qvmPatchVanilla
+	// (vanilla server) as the effective QVM patch bitmask.  Set it here, after
+	// cl.vanillaServer is determined, so it is always current before the cgame
+	// VM is created.  The cvar is CVAR_TEMP so it never persists to config.
+	Cvar_SetValue( "cl_urt43serverIsVanilla", cl.vanillaServer ? 1 : 0 );
+
 	// Disable all adaptive timing when:
 	//   - the server is vanilla (lacks sv_snapshotFps, so our protocol is unsupported), or
 	//   - the server admin has explicitly set sv_allowClientAdaptiveTiming 0.

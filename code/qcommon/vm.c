@@ -1580,33 +1580,38 @@ __noJTS:
 VM_URT43_CgamePatches
 
 Apply runtime memory patches to the official UrbanTerror 4.3 cgame QVM.
-Gated behind the cl_urt43cgPatches bitmask cvar (default 7 = all three enabled):
+
+The effective patch bitmask is chosen automatically based on server type:
+  • Custom server (has sv_snapshotFps in serverinfo): cl_urt43cgPatches  (default 7)
+  • Vanilla server (no sv_snapshotFps):               cl_qvmPatchVanilla (default 3)
+cl_urt43serverIsVanilla (CVAR_TEMP) bridges the detection from CL_ParseServerInfo.
+
+Bitmask layout (shared by both cvars):
 
   Bit 0 (1): Patch 2 — fix frameInterpolation clamp bounds.
              The QVM's existing clamp is wrong: lower threshold is 0.1f instead
              of 0.0f (clips valid small fractions), and the upper clamp value is
              ~0.99f instead of 1.0f.  Two constant-value fixes at instr 0xa688
              and 0xa692.
+             Safe on any server — no server-side dependency.
 
   Bit 1 (2): Patch 3 — prevent CG_InterpolateEntityPosition crash when
              cg.nextSnap == NULL.  The QVM calls CG_Error() (fatal crash) when
              the next snapshot pointer is NULL during high-latency spikes.
              Replace the 5-instruction error path with CONST+JUMP to the
              function's PUSH+LEAVE so it returns silently instead.
+             Safe on any server — no server-side dependency.
 
   Bit 2 (4): Patch 1 — BG_EvaluateTrajectory TR_INTERPOLATE uses velocity
              extrapolation.  The switch-table entry for trType==TR_INTERPOLATE
              (case 1) currently falls through to TR_STATIONARY (VectorCopy only).
              Redirect it to the TR_LINEAR case so entities use velocity-based
              forward extrapolation when the next snapshot is unavailable.
-             Safe because sv_snapshot.c now anchors es->pos.trTime = sv.time for
-             every TR_INTERPOLATE entity: the TR_LINEAR formula returns trBase
-             unchanged during normal snapshot interpolation (dt ≈ 0 at
-             snap.serverTime) and provides correct forward extrapolation when
-             cg.time advances past the last snapshot.  Previously disabled due to
-             stale trTime (BG_PlayerStateToEntityState never writes trTime for
-             TR_INTERPOLATE), which caused (evalTime - 0)/1000 → a huge dt and
-             instant teleportation of all bots and players every frame.
+             REQUIRES SERVER-SIDE SUPPORT: sv_snapshot.c must anchor pos.trTime
+             to sv.time for every TR_INTERPOLATE client entity; vanilla servers
+             never do this, leaving trTime at 0 and causing enormous dt values
+             that teleport all entities every frame.  Automatically suppressed
+             on vanilla servers (cl_qvmPatchVanilla default excludes bit 2).
 
 Target QVM: UrbanTerror 4.3 official binary
   CRC32:            0x1289DB6B
@@ -1630,11 +1635,21 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	int cgPatches;
 	int applied = 0;
 	int skipped = 0;
+	qboolean isVanilla;
+	const char *patchCvar;
 
-	cgPatches = Cvar_VariableIntegerValue( "cl_urt43cgPatches" );
+	/* Select the patch bitmask based on server type.
+	 * cl_urt43serverIsVanilla is a CVAR_TEMP set by CL_ParseServerInfo each
+	 * time a gamestate is received.  It is 1 for vanilla servers (no
+	 * sv_snapshotFps in serverinfo) and 0 for our custom server.
+	 * When unset (local game, demo playback) it defaults to 0 → custom path. */
+	isVanilla  = ( Cvar_VariableIntegerValue( "cl_urt43serverIsVanilla" ) != 0 );
+	patchCvar  = isVanilla ? "cl_qvmPatchVanilla" : "cl_urt43cgPatches";
+	cgPatches  = Cvar_VariableIntegerValue( patchCvar );
 
-	Com_Printf( S_COLOR_CYAN "UrT43 cgame patch: CRC=%08X ic=%d dl=%d flags=0x%x\n",
-		vm->crc32sum, vm->instructionCount, vm->exactDataLength, cgPatches );
+	Com_Printf( S_COLOR_CYAN "UrT43 cgame patch: CRC=%08X ic=%d dl=%d flags=0x%x (%s → %s)\n",
+		vm->crc32sum, vm->instructionCount, vm->exactDataLength, cgPatches,
+		isVanilla ? "vanilla server" : "custom server", patchCvar );
 
 	/* ---------------------------------------------------------------
 	   Patch 2 (bit 0): Fix frameInterpolation clamp bounds

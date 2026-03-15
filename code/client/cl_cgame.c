@@ -974,16 +974,37 @@ void CL_InitCGame( void ) {
 			interpret = VMI_COMPILED;
 	}
 
-	// Register UrT 4.3 cgame patch cvar before loading the VM so
-	// VM_ReplaceInstructions sees the correct default value.
+	// Register UrT 4.3 cgame patch cvars before loading the VM so
+	// VM_ReplaceInstructions sees the correct default values.
 	// CVAR_PROTECTED prevents the QVM from disabling its own patches.
-	// Bitmask: bit0=frameInterpolation clamp, bit1=nextSnap null crash fix,
-	//          bit2=TR_INTERPOLATE velocity extrapolation.
-	// All three patches are safe: sv_snapshot.c now anchors es->pos.trTime to
-	// sv.time for every TR_INTERPOLATE snapshot entity so the TR_LINEAR formula
-	// used by bit2 produces dt≈0 during normal interpolation (identical to the
-	// original VectorCopy path) and correct forward extrapolation otherwise.
+	//
+	// Bitmask (both cvars share the same bit layout):
+	//   bit 0 = Patch 2: frameInterpolation clamp fix (safe on any server)
+	//   bit 1 = Patch 3: nextSnap null-pointer crash fix (safe on any server)
+	//   bit 2 = Patch 1: TR_INTERPOLATE velocity extrapolation / TR_LINEAR
+	//           Requires server-side trTime anchor — only safe on our custom
+	//           server.  Auto-suppressed on vanilla servers via
+	//           cl_qvmPatchVanilla + cl_urt43serverIsVanilla.
+	//
+	// cl_urt43cgPatches  — used when connected to our custom server (default 7)
+	// cl_qvmPatchVanilla — used when connected to a vanilla server   (default 3)
 	Cvar_Get( "cl_urt43cgPatches", "7", CVAR_ARCHIVE | CVAR_PROTECTED );
+	Cvar_SetDescription( "cl_urt43cgPatches",
+		"QVM patch bitmask applied when connected to a custom (Quake3e-urt) server. "
+		"Bit 0 = Patch2 (frameInterpolation clamp), "
+		"bit 1 = Patch3 (null-snapshot crash fix), "
+		"bit 2 = Patch1 (TR_LINEAR velocity extrapolation — requires server-side trTime anchor). "
+		"Default 7 (all patches). "
+		"On vanilla servers cl_qvmPatchVanilla is used instead." );
+	Cvar_Get( "cl_qvmPatchVanilla", "0", CVAR_ARCHIVE );
+	Cvar_SetDescription( "cl_qvmPatchVanilla",
+		"QVM patch bitmask applied when connected to a vanilla UrT server "
+		"(server lacks sv_snapshotFps — no server-side trTime anchor for TR_LINEAR). "
+		"Bit 0 = Patch2 (frameInterpolation clamp), "
+		"bit 1 = Patch3 (null-snapshot crash fix), "
+		"bit 2 = Patch1 (TR_LINEAR — unsafe on vanilla servers, leave unset). "
+		"Default 0 (no patches on vanilla servers — safe baseline for A/B testing). "
+		"On custom servers cl_urt43cgPatches is used instead." );
 
 	cgvm = VM_Create( VM_CGAME, CL_CgameSystemCalls, CL_DllSyscall, interpret );
 	if ( !cgvm ) {

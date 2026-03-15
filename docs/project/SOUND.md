@@ -637,13 +637,51 @@ DMA-matching mechanisms prevent degradation:
 DMA plays own-entity sounds at `leftvol = rightvol = master_vol` — pure stereo
 mix, no filter, no spatialization.  OpenAL matches this via:
 
-- `s_alLocalSelf 0` (default): own-entity sounds use their world-space origin supplied by the game for full 3D spatialization.  `s_alVolSelf` **always** controls own-entity volume regardless of this setting — in 3D mode the source is classified `SRC_CAT_LOCAL` based on entity-number match with the listener, not on the `isLocal` flag.
-- `s_alLocalSelf 1`: own-entity sounds are forced non-spatialized → `AL_SOURCE_RELATIVE=TRUE`,
-  position (0,0,0), no rolloff, `AL_DIRECT_FILTER = AL_FILTER_NULL`. Use if stale-position
-  artefacts occur from URT jumping/sliding physics.
+- `s_alLocalSelf 0` (default): own-entity sounds are placed at the engine's
+  authoritative predicted listener position (`s_al_listener_origin`, set by
+  `S_AL_Respatialize` from Pmove each frame) for full 3D spatialization.
+  `s_alVolSelf` **always** controls own-entity volume regardless of this
+  setting — in 3D mode the source is classified `SRC_CAT_LOCAL` based on
+  entity-number match with the listener, not on the `isLocal` flag.
+- `s_alLocalSelf 1`: own-entity sounds are forced non-spatialized →
+  `AL_SOURCE_RELATIVE=TRUE`, position (0,0,0), no rolloff,
+  `AL_DIRECT_FILTER = AL_FILTER_NULL`.  No longer needed to work around
+  position staleness (that is now fixed in the engine — see below).  Exists
+  for users who prefer fully head-locked own-player sounds.
 - **Stale reverb fix**: when a local source reuses a slot previously used for a
   3D sound, the auxiliary send is now explicitly disconnected — preventing an
   unwanted reverb tail on own-player weapons and footsteps.
+
+#### Own-player sound position — `S_AL_StartSound` + `S_AL_UpdateEntityPosition` [CUSTOM]
+
+When the cgame calls `trap_S_StartSound(cent->lerpOrigin, cg.clientNum, ...)` or
+`trap_S_UpdateEntityPosition(cg.clientNum, cent->lerpOrigin)` for the local
+player entity, the supplied origin comes from the network trajectory evaluated at
+`cg.time`.  With **Patch 1** (TR_LINEAR) active or `sv_bufferMs` delaying the
+snapshot `trBase`, this position lags the client-predicted eye position by an
+amount proportional to velocity — typically 5–20 game units at normal running
+speed with a 50 ms buffer.
+
+The engine corrects this in two places, strictly for the listener entity only
+(all other entities — other players, world, bots — continue to use the
+cgame-supplied origin):
+
+1. **`S_AL_StartSound`** (`else if (origin)` branch): when
+   `entnum == s_al_listener_entnum` and an explicit origin is provided,
+   substitute `s_al_listener_origin` instead of the cgame-supplied origin.
+   `s_al_listener_origin` is set by `S_AL_Respatialize` from the Pmove-predicted
+   eye position every frame and is always current.
+
+2. **`S_AL_UpdateEntityPosition`**: when called for the listener entity,
+   `effectiveOrigin` is set to `s_al_listener_origin` before both the entity-
+   origin cache write (`s_al_entity_origins[entityNum]`) and the active-source
+   position update loop.  This prevents a late-frame `UpdateEntityPosition` call
+   from overwriting the cache value written earlier by `Respatialize`.
+
+This fix is config-independent: it applies equally on vanilla servers (no
+`sv_bufferMs`), custom servers with `sv_smoothClients`, and any QVM patch
+level, because `s_al_listener_origin` is derived from client-side prediction,
+not from the network.
 
 #### Dynamic acoustic environment (`s_alDynamicReverb 1`)
 

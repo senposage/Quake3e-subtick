@@ -937,6 +937,21 @@ static void SV_BuildCommonSnapshot( void )
 						es->pos.trTime = usedBuffer ? sv.time - bufMs : sv.time;
 					}
 				}
+			} else {
+				/* Anchor trTime for TR_INTERPOLATE client entities even when
+				   sv_smoothClients and sv_extrapolate are both disabled.
+				   The BG_EvaluateTrajectory Patch 1 (TR_INTERPOLATE->TR_LINEAR)
+				   in VM_URT43_CgamePatches needs this: without it the game QVM
+				   never writes pos.trTime for TR_INTERPOLATE entities, leaving
+				   it at 0 or a stale value.  The TR_LINEAR formula then computes
+				     result = trBase + trDelta * (evalTime - 0) / 1000
+				   which produces an enormous dt, teleporting all client entities
+				   to wrong positions every frame and causing weapon / entity
+				   sounds to play at the wrong 3D coordinates (muted / skipped). */
+				entityState_t *es = &svs.snapshotEntities[ index ];
+				if ( es->number < sv.maxclients && es->pos.trType == TR_INTERPOLATE ) {
+					es->pos.trTime = sv.time;
+				}
 			}
 
 			sf->ents[ i ] = &svs.snapshotEntities[ index ];
