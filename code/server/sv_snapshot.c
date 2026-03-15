@@ -919,6 +919,23 @@ static void SV_BuildCommonSnapshot( void )
 							VectorCopy( velocity, es->pos.trDelta );
 						}
 					}
+
+					/* Anchor trTime to the snapshot build time for all entities that
+					   remain TR_INTERPOLATE after Phase 2.
+					   BG_PlayerStateToEntityState (game QVM) never writes pos.trTime for
+					   TR_INTERPOLATE entities -- only TR_LINEAR/TR_GRAVITY etc. set it --
+					   so it stays at 0 or a stale game time.  The TR_LINEAR formula used
+					   by Patch 1 computes:
+					     result = trBase + trDelta * (evalTime - trTime) / 1000
+					   With trTime == 0 that dt is enormous, teleporting entities every
+					   frame regardless of network conditions.  With trTime anchored here:
+					     - cgame evaluates snap at snap.serverTime  -> dt = 0 -> trBase
+					       (normal interpolation preserved, identical to before)
+					     - cgame evaluates snap at cg.time during extrapolation
+					       -> dt = cg.time - serverTime -> correct forward extrapolation */
+					if ( es->pos.trType == TR_INTERPOLATE ) {
+						es->pos.trTime = usedBuffer ? sv.time - bufMs : sv.time;
+					}
 				}
 			}
 

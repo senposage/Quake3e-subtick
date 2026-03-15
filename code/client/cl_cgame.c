@@ -978,7 +978,11 @@ void CL_InitCGame( void ) {
 	// VM_ReplaceInstructions sees the correct default value.
 	// CVAR_PROTECTED prevents the QVM from disabling its own patches.
 	// Bitmask: bit0=frameInterpolation clamp, bit1=nextSnap null crash fix,
-	//          bit2=TR_INTERPOLATE velocity extrapolation
+	//          bit2=TR_INTERPOLATE velocity extrapolation.
+	// All three patches are safe: sv_snapshot.c now anchors es->pos.trTime to
+	// sv.time for every TR_INTERPOLATE snapshot entity so the TR_LINEAR formula
+	// used by bit2 produces dt≈0 during normal interpolation (identical to the
+	// original VectorCopy path) and correct forward extrapolation otherwise.
 	Cvar_Get( "cl_urt43cgPatches", "7", CVAR_ARCHIVE | CVAR_PROTECTED );
 
 	cgvm = VM_Create( VM_CGAME, CL_CgameSystemCalls, CL_DllSyscall, interpret );

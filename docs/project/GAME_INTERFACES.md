@@ -386,6 +386,10 @@ typedef struct {
 // TR_GRAVITY: result = trBase + trDelta * dt - 0.5 * gravity * dt²
 // TR_SINE: result = trBase + sin(dt/trDuration * 2π) * trDelta
 // TR_INTERPOLATE/TR_STATIONARY: result = trBase (client does the lerp)
+// Note: in the URT43 cgame with cl_urt43cgPatches bit 2 enabled, TR_INTERPOLATE
+// is redirected to the TR_LINEAR handler. sv_snapshot.c anchors pos.trTime = sv.time
+// for every TR_INTERPOLATE snapshot entity so that dt ≈ 0 at snap.serverTime
+// (preserving normal interpolation) and dt > 0 at cg.time (forward extrapolation).
 ```
 
 ### Pmove — Player Movement

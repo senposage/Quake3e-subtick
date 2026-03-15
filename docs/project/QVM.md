@@ -284,13 +284,13 @@ This is the engine-level support for the Ghidra binary patches described in `arc
 
 ### UrbanTerror 4.3 cgame patches (`cl_urt43cgPatches`)
 
-The three patches from the Ghidra analysis are now applied automatically at runtime when the official UrbanTerror 4.3 `cgame.qvm` is loaded (CRC32 `0x1289DB6B`, `instructionCount` 258563, `exactDataLength` 38055548). All patches are gated behind the **`cl_urt43cgPatches`** bitmask cvar (default `7` = all enabled, `CVAR_ARCHIVE | CVAR_PROTECTED` so the QVM cannot override it).
+The three patches from the Ghidra analysis are now applied automatically at runtime when the official UrbanTerror 4.3 `cgame.qvm` is loaded (CRC32 `0x1289DB6B`, `instructionCount` 258563, `exactDataLength` 38055548). All patches are gated behind the **`cl_urt43cgPatches`** bitmask cvar (default `7` = all bits enabled, `CVAR_ARCHIVE | CVAR_PROTECTED` so the QVM cannot override it).
 
-| Bit | Name | What it fixes |
-|---|---|---|
-| 0 (1) | **Patch 2 — frameInterpolation clamp** | The existing QVM clamp is wrong: lower threshold is `0.1f` (should be `0.0f`) and upper clamped value is `~0.99f` (should be `1.0f`). Fixes two constants at instruction indices `0xa688` and `0xa692`. |
-| 1 (2) | **Patch 3 — nextSnap NULL crash fix** | `CG_InterpolateEntityPosition` calls `CG_Error()` (fatal crash) when `cg.nextSnap == NULL` during lag spikes. Replaces the 5-instruction error path with a `CONST`+`JUMP` early return to the function's `PUSH`+`LEAVE` (instr `0x1594d`). |
-| 2 (4) | **Patch 1 — TR_INTERPOLATE velocity extrapolation** | The BG_EvaluateTrajectory switch-table entry for `trType == TR_INTERPOLATE` (case 1, data addr `0xdbb4`) points to the `TR_STATIONARY` handler (VectorCopy only). Redirects it to the `TR_LINEAR` handler (`instr 0x3ab15`) so velocity-based forward extrapolation is used when the next snapshot is unavailable. |
+| Bit | Name | What it fixes | Default |
+|---|---|---|---|
+| 0 (1) | **Patch 2 — frameInterpolation clamp** | The existing QVM clamp is wrong: lower threshold is `0.1f` (should be `0.0f`) and upper clamped value is `~0.99f` (should be `1.0f`). Fixes two constants at instruction indices `0xa688` and `0xa692`. | ✅ enabled |
+| 1 (2) | **Patch 3 — nextSnap NULL crash fix** | `CG_InterpolateEntityPosition` calls `CG_Error()` (fatal crash) when `cg.nextSnap == NULL` during lag spikes. Replaces the 5-instruction error path with a `CONST`+`JUMP` early return to the function's `PUSH`+`LEAVE` (instr `0x1594d`). | ✅ enabled |
+| 2 (4) | **Patch 1 — TR_INTERPOLATE velocity extrapolation** | The BG_EvaluateTrajectory switch-table entry for `trType == TR_INTERPOLATE` (case 1, data addr `0xdbb4`) points to the `TR_STATIONARY` handler (VectorCopy only). Redirects it to the `TR_LINEAR` handler (`instr 0x3ab15`) so velocity-based forward extrapolation is used when the next snapshot is unavailable. Safe because the server now anchors `pos.trTime = sv.time` for every `TR_INTERPOLATE` snapshot entity — the TR_LINEAR formula produces dt ≈ 0 during normal interpolation (identical to the original VectorCopy path) and correct forward extrapolation otherwise. | ✅ enabled |
 
 The function `VM_URT43_CgamePatches()` in `vm.c` prints verbose diagnostic output for every patch attempt (instruction opcodes and values before patching, applied/skipped result) to aid debugging if a future QVM version changes the binary layout.
 
