@@ -98,8 +98,10 @@ the moment of disconnect.
 
 With `cl_noOOBDisconnect 1` (default) these are **two separate events**:
 - `OOB:DISCONNECT honored=0` — packet arrived, was logged, was **ignored**
-- No `DISCONNECT` line follows unless the server also stops sending snapshots
-  and `cl_timeout` fires
+- `clc.lastPacketTime` is updated (the OOB packet counts as a sign of server
+  liveness), so the `cl_timeout` clock runs from the last packet of *any* kind
+- No `DISCONNECT` line follows unless the server stops sending *all* packets
+  (including OOB) and `cl_timeout` fires
 
 With `cl_noOOBDisconnect 0` they fire in sequence:
 - `OOB:DISCONNECT honored=1` — packet arrived

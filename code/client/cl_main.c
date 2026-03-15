@@ -3001,11 +3001,15 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 			if ( cls.state >= CA_CONNECTED ) {
 				if ( cl_noOOBDisconnect->integer ) {
 					// Treat as a spurious or undocumented server-side action:
-					// log it for diagnostics but do NOT honour it.  The normal
-					// cl_timeout mechanism will clean up if the server genuinely
-					// stops sending packets.
+					// log it for diagnostics but do NOT honour it.  Return qtrue
+					// so that CL_PacketEvent updates clc.lastPacketTime — the server
+					// is still sending us packets, so the cl_timeout clock must not
+					// run from the last in-band packet.  The normal cl_timeout
+					// mechanism will clean up once the server stops sending
+					// *any* packets (including these OOB disconnects).
 					SCR_LogOOBDisconnect( qfalse );
 					Com_Printf( S_COLOR_YELLOW "WARNING: received OOB disconnect from server — ignored (cl_noOOBDisconnect 1)\n" );
+					return qtrue;
 				} else {
 					SCR_LogOOBDisconnect( qtrue );
 					SCR_LogDisconnect( "OOB disconnect from server" );
