@@ -136,6 +136,15 @@ static void SV_SetBrushModel( sharedEntity_t *ent, const char *name ) {
 
 	ent->r.contents = -1;		// we don't know exactly what is in the brushes
 
+	if ( sv_debugEntities && sv_debugEntities->integer >= 2 ) {
+		Com_Printf( "^3[SV_SetBrushModel] ^7ent=%i model=%s "
+			"mins=(%.0f %.0f %.0f) maxs=(%.0f %.0f %.0f) contents=0x%x\n",
+			ent->s.number, name,
+			mins[0], mins[1], mins[2],
+			maxs[0], maxs[1], maxs[2],
+			ent->r.contents );
+	}
+
 	SV_LinkEntity( ent );		// FIXME: remove
 }
 

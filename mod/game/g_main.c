@@ -84,6 +84,9 @@ vmCvar_t   g_knockback;
 vmCvar_t   g_forcerespawn;
 vmCvar_t   g_inactivity;
 vmCvar_t   g_debugMove;
+vmCvar_t   g_debugEntities;
+vmCvar_t   g_debugDoors;
+vmCvar_t   g_debugTrace;
 vmCvar_t   g_motd;
 vmCvar_t   g_synchronousClients;
 vmCvar_t   g_warmup;
@@ -271,6 +274,9 @@ cvarTable_t  gameCvarTable[] = {
     { &g_forcerespawn,             "g_forcerespawn",              "20",                   0,                                                  0, qtrue     },
     { &g_inactivity,               "g_inactivity",                "0",                                        0,                              0, qtrue     },
     { &g_debugMove,                "g_debugMove",                 "0",                                        0,                              0, qfalse    },
+    { &g_debugEntities,            "g_debugEntities",             "0",                                        0,                              0, qfalse    },
+    { &g_debugDoors,               "g_debugDoors",                "0",                                        0,                              0, qfalse    },
+    { &g_debugTrace,               "g_debugTrace",                "0",                                        0,                              0, qfalse    },
     { &g_motd,                     "g_motd",                      "Urban Terror, Presented by FrozenSand",    0,                              0, qfalse    },
 
     { &g_blood,                    "com_blood",                   "1",                    0,                                                  0, qfalse    },

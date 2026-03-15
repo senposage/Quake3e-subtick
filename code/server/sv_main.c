@@ -37,6 +37,7 @@ cvar_t	*sv_antiwarp;			// engine-side antiwarp (replaces QVM g_antiwarp)
 cvar_t	*sv_antiwarpTol;		// antiwarp tolerance in ms (0=auto)
 cvar_t	*sv_antiwarpExtra;		// extrapolation window for mode 2 (ms, 0=auto=awTol)
 cvar_t	*sv_antiwarpDecay;		// decay duration for mode 2 (ms)
+cvar_t	*sv_debugEntities;		// log entity brush-model setup; 1=unknown, 2=all
 cvar_t	*sv_bufferMs;			// position delay via ring buffer (ms, 0=off, <0=auto)
 cvar_t	*sv_velSmooth;			// velocity smoothing window (ms, 0=off)
 cvar_t	*sv_extrapolate;		// legacy position prediction (0=off)

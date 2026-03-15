@@ -819,6 +819,13 @@ void SV_Init( void )
 	sv_antiwarpDecay = Cvar_Get ("sv_antiwarpDecay", "150", CVAR_ARCHIVE );
 	Cvar_SetDescription( sv_antiwarpDecay, "Decay duration (ms) for mode 2. Inputs linearly fade to zero." );
 
+	sv_debugEntities = Cvar_Get( "sv_debugEntities", "0", 0 );
+	Cvar_SetDescription( sv_debugEntities,
+		"Debug entity brush model setup.\n"
+		" 1 = log entities with no spawn function (unknown classnames)\n"
+		" 2 = log all entity brush model assignments and contents flags\n"
+		" 3 = verbose: log every SV_LinkEntity call" );
+
 	sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
 	Cvar_SetDescription( sv_bufferMs, "Position delay (ms) via ring buffer. 0=off, <0=auto (one snapshot interval)." );
 

@@ -889,20 +889,21 @@ gitem_t  bg_itemlist[] = {
 	},
 
 
+	/* FR-F1 — bolt-action sniper rifle, new in 4.3 */
 	{
-		"ut_weapon_dual_beretta",
+		"ut_weapon_frf1",
 		"sound/misc/w_pkup.wav",
 		{
-			"models/weapons2/beretta/beretta.md3",
-			"models/weapons2/d-beretta/beretta_hold.md3",
+			"models/weapons2/frf1/frf1.md3",
+			"models/weapons2/frf1/frf1_hold.md3",
 			0, 0
 		},
-		"icons/weapons/beretta",
-		"icons/ammo/beretta",
-		"Dual Beretta 92Gs",
+		"icons/weapons/frf1",
+		"icons/ammo/frf1",
+		"FR-F1",
 		0,
 		IT_WEAPON,
-		UT_WP_DUAL_BERETTA,
+		UT_WP_FRF1,
 		"",
 		"",
 
@@ -989,6 +990,27 @@ gitem_t  bg_itemlist[] = {
 		PW_NEUTRALFLAG,
 	},
 */
+
+	/* FR-F1 — bolt-action sniper rifle, new in 4.3 */
+	{
+		"ut_weapon_frf1",
+		"sound/misc/w_pkup.wav",
+		{
+			"models/weapons2/frf1/frf1.md3",
+			"models/weapons2/frf1/frf1_hold.md3",
+			0, 0
+		},
+		"icons/weapons/frf1",
+		"icons/ammo/frf1",
+		"FR-F1",
+		0,
+		IT_WEAPON,
+		UT_WP_FRF1,
+		"",
+		"",
+
+		0,
+	},
 
 	// end of list marker
 	{ NULL}

@@ -350,6 +350,7 @@ extern	cvar_t	*sv_antiwarp;
 extern	cvar_t	*sv_antiwarpTol;
 extern	cvar_t	*sv_antiwarpExtra;
 extern	cvar_t	*sv_antiwarpDecay;
+extern	cvar_t	*sv_debugEntities;  /* log entity brush-model setup and link ops */
 extern	cvar_t	*sv_bufferMs;
 extern	cvar_t	*sv_velSmooth;
 extern	cvar_t	*sv_extrapolate;
