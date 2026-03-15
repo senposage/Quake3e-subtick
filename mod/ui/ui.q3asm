@@ -1,0 +1,20 @@
+-o "ui"
+ui_main
+../ui/ui_syscalls
+../common/q_cvars
+../common/c_cvars
+../common/c_bmalloc
+../common/c_bysize
+../common/c_players
+../common/c_weapons
+ui_atoms
+ui_players
+ui_shared
+ui_gameinfo
+bg_misc
+../game/bg_lib
+bg_gear
+../game/q_math
+../game/q_shared
+../common/zdecrypt
+../common/zzz_last

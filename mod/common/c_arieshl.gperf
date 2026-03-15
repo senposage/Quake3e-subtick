@@ -1,0 +1,44 @@
+%struct-type
+%{
+#ifndef Q3_VM
+#include <string.h>
+#else
+#include "../game/q_shared.h"
+#endif
+#include "c_arieshl.h"
+
+char *c_ariesHitLocationNames[HL_MAX] = {
+    "Unknown",
+    "Head",
+    "Helmet",
+    "Torso",
+    "Vest",
+    "Left Arm",
+    "Right Arm",
+    "Groin",
+    "Butt",
+    "Left Upper Leg",
+    "Right Upper Leg",
+    "Left Lower Leg",
+    "Right Lower Leg",
+    "Left Foot",
+    "Right Foot"
+};
+
+%}
+struct ariesHitLocationMap_s;
+%%
+h_head,HL_HEAD
+g_helmet,HL_HELMET
+u_torso,HL_TORSO
+g_vest,HL_VEST
+u_arml,HL_ARML
+u_armr,HL_ARMR
+l_groin,HL_GROIN
+l_butt,HL_BUTT
+l_lthigh,HL_LEGUL
+l_rthigh,HL_LEGUR
+l_lleg,HL_LEGLL
+l_rleg,HL_LEGLR
+l_lfoot,HL_FOOTL
+l_rfoot,HL_FOOTR
