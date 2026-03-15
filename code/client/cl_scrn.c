@@ -628,9 +628,16 @@ void SCR_NetMonitorAddSnapInterval( int measured, int expected ) {
 // Per-connection cap-hit total; resets in SCR_LogConnectInfo on each new gamestate.
 static int netMonCapHitsSession;
 
+// Per-connection count of OOB disconnect packets that were ignored.
+static int netMonOOBIgnoredSession;
+
 void SCR_NetMonitorAddCapHit( void ) {
 	netMonCapHits++;
 	netMonCapHitsSession++;
+}
+
+void SCR_OOBIgnoredIncrement( void ) {
+	netMonOOBIgnoredSession++;
 }
 
 void SCR_NetMonitorAddExtrap( void ) {
@@ -779,9 +786,10 @@ void SCR_LogConnectInfo( const char *svFps, const char *snapFps,
 	qtime_t t;
 	char line[256];
 
-	// Always reset the session cap counter so SCR_LogDisconnect reports
-	// accurate per-connection totals even when cl_netlog is toggled mid-session.
-	netMonCapHitsSession = 0;
+	// Always reset per-session counters so SCR_LogDisconnect reports
+	// accurate totals even when cl_netlog is toggled mid-session.
+	netMonCapHitsSession    = 0;
+	netMonOOBIgnoredSession = 0;
 
 	if ( !cl_netlog || !cl_netlog->integer )
 		return;
@@ -970,6 +978,138 @@ void SCR_LogCapRelease( int drift ) {
 	SCR_WriteLog( line );
 }
 
+
+/*
+========================
+SCR_LogOOBPacket
+
+Called from CL_ConnectionlessPacket whenever a connectionless (OOB) packet
+arrives from the currently connected server.  Gives a full trace of every
+OOB command the server sends so we can see what leads up to a disconnect.
+Level 2.
+
+Fields:
+  cmd  — tokenised command token (first word of the OOB string)
+========================
+*/
+void SCR_LogOOBPacket( const char *cmd ) {
+	qtime_t t;
+	char    line[128];
+
+	if ( !cl_netlog || cl_netlog->integer < 2 )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] OOB:PACKET  cmd='%s'\n",
+		t.tm_hour, t.tm_min, t.tm_sec, cmd );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogOOBDisconnect
+
+Called every time an OOB "disconnect" packet arrives from the server,
+regardless of whether it is honoured or ignored.  This is a dedicated
+entry separate from SCR_LogDisconnect so we can distinguish the *arrival*
+of the packet from the actual engine-level disconnect action, and so we
+can correlate it with the sequence of events in the surrounding log.
+Level 1.
+
+Fields:
+  honored      — 1 if Com_Error was called; 0 if packet was ignored
+  snapT        — cl.snap.serverTime
+  svrT         — cl.serverTime
+  ping         — cl.snap.ping
+  relSeq       — clc.reliableSequence  (last reliable cmd we sent)
+  relAck       — clc.reliableAcknowledge (last ack from server)
+  relWnd       — relSeq - relAck (fill level of our reliable window)
+  silenceMs    — ms since last packet from server at arrival time
+  sessionCount — running total of OOB disconnects seen this session
+========================
+*/
+void SCR_LogOOBDisconnect( qboolean honored ) {
+	qtime_t t;
+	char    line[320];
+	int     silenceMs, relWnd;
+
+	silenceMs = ( clc.lastPacketTime > 0 ) ? ( cls.realtime - clc.lastPacketTime ) : -1;
+	relWnd    = clc.reliableSequence - clc.reliableAcknowledge;
+
+	/* Count first so both the console print and the log file see the same value. */
+	if ( !honored )
+		netMonOOBIgnoredSession++;
+
+	/* Always print to console regardless of cl_netlog. */
+	Com_Printf( S_COLOR_YELLOW
+		"[OOB:DISCONNECT] honored=%d  snapT=%d  ping=%d"
+		"  relSeq=%d  relAck=%d  relWnd=%d  silenceMs=%d  sessionCount=%d\n",
+		(int)honored,
+		cl.snap.serverTime, cl.snap.ping,
+		clc.reliableSequence, clc.reliableAcknowledge, relWnd,
+		silenceMs, netMonOOBIgnoredSession );
+
+	if ( !cl_netlog || !cl_netlog->integer )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] OOB:DISCONNECT"
+		"  honored=%d"
+		"  snapT=%d  svrT=%d  ping=%d"
+		"  relSeq=%d  relAck=%d  relWnd=%d"
+		"  silenceMs=%d  sessionCount=%d\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		(int)honored,
+		cl.snap.serverTime, cl.serverTime, cl.snap.ping,
+		clc.reliableSequence, clc.reliableAcknowledge, relWnd,
+		silenceMs, netMonOOBIgnoredSession );
+	SCR_WriteLog( line );
+}
+
+
+/*
+========================
+SCR_LogUserinfoSend
+
+Called from CL_CheckUserinfo every time a "userinfo" reliable command is
+sent to the server during an active session (i.e. after the initial
+connection handshake).  Logs the auth-relevant and identity fields so we
+can correlate userinfo changes with server reactions (e.g. auth re-checks
+that may precede spurious disconnects).  Level 2.
+
+Fields:
+  name   — player name
+  authc  — auth-code field (should be "0" in this fork; server may react)
+  authl  — auth-level field
+  snaps  — requested snapshot rate
+========================
+*/
+void SCR_LogUserinfoSend( const char *info ) {
+	qtime_t t;
+	char    line[384];
+
+	if ( !cl_netlog || cl_netlog->integer < 2 )
+		return;
+
+	SCR_OpenNetLog();
+	Com_RealTime( &t );
+	Com_sprintf( line, sizeof(line),
+		"[%02d:%02d:%02d] USERINFO:SEND"
+		"  name=\"%s\"  authc=\"%s\"  authl=\"%s\"  snaps=\"%s\"\n",
+		t.tm_hour, t.tm_min, t.tm_sec,
+		Info_ValueForKey( info, "name"  ),
+		Info_ValueForKey( info, "authc" ),
+		Info_ValueForKey( info, "authl" ),
+		Info_ValueForKey( info, "snaps" ) );
+	SCR_WriteLog( line );
+}
+
+
 /*
 ========================
 SCR_LogDisconnect
@@ -984,37 +1124,41 @@ Fields logged:
   snapT         - cl.snap.serverTime (last received snapshot time)
   svrT          - cl.serverTime (computed cgame time at disconnect)
   dT            - cl.serverTimeDelta
-  ping          - cl.snap.ping (999 = server-side negative-ping kick suspected)
+  ping          - cl.snap.ping (note: can be 999 due to snap-timing calculation
+                  failure, not necessarily a server-side negative-ping kick)
   cmdSeq        - clc.serverCommandSequence (last server command received)
   relSeq        - clc.reliableSequence (last client reliable command sent)
   relAck        - clc.reliableAcknowledge (last client cmd acked by server)
+  relWnd        - relSeq - relAck (reliable window fill level; MAX=64)
   snapMs        - cl.snapshotMsec (EMA of snapshot interval)
   vanilla       - cl.vanillaServer (1 = server lacks sv_snapshotFps)
   forbids       - cl.serverForbidsAdaptiveTiming
   timeout       - cl.timeoutcount
   silenceMs     - ms since last packet from server
   capHits       - cap firings since last gamestate (cl.serverTime was capped)
+  oobIgnored    - OOB disconnect packets ignored this session (cl_noOOBDisconnect)
 ========================
 */
 void SCR_LogDisconnect( const char *reason ) {
 	qtime_t t;
-	char line[640];
-	int elapsed;
+	char line[768];
+	int elapsed, relWnd;
 
 	elapsed = ( clc.lastPacketTime > 0 ) ? ( cls.realtime - clc.lastPacketTime ) : -1;
+	relWnd  = clc.reliableSequence - clc.reliableAcknowledge;
 
 	/* Always print context to console so it is visible even without cl_netlog. */
 	Com_Printf( S_COLOR_YELLOW
 		"[DISCONNECT TRACE] reason=\"%s\""
 		" snapT=%d svrT=%d dT=%d ping=%d"
-		" cmdSeq=%d relSeq=%d relAck=%d"
+		" cmdSeq=%d relSeq=%d relAck=%d relWnd=%d"
 		" snapMs=%d vanilla=%d forbids=%d"
-		" timeout=%d silence=%dms caps=%d\n",
+		" timeout=%d silence=%dms caps=%d oobIgnored=%d\n",
 		reason ? reason : "(none)",
 		cl.snap.serverTime, cl.serverTime, cl.serverTimeDelta, cl.snap.ping,
-		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge,
+		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge, relWnd,
 		cl.snapshotMsec, (int)cl.vanillaServer, (int)cl.serverForbidsAdaptiveTiming,
-		cl.timeoutcount, elapsed, netMonCapHitsSession );
+		cl.timeoutcount, elapsed, netMonCapHitsSession, netMonOOBIgnoredSession );
 
 	if ( !cl_netlog || !cl_netlog->integer )
 		return;
@@ -1024,15 +1168,15 @@ void SCR_LogDisconnect( const char *reason ) {
 	Com_sprintf( line, sizeof(line),
 		"[%02d:%02d:%02d] DISCONNECT  reason=\"%s\"\n"
 		"  snapT=%d  svrT=%d  dT=%d  ping=%d\n"
-		"  cmdSeq=%d  relSeq=%d  relAck=%d\n"
+		"  cmdSeq=%d  relSeq=%d  relAck=%d  relWnd=%d\n"
 		"  snapMs=%d  vanilla=%d  forbidsAdaptive=%d\n"
-		"  timeout=%d  silenceMs=%d  capHits=%d\n",
+		"  timeout=%d  silenceMs=%d  capHits=%d  oobIgnored=%d\n",
 		t.tm_hour, t.tm_min, t.tm_sec,
 		reason ? reason : "(none)",
 		cl.snap.serverTime, cl.serverTime, cl.serverTimeDelta, cl.snap.ping,
-		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge,
+		clc.serverCommandSequence, clc.reliableSequence, clc.reliableAcknowledge, relWnd,
 		cl.snapshotMsec, (int)cl.vanillaServer, (int)cl.serverForbidsAdaptiveTiming,
-		cl.timeoutcount, elapsed, netMonCapHitsSession );
+		cl.timeoutcount, elapsed, netMonCapHitsSession, netMonOOBIgnoredSession );
 	SCR_WriteLog( line );
 }
 

@@ -287,9 +287,19 @@ rescan:
 	if ( !strcmp( cmd, "disconnect" ) ) {
 		// https://zerowing.idsoftware.com/bugzilla/show_bug.cgi?id=552
 		// allow server to indicate why they were disconnected
-		SCR_LogDisconnect( argc >= 2 ? Cmd_Argv( 1 ) : "(no reason)" );
+		const char *reason = ( argc >= 2 ) ? Cmd_Argv( 1 ) : "(no reason)";
+		/* Log the in-band disconnect before acting on it so we always have
+		   a record of what the server sent even if the reason string helps
+		   trace bad-faith server behaviour. */
+		SCR_LogNote( "SVCMD:DISCONNECT",
+			va( "in-band reliable disconnect: reason=\"%s\""
+				"  cmdSeq=%d  relSeq=%d  relAck=%d",
+				reason,
+				clc.serverCommandSequence,
+				clc.reliableSequence, clc.reliableAcknowledge ) );
+		SCR_LogDisconnect( reason );
 		if ( argc >= 2 )
-			Com_Error( ERR_SERVERDISCONNECT, "Server disconnected - %s", Cmd_Argv( 1 ) );
+			Com_Error( ERR_SERVERDISCONNECT, "Server disconnected - %s", reason );
 		else
 			Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
 	}
@@ -496,10 +506,45 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		Cvar_Update( VMA(1), cgvm->privateFlag );
 		return 0;
 	case CG_CVAR_SET:
-		// Prevent QVM from overriding snaps and cg_smoothClients.
-		// Log every interception so we can see what the vanilla QVM is requesting.
-		if ( Q_stricmp( (const char *)VMA(1), "snaps" ) == 0
-			|| Q_stricmp( (const char *)VMA(1), "cg_smoothClients" ) == 0 ) {
+		// Prevent QVM from overriding cvars that could be weaponised by a
+		// malicious or buggy server to sabotage the client connection or
+		// degrade gameplay.  Every interception is logged so we can see
+		// what the vanilla QVM is attempting.
+		//
+		// Unconditionally intercepted (silently ignored):
+		//   snaps           — server controls delivery rate anyway; wrong value
+		//                     here breaks our snapshot-interval logic
+		//   cg_smoothClients — purely client-side rendering preference
+		//   net_qport       — changing port mid-session breaks the netchan
+		//   rate=0          — zero rate causes server to stop sending snapshots
+		//   net_dropsim     — simulates packet drops on outgoing traffic;
+		//                     a server setting this would cause us to shed our
+		//                     own packets, making us appear to time out
+		//   cl_packetdelay  — adds artificial send latency; could push ping
+		//                     above sv_maxPing and trigger a server ping-kick
+		//   cl_packetdup    — controls redundant command retransmission;
+		//                     a server zeroing this removes loss mitigation,
+		//                     while a server setting it high floods the server
+		//   cl_timeout      — lowering this lets the server trigger our own
+		//                     timeout watchdog at will
+		//   in_mouse        — disabling mouse input is pure sabotage
+		//   cl_noOOBDisconnect — already CVAR_PROTECTED, but explicit here
+		//                        for clarity: a server must not be able to
+		//                        disarm our OOB-disconnect guard
+		//
+		// Also blocked by Cvar_SetSafe for CVAR_PROTECTED/PRIVATE cvars
+		// (e.g. com_maxfps, cl_timeNudge) — those are logged as QVM:SET_BLOCKED.
+		if ( Q_stricmp( (const char *)VMA(1), "snaps"            ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "cg_smoothClients" ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "net_qport"        ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "net_dropsim"      ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "cl_packetdelay"   ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "cl_packetdup"     ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "cl_timeout"       ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "in_mouse"         ) == 0
+			|| Q_stricmp( (const char *)VMA(1), "cl_noOOBDisconnect" ) == 0
+			|| ( Q_stricmp( (const char *)VMA(1), "rate" ) == 0
+				&& atoi( (const char *)VMA(2) ) <= 0 ) ) {
 			SCR_LogNote( "QVM:SET_INTERCEPTED",
 				va( "\"%s\" = \"%s\" (silently ignored)",
 					(const char *)VMA(1), (const char *)VMA(2) ) );
@@ -551,6 +596,38 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 
 	case CG_SENDCONSOLECOMMAND: {
 		const char *cmd = VMA(1);
+
+		/* Log every console command the QVM injects so we have a full trace.
+		   At level 1 flag any command that could force a disconnect or quit;
+		   at level 2 log all of them for completeness. */
+		{
+			char   tok[64];
+			size_t i = 0;
+			/* Extract the first token (command name) from the string. */
+			while ( i < sizeof(tok) - 1 && cmd[i] && cmd[i] != ' '
+				&& cmd[i] != '\t' && cmd[i] != '\n' && cmd[i] != ';' ) {
+				tok[i] = cmd[i]; i++;
+			}
+			tok[i] = '\0';
+
+			if ( Q_stricmp( tok, "disconnect" ) == 0
+				|| Q_stricmp( tok, "quit"       ) == 0
+				|| Q_stricmp( tok, "exit"       ) == 0
+				|| Q_stricmp( tok, "exec"       ) == 0 ) {
+				/* Dangerous: log at level 1 so it always appears in the log.
+				   Block execution — the server should not be able to force
+				   these through the cgame console-command channel. */
+				SCR_LogNote( "QVM:CONSOLECMD_BLOCKED",
+					va( "dangerous cmd blocked: \"%s\"", cmd ) );
+				Com_Printf( S_COLOR_YELLOW
+					"WARNING: server tried to inject dangerous console command"
+					" via cgame — blocked: \"%s\"\n", cmd );
+				return 0;
+			}
+
+			SCR_LogNote( "QVM:CONSOLECMD", va( "\"%s\"", cmd ) );
+		}
+
 		Cbuf_NestedAdd( cmd );
 		return 0;
 	}

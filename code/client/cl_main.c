@@ -36,6 +36,7 @@ cvar_t	*rcon_client_password;
 cvar_t	*rconAddress;
 
 cvar_t	*cl_timeout;
+cvar_t	*cl_noOOBDisconnect;
 cvar_t	*cl_autoNudge;
 cvar_t	*cl_timeNudge;
 cvar_t	*cl_showTimeDelta;
@@ -2831,6 +2832,12 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 		Com_Printf( "CL packet %s: %s\n", NET_AdrToStringwPort( from ), c );
 	}
 
+	/* Log every OOB packet that originates from our connected server so the
+	   netlog captures whatever the server sends immediately before a disconnect. */
+	if ( NET_CompareAdr( from, &clc.serverAddress ) && cls.state >= CA_CONNECTED ) {
+		SCR_LogOOBPacket( c );
+	}
+
 	// challenge from the server we are connecting to
 	if ( !Q_stricmp(c, "challengeResponse" ) ) {
 
@@ -2992,8 +2999,18 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 	if ( !Q_stricmp( c, "disconnect" ) ) {
 		if ( NET_CompareAdr( from, &clc.serverAddress ) ) {
 			if ( cls.state >= CA_CONNECTED ) {
-				SCR_LogDisconnect( "OOB disconnect from server" );
-				Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
+				if ( cl_noOOBDisconnect->integer ) {
+					// Treat as a spurious or undocumented server-side action:
+					// log it for diagnostics but do NOT honour it.  The normal
+					// cl_timeout mechanism will clean up if the server genuinely
+					// stops sending packets.
+					SCR_LogOOBDisconnect( qfalse );
+					Com_Printf( S_COLOR_YELLOW "WARNING: received OOB disconnect from server — ignored (cl_noOOBDisconnect 1)\n" );
+				} else {
+					SCR_LogOOBDisconnect( qtrue );
+					SCR_LogDisconnect( "OOB disconnect from server" );
+					Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
+				}
 			}
 		}
 		return qfalse;
@@ -3191,6 +3208,7 @@ static void CL_CheckUserinfo( void ) {
 	{
 		qboolean infoTruncated = qfalse;
 		const char *info;
+		int relWnd;
 
 		cvar_modifiedFlags &= ~CVAR_USERINFO;
 
@@ -3198,6 +3216,19 @@ static void CL_CheckUserinfo( void ) {
 		if ( strlen( info ) > MAX_USERINFO_LENGTH || infoTruncated ) {
 			Com_Printf( S_COLOR_YELLOW "WARNING: oversize userinfo, you might be not able to play on remote server!\n" );
 		}
+
+		/* Warn if our reliable send window is more than half full; the server
+		   will drop us with "reliable overflow" if it reaches MAX (64). */
+		relWnd = clc.reliableSequence - clc.reliableAcknowledge;
+		if ( relWnd >= MAX_RELIABLE_COMMANDS / 2 ) {
+			SCR_LogNote( "WARN:RELWND",
+				va( "reliable window at %d/%d before userinfo send",
+					relWnd, MAX_RELIABLE_COMMANDS ) );
+		}
+
+		/* Log the userinfo content at level 2 so we can correlate sends
+		   with any server reactions (e.g. auth re-checks, kicks). */
+		SCR_LogUserinfoSend( info );
 
 		CL_AddReliableCommand( va( "userinfo \"%s\"", info ), qfalse );
 	}
@@ -4168,6 +4199,16 @@ void CL_Init( void ) {
 	cl_timeout = Cvar_Get( "cl_timeout", "200", 0 );
 	Cvar_CheckRange( cl_timeout, "5", NULL, CV_INTEGER );
 	Cvar_SetDescription( cl_timeout, "Duration of receiving nothing from server for client to decide it must be disconnected (in seconds)." );
+
+	cl_noOOBDisconnect = Cvar_Get( "cl_noOOBDisconnect", "1", CVAR_ARCHIVE | CVAR_PROTECTED );
+	Cvar_CheckRange( cl_noOOBDisconnect, "0", "1", CV_INTEGER );
+	Cvar_SetDescription( cl_noOOBDisconnect,
+		"Ignore connectionless 'disconnect' packets sent out-of-band by the server.\n"
+		"  0 - honour the packet immediately (vanilla behaviour)\n"
+		"  1 - log the packet and continue; rely on cl_timeout for cleanup\n"
+		"Some vanilla URT servers send a spurious OOB disconnect as an undocumented\n"
+		"server-side action with no matching in-band goodbye. Setting this to 1\n"
+		"prevents the client from dropping on those packets." );
 
 	cl_autoNudge = Cvar_Get( "cl_autoNudge", "0", CVAR_TEMP );
 	Cvar_CheckRange( cl_autoNudge, "0", "1", CV_FLOAT );

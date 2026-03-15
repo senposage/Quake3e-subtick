@@ -611,6 +611,10 @@ void	SCR_LogTimeout( int count, int elapsed, int limit );
 void	SCR_LogNote( const char *tag, const char *msg );
 void	SCR_LogPacketDrop( int dropped, int seq );
 void	SCR_LogCapRelease( int drift );
+void	SCR_LogOOBPacket( const char *cmd );
+void	SCR_LogOOBDisconnect( qboolean honored );
+void	SCR_LogUserinfoSend( const char *info );
+void	SCR_OOBIgnoredIncrement( void );
 void	SCR_LogDisconnect( const char *reason );
 void	SCR_CloseNetLog( void );
 
