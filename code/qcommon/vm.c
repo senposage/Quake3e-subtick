@@ -1580,7 +1580,7 @@ __noJTS:
 VM_URT43_CgamePatches
 
 Apply runtime memory patches to the official UrbanTerror 4.3 cgame QVM.
-Gated behind the cl_urt43cgPatches bitmask cvar (default 7 = all enabled):
+Gated behind the cl_urt43cgPatches bitmask cvar (default 3 = bits 0+1 enabled, bit 2 disabled):
 
   Bit 0 (1): Patch 2 — fix frameInterpolation clamp bounds.
              The QVM's existing clamp is wrong: lower threshold is 0.1f instead
@@ -1599,6 +1599,9 @@ Gated behind the cl_urt43cgPatches bitmask cvar (default 7 = all enabled):
              (case 1) currently falls through to TR_STATIONARY (VectorCopy only).
              Redirect it to the TR_LINEAR case so entities use velocity-based
              forward extrapolation when the next snapshot is unavailable.
+             DISABLED by default (not in the default bitmask of 3): when bot
+             velocity data is zero or stale at extrapolation time this causes
+             bots to appear invisible, warp, or teleport.
 
 Target QVM: UrbanTerror 4.3 official binary
   CRC32:            0x1289DB6B

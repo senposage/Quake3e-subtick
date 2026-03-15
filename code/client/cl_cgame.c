@@ -978,8 +978,9 @@ void CL_InitCGame( void ) {
 	// VM_ReplaceInstructions sees the correct default value.
 	// CVAR_PROTECTED prevents the QVM from disabling its own patches.
 	// Bitmask: bit0=frameInterpolation clamp, bit1=nextSnap null crash fix,
-	//          bit2=TR_INTERPOLATE velocity extrapolation
-	Cvar_Get( "cl_urt43cgPatches", "7", CVAR_ARCHIVE | CVAR_PROTECTED );
+	//          bit2=TR_INTERPOLATE velocity extrapolation (disabled by default:
+	//          causes invisible/warping bots when bot velocity data is stale)
+	Cvar_Get( "cl_urt43cgPatches", "3", CVAR_ARCHIVE | CVAR_PROTECTED );
 
 	cgvm = VM_Create( VM_CGAME, CL_CgameSystemCalls, CL_DllSyscall, interpret );
 	if ( !cgvm ) {
