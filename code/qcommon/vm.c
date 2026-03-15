@@ -1580,7 +1580,7 @@ __noJTS:
 VM_URT43_CgamePatches
 
 Apply runtime memory patches to the official UrbanTerror 4.3 cgame QVM.
-Gated behind the cl_urt43cgPatches bitmask cvar (default 3 = bits 0 and 1 enabled):
+Gated behind the cl_urt43cgPatches bitmask cvar (default 7 = all three enabled):
 
   Bit 0 (1): Patch 2 — fix frameInterpolation clamp bounds.
              The QVM's existing clamp is wrong: lower threshold is 0.1f instead
@@ -1599,8 +1599,14 @@ Gated behind the cl_urt43cgPatches bitmask cvar (default 3 = bits 0 and 1 enable
              (case 1) currently falls through to TR_STATIONARY (VectorCopy only).
              Redirect it to the TR_LINEAR case so entities use velocity-based
              forward extrapolation when the next snapshot is unavailable.
-             DISABLED BY DEFAULT: this redirect causes weapon audio glitches
-             (skipped/muted playback).  Set cl_urt43cgPatches 7 to re-enable.
+             Safe because sv_snapshot.c now anchors es->pos.trTime = sv.time for
+             every TR_INTERPOLATE entity: the TR_LINEAR formula returns trBase
+             unchanged during normal snapshot interpolation (dt ≈ 0 at
+             snap.serverTime) and provides correct forward extrapolation when
+             cg.time advances past the last snapshot.  Previously disabled due to
+             stale trTime (BG_PlayerStateToEntityState never writes trTime for
+             TR_INTERPOLATE), which caused (evalTime - 0)/1000 → a huge dt and
+             instant teleportation of all bots and players every frame.
 
 Target QVM: UrbanTerror 4.3 official binary
   CRC32:            0x1289DB6B
