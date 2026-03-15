@@ -2436,7 +2436,29 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
         VectorClear(sndOrigin);
         isLocal = qtrue;
     } else if (origin) {
-        VectorCopy(origin, sndOrigin);
+        /* When the caller supplies an explicit world-space origin for the
+         * listener entity, the cgame may have evaluated it from the network
+         * trajectory (TR_LINEAR / TR_INTERPOLATE), which can lag behind the
+         * engine's client-side prediction — especially when sv_smoothClients
+         * delays the snapshot trBase by sv_bufferMs ms.  At 300 u/s and
+         * 50 ms buffer delay that is a ~15-unit positional error that scales
+         * with velocity, causing own-player sounds (footsteps, weapon fire,
+         * breath) to appear offset behind the listener.
+         *
+         * S_AL_Respatialize is always called with the client's predicted eye
+         * position (from Pmove) and stores it in s_al_listener_origin.  That
+         * is the authoritative ground truth for the local player regardless of
+         * server configuration (vanilla, sv_smoothClients, sv_bufferMs) or
+         * active QVM patch level.  Substitute it here so own-player sounds are
+         * always placed at the correct position.
+         *
+         * Scope: strictly limited to entnum == s_al_listener_entnum.
+         * All other entities — other players, world, bots — use the origin
+         * supplied by the cgame, which is correct for them. */
+        if (entnum == s_al_listener_entnum && s_al_listener_entnum >= 0)
+            VectorCopy(s_al_listener_origin, sndOrigin);
+        else
+            VectorCopy(origin, sndOrigin);
         isLocal = qfalse;
     } else {
         if (entnum >= 0 && entnum < MAX_GENTITIES)
@@ -3432,11 +3454,38 @@ static void S_AL_Respatialize( int entityNum, const vec3_t origin,
 static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
 {
     int i;
+    const float *effectiveOrigin;
+
+    /* For the listener entity, always use the engine's authoritative predicted
+     * position maintained by S_AL_Respatialize rather than the cgame-supplied
+     * origin.  The cgame derives entity positions from the network trajectory
+     * (TR_LINEAR / TR_INTERPOLATE) which can lag client-side prediction when
+     * sv_smoothClients / sv_bufferMs is active, producing a stale offset that
+     * scales with velocity.  Respatialize is always called with the Pmove-
+     * predicted eye position and is the single ground truth for the local
+     * player regardless of server configuration or QVM patch level.
+     *
+     * Two things this guards:
+     *   1. The entity-origin cache write — cgame calls UpdateEntityPosition
+     *      for all entities every frame, including the local player; without
+     *      this guard the cache write could overwrite the correct value set
+     *      by Respatialize earlier in the same frame.
+     *   2. Active-source position updates — any own-player sound started this
+     *      frame (e.g. footsteps) should track the predicted position, not the
+     *      stale network position.
+     *
+     * Scope: strictly limited to entityNum == s_al_listener_entnum.
+     * All other entities — other players, world, bots — use the cgame-supplied
+     * origin, which is correct for them. */
+    if (entityNum == s_al_listener_entnum && s_al_listener_entnum >= 0)
+        effectiveOrigin = s_al_listener_origin;
+    else
+        effectiveOrigin = origin;
 
     /* Keep the per-entity origin cache current so that StartSound can place
      * new one-shot sounds at the right position when origin is NULL. */
     if (entityNum >= 0 && entityNum < MAX_GENTITIES)
-        VectorCopy(origin, s_al_entity_origins[entityNum]);
+        VectorCopy(effectiveOrigin, s_al_entity_origins[entityNum]);
 
     /* Move any active source attached to this entity.
      * Skip local (listener-relative) sources: they use AL_SOURCE_RELATIVE=TRUE
@@ -3448,9 +3497,9 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
         if (!s_al_src[i].isPlaying) continue;
         if (s_al_src[i].entnum == entityNum && !s_al_src[i].fixed_origin
                 && !s_al_src[i].isLocal) {
-            VectorCopy(origin, s_al_src[i].origin);
+            VectorCopy(effectiveOrigin, s_al_src[i].origin);
             qalSource3f(s_al_src[i].source, AL_POSITION,
-                        origin[0], origin[1], origin[2]);
+                        effectiveOrigin[0], effectiveOrigin[1], effectiveOrigin[2]);
         }
     }
 }
@@ -5805,7 +5854,14 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Capped at 2.0 (anti-cheat). Below 1.0 uses power-2 curve. Default 1.0.");
     s_alLocalSelf = Cvar_Get("s_alLocalSelf", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alLocalSelf, "0", "1", CV_INTEGER);
-    Cvar_SetDescription(s_alLocalSelf, "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized regardless of any world-space origin supplied by the game. Prevents stale-position artefacts caused by URT jumping/sliding physics. Default 0.");
+    Cvar_SetDescription(s_alLocalSelf,
+        "Force own-player sounds (footsteps, weapon, breath) to be non-spatialized "
+        "(head-locked at the listener position) regardless of any world-space origin "
+        "supplied by the game. "
+        "Note: position-staleness artefacts caused by TR_LINEAR trajectory lag or "
+        "sv_bufferMs position delay are now corrected automatically in the engine — "
+        "s_alLocalSelf 1 is no longer needed for correct audio and exists only for "
+        "users who prefer fully head-locked own-player sounds. Default 0.");
 
     /* Acoustic-environment tuning — all live-tunable; type /s_alReset after
      * changing to hear the effect without a map reload. */
