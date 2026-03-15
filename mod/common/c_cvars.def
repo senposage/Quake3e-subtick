@@ -1,0 +1,32 @@
+
+#ifdef CVAR_PREFIX_STRING
+#undef CVAR_PREFIX_STRING
+#endif
+#ifdef CVAR_PREFIX
+#undef CVAR_PREFIX
+#endif
+
+#define CVAR_PREFIX_STRING "c_"
+#define CVAR_PREFIX(ENTRY) c_##ENTRY
+#include "../common/q_cvartable.h"
+CVAR(debugAnim, 	"0",			CVAR_CHEAT);
+CVAR(noPlayerAnims,	"0",			CVAR_CHEAT);
+CVAR(animSpeed, 	"1",			CVAR_CHEAT);
+
+#undef CVAR_PREFIX
+#undef CVAR_PREFIX_STRING
+
+#undef CVAR
+#undef CVAR_CLAMP
+
+#ifdef CVAR_C_DECLARE
+#undef CVAR_C_DECLARE
+#endif
+
+#ifdef CVAR_H_DECLARE
+#undef CVAR_H_DECLARE
+#endif
+
+#ifdef CVAR_C_REGISTER
+#undef CVAR_C_REGISTER
+#endif
