@@ -1630,6 +1630,15 @@ Target QVM: UrbanTerror 4.3 official binary
 /* Expected instruction indices inside BG_EvaluateTrajectory */
 #define URT43_INSTR_TR_STATIONARY_CASE  0x3ab0c  /* VectorCopy handler (cases 0 & 1)  */
 #define URT43_INSTR_TR_LINEAR_CASE      0x3ab15  /* velocity extrapolation handler     */
+/* Dead CG_Error block at the end of BG_EvaluateTrajectory (instr 0x3b434-0x3b43e,
+   11 slots reachable only when trType < 0 or > 11).  We repurpose it as a
+   trTime-guard handler for TR_INTERPOLATE — see Patch 1 below. */
+#define URT43_INSTR_TR_GUARD_CASE       0x3b434
+/* Frame layout of BG_EvaluateTrajectory (frame_size = 0x154):
+   arg0 (trajectory*) lives at LOCAL[frame_size + 0x8] = LOCAL[0x15c].
+   offsetof(trajectory_t, trTime) = 4 (trType is first, 4 bytes). */
+#define URT43_BGEVALTRAJ_ARG_TRAJECTORY 0x15c
+#define URT43_TRAJECTORY_TRTIME_OFFSET  4
 
 static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	int cgPatches;
@@ -1756,39 +1765,113 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 
 	/* ---------------------------------------------------------------
 	   Patch 1 (bit 2): BG_EvaluateTrajectory TR_INTERPOLATE -> TR_LINEAR
-	   The jump table at data address 0xdbb0 has 12 entries (cases 0-11).
-	   Entry 1 (TR_INTERPOLATE, at data offset 0xdbb4) currently points to
-	   the TR_STATIONARY case (0x3ab0c, VectorCopy only).  Redirect it to
-	   the TR_LINEAR case (0x3ab15) so velocity extrapolation is used.
+	   with trTime == 0 guard (widest coverage).
+
+	   Step A — instruction guard (0x3b434–0x3b43e):
+	   BG_EvaluateTrajectory contains a dead CG_Error block at 0x3b434
+	   (reached only when trType < 0 or > 11, which never happens in
+	   normal play).  We overwrite it with a 9-instruction guard:
+
+	     LOCAL  0x15c          ; arg0 = trajectory*
+	     LOAD4                 ; dereference
+	     CONST  0x4            ; offsetof(trajectory_t, trTime) = 4
+	     ADD                   ; &trajectory->trTime
+	     LOAD4                 ; trTime value
+	     CONST  0              ; 0
+	     EQ     TR_STATIONARY  ; if trTime==0 → VectorCopy (safe, no extrapolation)
+	     CONST  TR_LINEAR      ; else fall through to velocity extrapolation
+	     JUMP
+
+	   This catches every caller: predicted player entity (trTime=0 because
+	   BG_PlayerStateToEntityState never writes it for snap=qfalse), any
+	   future entity type that forgets trTime, etc.
+
+	   Step B — data-segment redirect:
+	   The switch jump table entry for TR_INTERPOLATE (case 1) is updated
+	   from TR_STATIONARY_CASE (0x3ab0c) to TR_GUARD_CASE (0x3b434) so
+	   that TR_INTERPOLATE entities flow through the guard instead of
+	   going directly to TR_LINEAR or TR_STATIONARY.
+
+	   Vanilla-server safety: this patch block is gated on cgPatches & 4,
+	   which is taken from cl_qvmPatchVanilla (not cl_urt43cgPatches) when
+	   cl_urt43serverIsVanilla is set, so vanilla servers that do not anchor
+	   trTime server-side will never enable bit 2 and this code never runs.
 	   --------------------------------------------------------------- */
 	if ( cgPatches & 4 ) {
 		int32_t *jt_case0 = (int32_t *)(vm->dataBase + URT43_JT_TR_STATIONARY);
 		int32_t *jt_case1 = (int32_t *)(vm->dataBase + URT43_JT_TR_INTERPOLATE);
 		int32_t *jt_case2 = (int32_t *)(vm->dataBase + URT43_JT_TR_LINEAR);
 
-		Com_Printf( S_COLOR_CYAN "  [Patch1] BG_EvaluateTrajectory TR_INTERPOLATE->TR_LINEAR:\n" );
+		Com_Printf( S_COLOR_CYAN "  [Patch1] BG_EvaluateTrajectory TR_INTERPOLATE->TR_LINEAR+guard:\n" );
 		Com_Printf( "    data[0x%05x] case0(TR_STATIONARY) =0x%05x (expect 0x%05x)\n",
 			URT43_JT_TR_STATIONARY,  *jt_case0, URT43_INSTR_TR_STATIONARY_CASE );
 		Com_Printf( "    data[0x%05x] case1(TR_INTERPOLATE)=0x%05x (expect 0x%05x -> patch to 0x%05x)\n",
 			URT43_JT_TR_INTERPOLATE, *jt_case1,
-			URT43_INSTR_TR_STATIONARY_CASE, URT43_INSTR_TR_LINEAR_CASE );
+			URT43_INSTR_TR_STATIONARY_CASE, URT43_INSTR_TR_GUARD_CASE );
 		Com_Printf( "    data[0x%05x] case2(TR_LINEAR)     =0x%05x (expect 0x%05x)\n",
 			URT43_JT_TR_LINEAR,      *jt_case2, URT43_INSTR_TR_LINEAR_CASE );
+		Com_Printf( "    guard instr [0x%05x] op=0x%02x (expect OP_CONST=0x%02x val=1)\n",
+			URT43_INSTR_TR_GUARD_CASE,
+			buf[URT43_INSTR_TR_GUARD_CASE].op, OP_CONST );
+		Com_Printf( "    guard instr [0x%05x] op=0x%02x (expect OP_CALL=0x%02x)\n",
+			URT43_INSTR_TR_GUARD_CASE + 9,
+			buf[URT43_INSTR_TR_GUARD_CASE + 9].op, OP_CALL );
 
-		/* Guard: only patch if the table still contains the original values.
-		   If already patched (e.g. on VM restart) the check for case1==STATIONARY_CASE
-		   will fail, so we skip safely rather than double-patching. */
+		/* Guard: only patch if the table still contains the original values
+		   and the guard slot still contains the expected original instructions.
+		   On VM restart the case1 entry already equals TR_GUARD_CASE so the
+		   first check fails and we skip cleanly. */
 		if ( *jt_case0 == URT43_INSTR_TR_STATIONARY_CASE
 			&& *jt_case1 == URT43_INSTR_TR_STATIONARY_CASE
-			&& *jt_case2 == URT43_INSTR_TR_LINEAR_CASE ) {
-			*jt_case1 = URT43_INSTR_TR_LINEAR_CASE;  /* TR_INTERPOLATE -> TR_LINEAR */
+			&& *jt_case2 == URT43_INSTR_TR_LINEAR_CASE
+			&& buf[URT43_INSTR_TR_GUARD_CASE].op    == OP_CONST
+			&& buf[URT43_INSTR_TR_GUARD_CASE].value == 1
+			&& buf[URT43_INSTR_TR_GUARD_CASE + 9].op == OP_CALL ) {
+
+			/* Step A: write the trTime==0 guard into the dead CG_Error block.
+			   LOCAL 0x15c / LOAD4 / CONST 4 / ADD / LOAD4 / CONST 0 /
+			   EQ→TR_STATIONARY / CONST TR_LINEAR / JUMP / IGNORE / IGNORE */
+			buf[URT43_INSTR_TR_GUARD_CASE + 0].op    = OP_LOCAL;
+			buf[URT43_INSTR_TR_GUARD_CASE + 0].value = URT43_BGEVALTRAJ_ARG_TRAJECTORY;
+			buf[URT43_INSTR_TR_GUARD_CASE + 1].op    = OP_LOAD4;
+			buf[URT43_INSTR_TR_GUARD_CASE + 1].value = 0;
+			buf[URT43_INSTR_TR_GUARD_CASE + 2].op    = OP_CONST;
+			buf[URT43_INSTR_TR_GUARD_CASE + 2].value = URT43_TRAJECTORY_TRTIME_OFFSET;
+			buf[URT43_INSTR_TR_GUARD_CASE + 3].op    = OP_ADD;
+			buf[URT43_INSTR_TR_GUARD_CASE + 3].value = 0;
+			buf[URT43_INSTR_TR_GUARD_CASE + 4].op    = OP_LOAD4;
+			buf[URT43_INSTR_TR_GUARD_CASE + 4].value = 0;
+			buf[URT43_INSTR_TR_GUARD_CASE + 5].op    = OP_CONST;
+			buf[URT43_INSTR_TR_GUARD_CASE + 5].value = 0;
+			buf[URT43_INSTR_TR_GUARD_CASE + 6].op    = OP_EQ;
+			buf[URT43_INSTR_TR_GUARD_CASE + 6].value = URT43_INSTR_TR_STATIONARY_CASE;
+			buf[URT43_INSTR_TR_GUARD_CASE + 7].op    = OP_CONST;
+			buf[URT43_INSTR_TR_GUARD_CASE + 7].value = URT43_INSTR_TR_LINEAR_CASE;
+			buf[URT43_INSTR_TR_GUARD_CASE + 8].op    = OP_JUMP;
+			buf[URT43_INSTR_TR_GUARD_CASE + 8].value = 0;
+			VM_IgnoreInstructions( buf + URT43_INSTR_TR_GUARD_CASE + 9, 2 );
+
+			/* Mark the guard entry as a jump target so the JIT emits a label */
+			buf[URT43_INSTR_TR_GUARD_CASE].jused = 1;
+			/* TR_STATIONARY and TR_LINEAR are now also jumped-to from new code */
+			buf[URT43_INSTR_TR_STATIONARY_CASE].jused = 1;
+			buf[URT43_INSTR_TR_LINEAR_CASE].jused     = 1;
+
+			/* Step B: redirect TR_INTERPOLATE switch entry to the guard */
+			*jt_case1 = URT43_INSTR_TR_GUARD_CASE;
+
 			applied |= 4;
-			Com_Printf( S_COLOR_CYAN "    [Patch1] APPLIED: TR_INTERPOLATE now uses TR_LINEAR extrapolation\n" );
+			Com_Printf( S_COLOR_CYAN "    [Patch1] APPLIED: TR_INTERPOLATE -> guard(0x%05x)"
+				" trTime==0->TR_STATIONARY else->TR_LINEAR\n",
+				URT43_INSTR_TR_GUARD_CASE );
 		} else {
 			skipped |= 4;
-			Com_Printf( S_COLOR_YELLOW "    [Patch1] SKIP: jump table mismatch"
-				" (case0=0x%05x case1=0x%05x case2=0x%05x)\n",
-				*jt_case0, *jt_case1, *jt_case2 );
+			Com_Printf( S_COLOR_YELLOW "    [Patch1] SKIP: mismatch"
+				" (case0=0x%05x case1=0x%05x case2=0x%05x"
+				" guard_op=%d guard+9_op=%d)\n",
+				*jt_case0, *jt_case1, *jt_case2,
+				buf[URT43_INSTR_TR_GUARD_CASE].op,
+				buf[URT43_INSTR_TR_GUARD_CASE + 9].op );
 		}
 	} else {
 		Com_Printf( S_COLOR_YELLOW "  [Patch1] DISABLED by cvar (bit 2 not set)\n" );

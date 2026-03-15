@@ -1,6 +1,6 @@
 # UrT 4.3 QVM Shadow Bug — Analysis & Implementation Notes
 
-**Status:** Analysis complete. No new code patch applied yet — waiting for confirmation.
+**Status:** Implemented — Patch 1 (bit 2) upgraded with `trTime == 0` guard (widest coverage).
 
 ---
 
@@ -142,6 +142,50 @@ Safety fix; unrelated to shadow displacement.
 
 ---
 
+## Implemented Fix (Patch 1 upgrade)
+
+### Strategy: widest-coverage instruction guard in `BG_EvaluateTrajectory`
+
+`BG_EvaluateTrajectory` has a dead `CG_Error` block at instruction index
+**0x3b434–0x3b43e** (11 slots) that is only reachable when `trType < 0` or
+`trType > 11` — which never happens in normal play.  We repurpose those slots
+as a 9-instruction **trTime == 0 guard handler** and redirect the
+TR_INTERPOLATE switch-table entry there.
+
+#### Guard code written at 0x3b434
+
+```
+LOCAL  0x15c          ; arg0 = trajectory* (frame_size=0x154, so +8 = 0x15c)
+LOAD4                 ; dereference → trajectory pointer
+CONST  4              ; offsetof(trajectory_t, trTime) = 4
+ADD                   ; &trajectory->trTime
+LOAD4                 ; trTime value
+CONST  0              ; 0
+EQ     0x3ab0c        ; if trTime==0 → TR_STATIONARY (VectorCopy, no extrapolation)
+CONST  0x3ab15        ; TR_LINEAR case address
+JUMP                  ; → velocity extrapolation with valid trTime
+IGNORE                ; (was CALL CG_Error)
+IGNORE                ; (was POP)
+```
+
+#### What this fixes
+
+| Entity | trTime before fix | Result before | Result after |
+|--------|------------------|---------------|--------------|
+| Remote player (our server) | `sv.time` (set by sv_snapshot.c) | OK (extrapolation valid) | OK (unchanged) |
+| Predicted local player | `0` (BG_PlayerStateToEntityState never sets it) | Huge extrapolation → teleport | VectorCopy → correct |
+| Any entity with forgotten trTime | `0` | Teleport | VectorCopy → correct |
+| Vanilla server (patch disabled) | N/A | Original TR_STATIONARY | Original (patch not applied) |
+
+#### Vanilla-server safety
+
+The entire patch block is gated on `cgPatches & 4`, which reads from
+`cl_qvmPatchVanilla` when `cl_urt43serverIsVanilla` is set.  Vanilla servers
+that do not anchor `trTime` server-side do not set bit 2, so this code never
+runs and the QVM is left unmodified.
+
+---
+
 ## Proposed Next Step
 
 A **Patch 4** targeting the shadow function (0x1dd00) is not needed because the
@@ -165,5 +209,5 @@ the game-side `BG_PlayerStateToEntityState` function (at QVM instr **0x1423**).
 
 | File | Change |
 |------|--------|
-| `docs/project/QVM_SHADOW_ANALYSIS.md` | This document (new) |
-| `code/qcommon/vm.c` | Patches 1–3 (pre-existing, unchanged in this session) |
+| `docs/project/QVM_SHADOW_ANALYSIS.md` | This document (updated with implemented fix) |
+| `code/qcommon/vm.c` | Patch 1 upgraded: adds `URT43_INSTR_TR_GUARD_CASE`, writes 9-instr guard at 0x3b434, redirects TR_INTERPOLATE switch entry to guard instead of directly to TR_LINEAR |
