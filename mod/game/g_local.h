@@ -1481,9 +1481,6 @@ extern vmCvar_t  g_knockback;
 extern vmCvar_t  g_forcerespawn;
 extern vmCvar_t  g_inactivity;
 extern vmCvar_t  g_debugMove;
-extern vmCvar_t  g_debugEntities;  /* log entity spawn/filter events */
-extern vmCvar_t  g_debugDoors;     /* log mover/door state transitions */
-extern vmCvar_t  g_debugTrace;     /* log player clip trace events */
 extern vmCvar_t  g_synchronousClients;
 extern vmCvar_t  g_motd;
 

@@ -288,7 +288,6 @@ spawn_t  spawns[] = {
 	// Urban Terror funcs
 	{ "func_rotating_door", 	  SP_func_rotating_door 	 },
 	{ "ut_mrsentry",			  SP_mr_sentry				 },
-	{ "mrsentry",				  SP_mr_sentry				 }, /* 4.3 alternate classname */
 	{ "ut_jumpgoal",			  SP_ut_jumpgoal			 },
 	{ "ut_jumpstart",			  SP_ut_jumpstart			 },
 	{ "ut_jumpstop",			  SP_ut_jumpstop			 },
@@ -375,18 +374,6 @@ spawn_t  spawns[] = {
 	/* New Camera View node entity */
 	{ "misc_CameraViewNode",	  0 			 },
 
-	/* 4.3 new entity types — these exist in 4.3 maps and must be
-	 * recognized so they are NOT silently removed (which could open
-	 * up areas that should be blocked or break triggers).
-	 * trigger_only: fires only when explicitly targeted, never on touch */
-	{ "trigger_only",			  SP_trigger_always		 }, /* closest 4.2 equivalent */
-
-	/* 4.3 game-mode entities — stub spawners; full impl pending */
-	{ "ut_planted_bomb",		  0 			 },
-	{ "ut_radio",				  0 			 },
-	{ "ut_interface",			  0 			 },
-	{ "ut_timenudge",			  0 			 },
-
 	{ 0 		   ,			  0 			 }
 };
 
@@ -441,9 +428,7 @@ qboolean G_CallSpawn( gentity_t *ent )
 		}
 	}
 	// removed because ppl didn't like it
-	// re-enabled as debug tool — set g_debugEntities 1 to see unknown classnames
-	if (g_debugEntities.integer)
-		G_Printf("^3[EntityDebug] ^7%s has no spawn function\n", ent->classname);
+//	G_Printf ("%s doesn't have a spawn function\n", ent->classname);
 	return qfalse;
 }
 
@@ -623,10 +608,6 @@ void G_SpawnGEntityFromSpawnVars( void )
 
 		if (i)
 		{
-			if (g_debugEntities.integer)
-				G_Printf("^3[EntityDebug] ^7FILTERED(notteam) classname=%s origin=(%.0f %.0f %.0f)\n",
-					ent->classname ? ent->classname : "<null>",
-					ent->s.origin[0], ent->s.origin[1], ent->s.origin[2]);
 			G_FreeEntity( ent );
 			return;
 		}
@@ -637,10 +618,6 @@ void G_SpawnGEntityFromSpawnVars( void )
 
 		if (i)
 		{
-			if (g_debugEntities.integer)
-				G_Printf("^3[EntityDebug] ^7FILTERED(notfree) classname=%s origin=(%.0f %.0f %.0f)\n",
-					ent->classname ? ent->classname : "<null>",
-					ent->s.origin[0], ent->s.origin[1], ent->s.origin[2]);
 			G_FreeEntity( ent );
 			return;
 		}
@@ -687,18 +664,9 @@ void G_SpawnGEntityFromSpawnVars( void )
 	// if we didn't get a classname, don't bother spawning anything
 	if (!G_CallSpawn( ent ))
 	{
-		if (g_debugEntities.integer)
-			G_Printf("^3[EntityDebug] ^1NO_SPAWN_FUNC classname=%s origin=(%.0f %.0f %.0f)\n",
-				ent->classname ? ent->classname : "<null>",
-				ent->s.origin[0], ent->s.origin[1], ent->s.origin[2]);
 		G_FreeEntity( ent );
 		return;
 	}
-	if (g_debugEntities.integer > 1)
-		G_Printf("^3[EntityDebug] ^2SPAWNED classname=%s origin=(%.0f %.0f %.0f)\n",
-			ent->classname ? ent->classname : "<null>",
-			ent->s.origin[0], ent->s.origin[1], ent->s.origin[2]);
-
 	levelspawn[num_levelspawn].numSpawnVars = level.numSpawnVars;
 
 	for(i = 0; i < levelspawn[num_levelspawn].numSpawnVars; i++)

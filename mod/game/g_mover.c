@@ -574,12 +574,6 @@ void SetMoverState( gentity_t *ent, moverState_t moverState, int time )
 	vec3_t	delta;
 	float	f;
 
-	if (g_debugDoors.integer && ent->mover->moverState != moverState)
-		G_Printf("^3[DoorDebug] ^7ent=%i(%s) state %i->%i\n",
-			ent->s.number,
-			ent->classname ? ent->classname : "?",
-			ent->mover->moverState, moverState);
-
 	ent->mover->moverState = moverState;
 
 	ent->s.pos.trTime	   = time;
@@ -3419,35 +3413,22 @@ void SP_func_rotating_door ( gentity_t *ent )
 	{
 		for (j = 0; j < strlen(sound); j++)
 		{
-			/* Map gametypes that share open/shut state with other modes:
-			 * GT_JUMP and GT_GUNGAME behave like GT_FFA for area access.
-			 * GT_FREEZE behaves like GT_UT_SURVIVOR for area access.
-			 * GT_LASTMAN uses its own chr ('1') but ALSO opens FFA ('0') areas. */
-			if ((g_gametype.integer == GT_JUMP) || (g_gametype.integer == GT_GUNGAME))
+			if ((g_gametype.integer == GT_JUMP) || (g_gametype.integer == GT_LASTMAN))
 			{
 				chr = va("%d", GT_FFA);
-			}
-			else if (g_gametype.integer == GT_FREEZE)
-			{
-				chr = va("%d", GT_UT_SURVIVOR);
 			}
 			else
 			{
 				chr = va("%d", g_gametype.integer);
 			}
 
-			if ((sound[j] == chr[0]) ||
-				(sound[j] == '0' + GT_FFA && g_gametype.integer == GT_LASTMAN)) //Lock the door OPEN in this gamemode
+			if (sound[j] == chr[0]) //Lock the door OPEN in this gamemode
 			{
 				ent->s.apos.trBase[0]  = (90 * direction) * ent->movedir[0];
 				ent->s.apos.trBase[1]  = (90 * direction) * ent->movedir[1];
 				ent->s.apos.trBase[2]  = (90 * direction) * ent->movedir[2];
 
 				ent->mover->moverState = MOVER_LOCKED; // door wont go anywhere
-
-				if (g_debugDoors.integer)
-					G_Printf("^3[DoorDebug] ^2LOCKED_OPEN ent=%i GameMode_Open='%s' gt=%i chr='%c'\n",
-						ent->s.number, sound, g_gametype.integer, chr[0]);
 			}
 		}
 	}
@@ -3457,27 +3438,18 @@ void SP_func_rotating_door ( gentity_t *ent )
 	{
 		for (j = 0; j < strlen(sound); j++)
 		{
-			if ((g_gametype.integer == GT_JUMP) || (g_gametype.integer == GT_GUNGAME))
+			if ((g_gametype.integer == GT_JUMP) || (g_gametype.integer == GT_LASTMAN))
 			{
 				chr = va("%d", GT_FFA);
-			}
-			else if (g_gametype.integer == GT_FREEZE)
-			{
-				chr = va("%d", GT_UT_SURVIVOR);
 			}
 			else
 			{
 				chr = va("%d", g_gametype.integer);
 			}
 
-			if ((sound[j] == chr[0]) ||
-				(sound[j] == '0' + GT_FFA && g_gametype.integer == GT_LASTMAN)) //Lock the door SHUT in this gamemode
+			if (sound[j] == chr[0]) //Lock the door SHUT in this gamemode
 			{
 				ent->mover->moverState = MOVER_LOCKED; // door wont go anywhere
-
-				if (g_debugDoors.integer)
-					G_Printf("^3[DoorDebug] ^1LOCKED_SHUT ent=%i GameMode_Shut='%s' gt=%i chr='%c'\n",
-						ent->s.number, sound, g_gametype.integer, chr[0]);
 			}
 		}
 	}
