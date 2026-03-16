@@ -1190,6 +1190,18 @@ static void SV_CheckTimeouts( void ) {
 			cl->state = CS_FREE;
 			continue;
 		}
+		// Ghost-client guard: a fully in-game client whose process was killed
+		// stops sending packets immediately (OS closes the socket).  With the
+		// default sv_timeout of 200 s the normal timeout fires far too late —
+		// the 128-slot reliable command buffer can fill up with broadcast
+		// prints in seconds, causing a noisy "Server command overflow" drop.
+		// Kick them cleanly after 10 s of silence so the slot is freed well
+		// before the buffer ever overflows.
+		if ( cl->state == CS_ACTIVE && svs.time - cl->lastPacketTime > 10000 ) {
+			SV_DropClient( cl, "disconnected" );
+			cl->state = CS_FREE;
+			continue;
+		}
 		if ( cl->state >= CS_CONNECTED && cl->lastPacketTime - droppoint < 0 ) {
 			// wait several frames so a debugger session doesn't
 			// cause a timeout
