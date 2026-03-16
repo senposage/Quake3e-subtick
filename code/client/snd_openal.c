@@ -603,6 +603,7 @@ static cvar_t *s_alOccGainFloor;   /* floor of AL_LOWPASS_GAIN for fully-blocked
 static cvar_t *s_alOccHFFloor;     /* floor of AL_LOWPASS_GAINHF (HF content) through walls */
 static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest gap [0-1] */
 static cvar_t *s_alOccSearchRadius; /* tangent-plane probe radius for gap finding [units] */
+static cvar_t *s_alOccAreaFloor;   /* minimum occlusion for BSP-connected areas [0-1] */
 static cvar_t *s_alDebugOcc;       /* print per-source occlusion state each frame */
 static cvar_t *s_alDebugPlayback;  /* 0=off 1=rate-mismatch+preemption 2=+natural-stop */
 static cvar_t *s_alDebugNorm;      /* 0=off 1=print normGain for all active ambient sources */
@@ -1528,11 +1529,12 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
         if (SEARCH_RADIUS < 20.f) SEARCH_RADIUS = 20.f;
 
         vec3_t fwd, right, upv;
+        float  srcDist;
         int    k;
 
         /* Orthonormal frame: fwd = listener→source, right/up = tangent plane */
         VectorSubtract(srcOrigin, s_al_listener_origin, fwd);
-        VectorNormalize(fwd);
+        srcDist = VectorNormalize(fwd);
 
         if (fabsf(fwd[2]) < 0.9f) {
             vec3_t worldUp = {0.f, 0.f, 1.f};
@@ -1562,6 +1564,126 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 if (bestFrac >= 1.0f)
                     break;   /* clear path found — stop searching */
             }
+        }
+
+        /* ---- Multi-hop corridor probing ----
+         * When near-source probes can't find a gap (thick wall, corridor far
+         * from source), try two-hop paths: listener → waypoint → source.
+         * Casts rays from the listener in 8 world-space horizontal directions
+         * to find corridor openings, then checks if those openings can reach
+         * the source.  Approximates sound traveling through corridors without
+         * a full pathfinding graph.
+         *
+         * Each hop direction is skipped if it points within ~30° of the
+         * direct listener→source line (already covered by the direct trace).
+         * The hop score is penalised by the path-length ratio so longer
+         * corridors attenuate more than short doorways. */
+        if (bestFrac < 0.5f && srcDist > 200.f) {
+            static const float hopDirs[8][3] = {
+                { 1.f, 0.f, 0.f}, {-1.f,  0.f, 0.f},
+                { 0.f, 1.f, 0.f}, { 0.f, -1.f, 0.f},
+                { 0.707f,  0.707f, 0.f}, { 0.707f, -0.707f, 0.f},
+                {-0.707f,  0.707f, 0.f}, {-0.707f, -0.707f, 0.f}
+            };
+            float hopReach = srcDist * 0.6f;
+            if (hopReach > 1200.f) hopReach = 1200.f;
+            if (hopReach < 200.f)  hopReach = 200.f;
+
+            for (k = 0; k < 8; k++) {
+                trace_t hop1, hop2;
+                vec3_t  waypoint, hopEnd;
+                float   leg1Dist, leg2Dist, pathLen, hopScore, dot;
+
+                /* Skip directions too close to the direct path —
+                 * already covered by the direct trace + near-source probes. */
+                dot = fwd[0]*hopDirs[k][0] + fwd[1]*hopDirs[k][1]
+                    + fwd[2]*hopDirs[k][2];
+                if (dot > 0.85f) continue;
+
+                /* Leg 1: listener → corridor direction */
+                VectorMA(s_al_listener_origin, hopReach, hopDirs[k], hopEnd);
+                CM_BoxTrace(&hop1, s_al_listener_origin, hopEnd,
+                            vec3_origin, vec3_origin,
+                            0, CONTENTS_SOLID, qfalse);
+                if (hop1.fraction < 0.15f) continue; /* immediate wall */
+
+                /* Waypoint = slightly before the wall hit */
+                leg1Dist = hopReach * hop1.fraction;
+                VectorMA(s_al_listener_origin, leg1Dist * 0.95f,
+                         hopDirs[k], waypoint);
+
+                /* Leg 2: waypoint → source */
+                CM_BoxTrace(&hop2, waypoint, srcOrigin,
+                            vec3_origin, vec3_origin,
+                            0, CONTENTS_SOLID, qfalse);
+
+                /* Score = clearness of both legs × distance penalty.
+                 * Longer corridor paths get more attenuation than short
+                 * doorway paths (triangle inequality: pathLen ≥ srcDist). */
+                hopScore = hop1.fraction * hop2.fraction;
+                {
+                    vec3_t leg2Vec;
+                    VectorSubtract(srcOrigin, waypoint, leg2Vec);
+                    leg2Dist = VectorLength(leg2Vec);
+                }
+                pathLen = leg1Dist + leg2Dist;
+                if (pathLen > srcDist && srcDist > 1.f)
+                    hopScore *= srcDist / pathLen;
+
+                if (hopScore > bestFrac) {
+                    bestFrac = hopScore;
+                    VectorCopy(waypoint, acousticPos);
+                    if (bestFrac >= 0.9f)
+                        break; /* clear corridor found */
+                }
+            }
+        }
+    }
+
+    /* ---- BSP area connectivity floor (distance-scaled) ----
+     * Even when all traces hit solid walls, BSP areas connected through
+     * portal chains (corridors, tunnels, doorways) should still allow
+     * sound through — muffled but audible.  This catches long winding
+     * corridors that neither near-source nor multi-hop probes can span.
+     *
+     * The floor fades linearly with distance: full strength at refDist
+     * (80 u), zero at maxDist (1330 u).  Close sources stay prominent;
+     * distant ones fade naturally with the distance model.
+     *
+     * Same area    → strong floor (0.50 × distScale)
+     * Connected    → tunable floor (s_alOccAreaFloor × distScale)
+     * Disconnected → no floor: sealed areas (closed doors) stay silent. */
+    {
+        int srcLeaf = CM_PointLeafnum( srcOrigin );
+        int lstLeaf = CM_PointLeafnum( s_al_listener_origin );
+        int srcArea = CM_LeafArea( srcLeaf );
+        int lstArea = CM_LeafArea( lstLeaf );
+
+        if (srcArea == lstArea || CM_AreasConnected( srcArea, lstArea )) {
+            vec3_t toSrc;
+            float  dist, maxDist, refDist, distScale, floor;
+
+            VectorSubtract( srcOrigin, s_al_listener_origin, toSrc );
+            dist    = VectorLength( toSrc );
+            maxDist = s_alMaxDist ? s_alMaxDist->value : S_AL_SOUND_MAXDIST;
+            refDist = S_AL_SOUND_FULLVOLUME;
+
+            if (dist <= refDist)
+                distScale = 1.0f;
+            else if (dist >= maxDist)
+                distScale = 0.0f;
+            else
+                distScale = 1.0f - (dist - refDist) / (maxDist - refDist);
+
+            if (srcArea == lstArea)
+                floor = 0.5f * distScale;
+            else {
+                float base = s_alOccAreaFloor ? s_alOccAreaFloor->value : 0.30f;
+                floor = base * distScale;
+            }
+
+            if (bestFrac < floor)
+                bestFrac = floor;
         }
     }
 
@@ -1846,6 +1968,13 @@ static void S_AL_StopSource( int idx )
     qalSourceStop(s_al_src[idx].source);
     qalSourcei(s_al_src[idx].source, AL_LOOPING, AL_FALSE);
     qalSourcei(s_al_src[idx].source, AL_BUFFER, 0);
+    // Clear EFX routing so the next sound on this slot doesn't inherit
+    // stale reverb/filter state (e.g. tinnitus routed through reverb).
+    if (s_al_efx.available) {
+        qalSource3i(s_al_src[idx].source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 0, AL_FILTER_NULL);
+        qalSource3i(s_al_src[idx].source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 1, AL_FILTER_NULL);
+        qalSourcei(s_al_src[idx].source, AL_DIRECT_FILTER, AL_FILTER_NULL);
+    }
     s_al_src[idx].isPlaying  = qfalse;
     s_al_src[idx].loopSound  = qfalse;
 }
@@ -2196,6 +2325,14 @@ static void S_AL_Shutdown( void )
         qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.underwaterSlot);
         qalDeleteEffects(1, &s_al_efx.reverbEffect);
         qalDeleteEffects(1, &s_al_efx.underwaterEffect);
+        if (s_al_efx.echoSlot)
+            qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.echoSlot);
+        if (s_al_efx.echoEffect)
+            qalDeleteEffects(1, &s_al_efx.echoEffect);
+        if (s_al_efx.chorusSlot)
+            qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.chorusSlot);
+        if (s_al_efx.chorusEffect)
+            qalDeleteEffects(1, &s_al_efx.chorusEffect);
         for (j = 0; j < S_AL_MAX_SRC; j++)
             if (s_al_efx.occlusionFilter[j])
                 qalDeleteFilters(1, &s_al_efx.occlusionFilter[j]);
@@ -2836,7 +2973,24 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
         qalSourceUnqueueBuffers(s_al_raw.source, 1, &tmp);
     }
 
-    /* Grab one buffer from our small pool (round-robin). */
+    /* Grab one buffer from our small pool (round-robin).
+     * If the target buffer is still queued on the source (caller is
+     * pushing faster than playback), force-drain it so qalBufferData
+     * doesn't silently fail with AL_INVALID_OPERATION. */
+    {
+        ALint queued = 0;
+        qalGetSourcei(s_al_raw.source, AL_BUFFERS_QUEUED, &queued);
+        if ( queued >= S_AL_RAW_BUFFERS ) {
+            /* All buffers are attached — stop, drain everything, restart. */
+            qalSourceStop(s_al_raw.source);
+            queued = 0;
+            qalGetSourcei(s_al_raw.source, AL_BUFFERS_PROCESSED, &queued);
+            while (queued-- > 0) {
+                ALuint tmp;
+                qalSourceUnqueueBuffers(s_al_raw.source, 1, &tmp);
+            }
+        }
+    }
     buf = s_al_raw.buffers[s_al_raw.nextBuf];
     s_al_raw.nextBuf = (s_al_raw.nextBuf + 1) % S_AL_RAW_BUFFERS;
 
@@ -5974,6 +6128,16 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Default 120 (~URT standard door half-width). "
         "Increase to 160-200 if sounds behind wide doorways or around thick pillars still "
         "appear to come from the wrong direction; decrease to 60 for tighter gap sensitivity.");
+    s_alOccAreaFloor = Cvar_Get("s_alOccAreaFloor", "0.30", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alOccAreaFloor, "0", "1", CV_FLOAT);
+    Cvar_SetDescription(s_alOccAreaFloor,
+        "Occlusion: minimum audibility for sounds in BSP-connected areas. "
+        "When ray traces are fully blocked but the BSP area system reports the "
+        "listener and source are connected through portals (corridors, tunnels), "
+        "this value sets the minimum occlusion fraction, scaled by distance. "
+        "0.30 means a nearby occluded-but-connected source stays at least 30% "
+        "audible; the floor fades to zero at s_alMaxDist. "
+        "0 = disable area floor (traces only). Default 0.30.");
     s_alDebugOcc = Cvar_Get("s_alDebugOcc", "0", CVAR_TEMP);
     Cvar_CheckRange(s_alDebugOcc, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alDebugOcc,

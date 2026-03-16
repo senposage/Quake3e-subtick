@@ -366,6 +366,12 @@ static void CL_ParseSnapshot( msg_t *msg ) {
 		static int prevPing       = -1;
 		static int prevJitterDir  = 0;
 		static int prevJitterMsgNum = 0;
+		// Reset statics on reconnect (large messageNum gap = new session)
+		if ( prevJitterMsgNum > 0 && cl.snap.messageNum - prevJitterMsgNum > PACKET_BACKUP ) {
+			prevPing = -1;
+			prevJitterDir = 0;
+			prevJitterMsgNum = 0;
+		}
 		if ( prevPing > 0 ) {
 			int delta    = cl.snap.ping - prevPing;
 			int absDelta = delta < 0 ? -delta : delta;
@@ -491,6 +497,12 @@ void CL_SystemInfoChanged( qboolean onlyGame ) {
 		if ( !Q_stricmp( key, "sv_pure" ) || !Q_stricmp( key, "sv_serverid" ) || !Q_stricmp( key, "sv_fps" ) ) {
 			continue;
 		}
+		// Never let a remote server change dedicated — CVAR_LATCH + modified
+		// triggers CL_Shutdown in Com_Frame.  The non-STANDALONE cvar filter
+		// below would also block it, but this is belt-and-suspenders.
+		if ( !Q_stricmp( key, "dedicated" ) ) {
+			continue;
+		}
 		if ( !Q_stricmp( key, "sv_paks" ) || !Q_stricmp( key, "sv_pakNames" ) ) {
 			continue;
 		}
@@ -587,6 +599,7 @@ static void CL_ParseServerInfo( void )
 	// (vanilla server) as the effective QVM patch bitmask.  Set it here, after
 	// cl.vanillaServer is determined, so it is always current before the cgame
 	// VM is created.  The cvar is CVAR_TEMP so it never persists to config.
+	Cvar_Get( "cl_urt43serverIsVanilla", "0", CVAR_TEMP );
 	Cvar_SetValue( "cl_urt43serverIsVanilla", cl.vanillaServer ? 1 : 0 );
 	Com_DPrintf( "CL_ParseServerInfo: vanillaServer=%d (sv_snapshotFps='%s') "
 		"-> cl_urt43serverIsVanilla=%d, QVM patches will use %s\n",

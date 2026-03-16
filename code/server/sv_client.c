@@ -925,9 +925,10 @@ void SV_DropClient( client_t *drop, const char *reason ) {
 		drop->state = CS_ZOMBIE;		// become free in a few seconds
 	}
 
-	// Clear this client's shadow history so the next occupant of this slot
-	// (bot or new player) doesn't inherit stale antilag position entries.
+	// Clear this client's shadow/smooth history so the next occupant of
+	// this slot doesn't inherit stale position entries.
 	SV_Antilag_ClearClient( drop - svs.clients );
+	SV_SmoothClearClient( drop - svs.clients );
 
 	if ( !reason ) {
 		return;
@@ -957,6 +958,7 @@ reason (shown to other players) and message (shown to the dropped client).
 =====================
 */
 void SV_Auth_DropClient( client_t *drop, const char *reason, const char *message ) {
+	char	name[ sizeof( drop->name ) ];
 	int		i;
 	const qboolean isBot = drop->netchan.remoteAddress.type == NA_BOT;
 
@@ -964,9 +966,14 @@ void SV_Auth_DropClient( client_t *drop, const char *reason, const char *message
 		return;		// already dropped
 	}
 
+	Q_strncpyz( name, drop->name, sizeof( name ) );	// save before SV_SetUserinfo nukes it
+
+	// Free all allocated data on the client structure
+	SV_FreeClient( drop );
+
 	// tell everyone why they got dropped
 	if ( reason != NULL && strlen( reason ) > 0 )
-		SV_SendServerCommand( NULL, "print \"%s" S_COLOR_WHITE " %s\n\"", drop->name, reason );
+		SV_SendServerCommand( NULL, "print \"%s" S_COLOR_WHITE " %s\n\"", name, reason );
 
 #ifdef USE_SERVER_DEMO
 	if ( drop->demo_recording ) {
@@ -992,13 +999,15 @@ void SV_Auth_DropClient( client_t *drop, const char *reason, const char *message
 		// bots shouldn't go zombie, as there's no real net connection.
 		drop->state = CS_FREE;
 	} else {
+		Q_strncpyz( drop->name, name, sizeof( name ) );	// restore for zombie state logging
 		Com_DPrintf( "Going to CS_ZOMBIE for %s\n", drop->name );
 		drop->state = CS_ZOMBIE;		// become free in a few seconds
 	}
 
-	// Clear this client's shadow history so the next occupant of this slot
-	// (bot or new player) doesn't inherit stale antilag position entries.
+	// Clear this client's shadow/smooth history so the next occupant of
+	// this slot doesn't inherit stale position entries.
 	SV_Antilag_ClearClient( drop - svs.clients );
+	SV_SmoothClearClient( drop - svs.clients );
 
 	// if this was the last client on the server, send a heartbeat
 	// to the master so it is known the server is empty
@@ -2520,33 +2529,17 @@ void SV_ExecuteClientMessage( client_t *cl, msg_t *msg ) {
 
 	// cl->serverId = serverId;
 
-	// if this is a usercmd from a previous gamestate,
-	// ignore it or retransmit the current gamestate
-	//
-	// if the client was downloading, let it stay at whatever serverId and
-	// gamestate it was at.  This allows it to keep downloading even when
-	// the gamestate changes.  After the download is finished, we'll
-	// notice and send it a new game state
-	//
-	if ( cl->state == CS_CONNECTED ) {
-		if ( !cl->downloading ) {
-			// send initial gamestate, client may not acknowledge it in next command but start downloading after SV_ClientCommand()
-			if ( !SVC_RateLimit( &cl->gamestate_rate, 1, 1000 ) ) {
-				SV_SendClientGameState( cl );
-			}
-			return;
-		}
-	} else if ( cl->gamestateAck != GSA_ACKED ) {
-		// early check for gamestate acknowledge
+	// Early gamestate acknowledge check for clients that are past the initial
+	// connection phase (not CS_CONNECTED).  Must happen before client commands
+	// so that gamestateAck is up-to-date when commands are executed.
+	if ( cl->state != CS_CONNECTED && cl->gamestateAck != GSA_ACKED ) {
 		SV_AcknowledgeGamestate( cl, serverId );
 	}
-	// else if ( cl->state == CS_PRIMED ) {
-		// in case of download intention client replies with (messageAcknowledge - gamestateMessageNum) >= 0 and (serverId == sv.serverId), sv.serverId can drift away later
-		// in case of lost gamestate client replies with (messageAcknowledge - gamestateMessageNum) > 0 and (serverId == sv.serverId)
-		// in case of disconnect/etc. client replies with any serverId
-	//}
 
 	// read optional clientCommand strings
+	// Process commands for ALL states (including CS_CONNECTED) so that a
+	// "disconnect" reliable command sent while the client is being set up or
+	// reset after a map load is never silently dropped.
 	do {
 		c = MSG_ReadByte( msg );
 		if ( c != clc_clientCommand ) {
@@ -2559,6 +2552,30 @@ void SV_ExecuteClientMessage( client_t *cl, msg_t *msg ) {
 			return;	// disconnect command
 		}
 	} while ( 1 );
+
+	// if this is a usercmd from a previous gamestate,
+	// ignore it or retransmit the current gamestate
+	//
+	// if the client was downloading, let it stay at whatever serverId and
+	// gamestate it was at.  This allows it to keep downloading even when
+	// the gamestate changes.  After the download is finished, we'll
+	// notice and send it a new game state
+	//
+	if ( cl->state == CS_CONNECTED ) {
+		if ( !cl->downloading ) {
+			// Send initial gamestate.  Client commands (including disconnect)
+			// were already processed above, so this return is safe.
+			if ( !SVC_RateLimit( &cl->gamestate_rate, 1, 1000 ) ) {
+				SV_SendClientGameState( cl );
+			}
+			return;
+		}
+	}
+	// else if ( cl->state == CS_PRIMED ) {
+		// in case of download intention client replies with (messageAcknowledge - gamestateMessageNum) >= 0 and (serverId == sv.serverId), sv.serverId can drift away later
+		// in case of lost gamestate client replies with (messageAcknowledge - gamestateMessageNum) > 0 and (serverId == sv.serverId)
+		// in case of disconnect/etc. client replies with any serverId
+	//}
 
 	if ( cl->gamestateAck != GSA_ACKED ) {
 		// late check for gamestate acknowledge & resend

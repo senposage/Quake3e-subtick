@@ -491,6 +491,7 @@ void SV_SendClientSnapshot( client_t *client );
 void SV_InitSnapshotStorage( void );
 void SV_IssueNewSnapshot( void );
 void SV_SmoothInit( void );
+void SV_SmoothClearClient( int clientNum );
 void SV_SmoothRecordAll( void );
 
 int SV_RemainingGameState( void );

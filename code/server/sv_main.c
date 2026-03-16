@@ -1197,9 +1197,10 @@ static void SV_CheckTimeouts( void ) {
 		// prints in seconds, causing a noisy "Server command overflow" drop.
 		// Kick them cleanly after 10 s of silence so the slot is freed well
 		// before the buffer ever overflows.
+		// Let SV_DropClient handle state transition to CS_ZOMBIE naturally
+		// so the disconnect message can be retransmitted to other clients.
 		if ( cl->state == CS_ACTIVE && svs.time - cl->lastPacketTime > 10000 ) {
 			SV_DropClient( cl, "disconnected" );
-			cl->state = CS_FREE;
 			continue;
 		}
 		if ( cl->state >= CS_CONNECTED && cl->lastPacketTime - droppoint < 0 ) {
@@ -1606,6 +1607,11 @@ void SV_Frame( int msec ) {
 						awGap = sv.gameTime - awCl->awLastThinkTime;
 						if ( awGap > awTol ) {
 							awCl->lastUsercmd.serverTime += _gameMsec;
+							// Cap so injected serverTime never outruns real time —
+							// without this, a long lag spike inflates serverTime
+							// so that real usercmds are silently dropped on resume.
+							if ( awCl->lastUsercmd.serverTime > sv.gameTime )
+								awCl->lastUsercmd.serverTime = sv.gameTime;
 
 							if ( awMode >= 2 ) {
 								int decayStart = awTol + awExtraMs;

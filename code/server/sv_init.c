@@ -1007,19 +1007,24 @@ void SV_Shutdown( const char *finalmsg ) {
 	SV_ShutdownGameProgs();
 	SV_InitChallenger();
 
-	// free current level
-	SV_ClearServer();
+	// save before SV_ClearServer zeroes sv (memsets the entire sv struct)
+	{
+		const int maxclients = sv.maxclients;
 
-	SV_FreeIP4DB();
+		// free current level
+		SV_ClearServer();
 
-	// free server static data
-	if ( svs.clients ) {
-		int index;
+		SV_FreeIP4DB();
 
-		for ( index = 0; index < sv.maxclients; index++ )
-			SV_FreeClient( &svs.clients[ index ] );
+		// free server static data
+		if ( svs.clients ) {
+			int index;
 
-		Z_Free( svs.clients );
+			for ( index = 0; index < maxclients; index++ )
+				SV_FreeClient( &svs.clients[ index ] );
+
+			Z_Free( svs.clients );
+		}
 	}
 	Com_Memset( &svs, 0, sizeof( svs ) );
 	sv.time = 0;

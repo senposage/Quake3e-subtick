@@ -3000,6 +3000,28 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 		if ( NET_CompareAdr( from, &clc.serverAddress ) ) {
 			if ( cls.state >= CA_CONNECTED ) {
 				if ( cl_noOOBDisconnect->integer ) {
+					static int  oobCount;
+					static int  oobFirstTime;
+
+					// Bombardment guard: if the server keeps sending OOB
+					// disconnects without any in-band snapshots arriving,
+					// eventually honor it instead of hanging in limbo.
+					if ( oobCount == 0 )
+						oobFirstTime = cls.realtime;
+					oobCount++;
+
+					// Reset counter if we've received an in-band snapshot
+					// since the bombardment started (lastPacketTime advanced
+					// by in-band traffic is tracked via clc.lastPacketTime
+					// separately, but here we just check if enough OOBs
+					// piled up in a short window).
+					if ( oobCount > 10 && cls.realtime - oobFirstTime < 30000 ) {
+						oobCount = 0;
+						SCR_LogOOBDisconnect( qtrue );
+						SCR_LogDisconnect( "OOB disconnect bombardment — honoring after 10+ packets" );
+						Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
+					}
+
 					// Treat as a spurious or undocumented server-side action:
 					// log it for diagnostics but do NOT honour it.  Return qtrue
 					// so that CL_PacketEvent updates clc.lastPacketTime — the server

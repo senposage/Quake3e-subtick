@@ -54,6 +54,12 @@ void SV_SmoothInit( void ) {
 }
 
 
+void SV_SmoothClearClient( int clientNum ) {
+	if ( clientNum >= 0 && clientNum < MAX_CLIENTS )
+		Com_Memset( &sv_smoothHistory[clientNum], 0, sizeof( sv_smoothHistory[0] ) );
+}
+
+
 static void SV_SmoothRecord( int clientNum ) {
 	svSmoothHistory_t *hist;
 	svSmoothPos_t *slot;

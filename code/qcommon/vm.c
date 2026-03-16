@@ -1647,7 +1647,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	qboolean isVanilla;
 	const char *patchCvar;
 
-	Com_Printf( S_COLOR_CYAN "VM_URT43_CgamePatches: entered (CRC=%08X)\n", vm->crc32sum );
+	Com_DPrintf( S_COLOR_CYAN "VM_URT43_CgamePatches: entered (CRC=%08X)\n", vm->crc32sum );
 
 	/* Select the patch bitmask based on server type.
 	 * cl_urt43serverIsVanilla is a CVAR_TEMP set by CL_ParseServerInfo each
@@ -1658,7 +1658,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	patchCvar  = isVanilla ? "cl_qvmPatchVanilla" : "cl_urt43cgPatches";
 	cgPatches  = Cvar_VariableIntegerValue( patchCvar );
 
-	Com_Printf( S_COLOR_CYAN "UrT43 cgame patch: CRC=%08X ic=%d dl=%d flags=0x%x (%s -> %s)\n",
+	Com_DPrintf( S_COLOR_CYAN "UrT43 cgame patch: CRC=%08X ic=%d dl=%d flags=0x%x (%s -> %s)\n",
 		vm->crc32sum, vm->instructionCount, vm->exactDataLength, cgPatches,
 		isVanilla ? "vanilla server" : "custom server", patchCvar );
 
@@ -1670,11 +1670,11 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	if ( cgPatches & 1 ) {
 		qboolean ok_lo, ok_hi;
 
-		Com_Printf( S_COLOR_CYAN "  [Patch2] frameInterpolation clamp:\n" );
-		Com_Printf( "    [0xa688] op=0x%02x val=0x%08x (expect op=0x%02x val=0x%08x)\n",
+		Com_DPrintf( S_COLOR_CYAN "  [Patch2] frameInterpolation clamp:\n" );
+		Com_DPrintf( "    [0xa688] op=0x%02x val=0x%08x (expect op=0x%02x val=0x%08x)\n",
 			buf[0xa688].op, (unsigned)buf[0xa688].value,
 			OP_CONST, 0x3dcccccdU );
-		Com_Printf( "    [0xa692] op=0x%02x val=0x%08x (expect op=0x%02x val=0x%08x)\n",
+		Com_DPrintf( "    [0xa692] op=0x%02x val=0x%08x (expect op=0x%02x val=0x%08x)\n",
 			buf[0xa692].op, (unsigned)buf[0xa692].value,
 			OP_CONST, 0x3f7d70a4U );
 
@@ -1685,20 +1685,20 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 			buf[0xa688].value = 0;           /* lower bound: 0.1f -> 0.0f */
 			buf[0xa692].value = 0x3f800000;  /* upper clamp value: ~0.99f -> 1.0f */
 			applied |= 1;
-			Com_Printf( S_COLOR_CYAN "    [Patch2] APPLIED: lower=0.0f upper=1.0f\n" );
+			Com_DPrintf( S_COLOR_CYAN "    [Patch2] APPLIED: lower=0.0f upper=1.0f\n" );
 		} else {
 			skipped |= 1;
 			if ( !ok_lo )
-				Com_Printf( S_COLOR_YELLOW "    [Patch2] SKIP: instr 0xa688 mismatch"
+				Com_DPrintf( S_COLOR_YELLOW "    [Patch2] SKIP: instr 0xa688 mismatch"
 					" (op=%d val=0x%08x)\n",
 					buf[0xa688].op, (unsigned)buf[0xa688].value );
 			if ( !ok_hi )
-				Com_Printf( S_COLOR_YELLOW "    [Patch2] SKIP: instr 0xa692 mismatch"
+				Com_DPrintf( S_COLOR_YELLOW "    [Patch2] SKIP: instr 0xa692 mismatch"
 					" (op=%d val=0x%08x)\n",
 					buf[0xa692].op, (unsigned)buf[0xa692].value );
 		}
 	} else {
-		Com_Printf( S_COLOR_YELLOW "  [Patch2] DISABLED by cvar (bit 0 not set)\n" );
+		Com_DPrintf( S_COLOR_YELLOW "  [Patch2] DISABLED by cvar (bit 0 not set)\n" );
 	}
 
 	/* ---------------------------------------------------------------
@@ -1712,25 +1712,25 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	if ( cgPatches & 2 ) {
 		qboolean ok;
 
-		Com_Printf( S_COLOR_CYAN "  [Patch3] CG_InterpolateEntityPosition null crash:\n" );
-		Com_Printf( "    [0x15893] op=0x%02x val=0x%08x (expect NE=0x%02x target=0x%08x)\n",
+		Com_DPrintf( S_COLOR_CYAN "  [Patch3] CG_InterpolateEntityPosition null crash:\n" );
+		Com_DPrintf( "    [0x15893] op=0x%02x val=0x%08x (expect NE=0x%02x target=0x%08x)\n",
 			buf[0x15893].op, (unsigned)buf[0x15893].value,
 			OP_NE, 0x00015899U );
-		Com_Printf( "    [0x15894] op=0x%02x val=0x%08x (expect CONST=0x%02x val=0x%08x)\n",
+		Com_DPrintf( "    [0x15894] op=0x%02x val=0x%08x (expect CONST=0x%02x val=0x%08x)\n",
 			buf[0x15894].op, (unsigned)buf[0x15894].value,
 			OP_CONST, 0x000142ffU );
-		Com_Printf( "    [0x15895] op=0x%02x       (expect ARG=0x%02x)\n",
+		Com_DPrintf( "    [0x15895] op=0x%02x       (expect ARG=0x%02x)\n",
 			buf[0x15895].op, OP_ARG );
-		Com_Printf( "    [0x15896] op=0x%02x val=0x%08x (expect CONST=0x%02x val=0x%08x)\n",
+		Com_DPrintf( "    [0x15896] op=0x%02x val=0x%08x (expect CONST=0x%02x val=0x%08x)\n",
 			buf[0x15896].op, (unsigned)buf[0x15896].value,
 			OP_CONST, 0x000006f8U );
-		Com_Printf( "    [0x15897] op=0x%02x       (expect CALL=0x%02x)\n",
+		Com_DPrintf( "    [0x15897] op=0x%02x       (expect CALL=0x%02x)\n",
 			buf[0x15897].op, OP_CALL );
-		Com_Printf( "    [0x15898] op=0x%02x       (expect POP=0x%02x)\n",
+		Com_DPrintf( "    [0x15898] op=0x%02x       (expect POP=0x%02x)\n",
 			buf[0x15898].op, OP_POP );
-		Com_Printf( "    [0x1594d] op=0x%02x       (expect PUSH=0x%02x) [early-return target]\n",
+		Com_DPrintf( "    [0x1594d] op=0x%02x       (expect PUSH=0x%02x) [early-return target]\n",
 			buf[0x1594d].op, OP_PUSH );
-		Com_Printf( "    [0x1594e] op=0x%02x val=0x%08x (expect LEAVE=0x%02x val=0x%08x)\n",
+		Com_DPrintf( "    [0x1594e] op=0x%02x val=0x%08x (expect LEAVE=0x%02x val=0x%08x)\n",
 			buf[0x1594e].op, (unsigned)buf[0x1594e].value,
 			OP_LEAVE, 0x00000040U );
 
@@ -1754,13 +1754,13 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 			/* Mark early-return target as a jump target so JIT emits a native label */
 			buf[0x1594d].jused = 1;
 			applied |= 2;
-			Com_Printf( S_COLOR_CYAN "    [Patch3] APPLIED: CG_Error->early return at instr 0x1594d\n" );
+			Com_DPrintf( S_COLOR_CYAN "    [Patch3] APPLIED: CG_Error->early return at instr 0x1594d\n" );
 		} else {
 			skipped |= 2;
-			Com_Printf( S_COLOR_YELLOW "    [Patch3] SKIP: instruction pattern mismatch\n" );
+			Com_DPrintf( S_COLOR_YELLOW "    [Patch3] SKIP: instruction pattern mismatch\n" );
 		}
 	} else {
-		Com_Printf( S_COLOR_YELLOW "  [Patch3] DISABLED by cvar (bit 1 not set)\n" );
+		Com_DPrintf( S_COLOR_YELLOW "  [Patch3] DISABLED by cvar (bit 1 not set)\n" );
 	}
 
 	/* ---------------------------------------------------------------
@@ -1802,18 +1802,18 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 		int32_t *jt_case1 = (int32_t *)(vm->dataBase + URT43_JT_TR_INTERPOLATE);
 		int32_t *jt_case2 = (int32_t *)(vm->dataBase + URT43_JT_TR_LINEAR);
 
-		Com_Printf( S_COLOR_CYAN "  [Patch1] BG_EvaluateTrajectory TR_INTERPOLATE->TR_LINEAR+guard:\n" );
-		Com_Printf( "    data[0x%05x] case0(TR_STATIONARY) =0x%05x (expect 0x%05x)\n",
+		Com_DPrintf( S_COLOR_CYAN "  [Patch1] BG_EvaluateTrajectory TR_INTERPOLATE->TR_LINEAR+guard:\n" );
+		Com_DPrintf( "    data[0x%05x] case0(TR_STATIONARY) =0x%05x (expect 0x%05x)\n",
 			URT43_JT_TR_STATIONARY,  *jt_case0, URT43_INSTR_TR_STATIONARY_CASE );
-		Com_Printf( "    data[0x%05x] case1(TR_INTERPOLATE)=0x%05x (expect 0x%05x -> patch to 0x%05x)\n",
+		Com_DPrintf( "    data[0x%05x] case1(TR_INTERPOLATE)=0x%05x (expect 0x%05x -> patch to 0x%05x)\n",
 			URT43_JT_TR_INTERPOLATE, *jt_case1,
 			URT43_INSTR_TR_STATIONARY_CASE, URT43_INSTR_TR_GUARD_CASE );
-		Com_Printf( "    data[0x%05x] case2(TR_LINEAR)     =0x%05x (expect 0x%05x)\n",
+		Com_DPrintf( "    data[0x%05x] case2(TR_LINEAR)     =0x%05x (expect 0x%05x)\n",
 			URT43_JT_TR_LINEAR,      *jt_case2, URT43_INSTR_TR_LINEAR_CASE );
-		Com_Printf( "    guard instr [0x%05x] op=0x%02x (expect OP_CONST=0x%02x val=1)\n",
+		Com_DPrintf( "    guard instr [0x%05x] op=0x%02x (expect OP_CONST=0x%02x val=1)\n",
 			URT43_INSTR_TR_GUARD_CASE,
 			buf[URT43_INSTR_TR_GUARD_CASE].op, OP_CONST );
-		Com_Printf( "    guard instr [0x%05x] op=0x%02x (expect OP_CALL=0x%02x)\n",
+		Com_DPrintf( "    guard instr [0x%05x] op=0x%02x (expect OP_CALL=0x%02x)\n",
 			URT43_INSTR_TR_GUARD_CASE + 9,
 			buf[URT43_INSTR_TR_GUARD_CASE + 9].op, OP_CALL );
 
@@ -1861,12 +1861,12 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 			*jt_case1 = URT43_INSTR_TR_GUARD_CASE;
 
 			applied |= 4;
-			Com_Printf( S_COLOR_CYAN "    [Patch1] APPLIED: TR_INTERPOLATE -> guard(0x%05x)"
+			Com_DPrintf( S_COLOR_CYAN "    [Patch1] APPLIED: TR_INTERPOLATE -> guard(0x%05x)"
 				" trTime==0->TR_STATIONARY else->TR_LINEAR\n",
 				URT43_INSTR_TR_GUARD_CASE );
 		} else {
 			skipped |= 4;
-			Com_Printf( S_COLOR_YELLOW "    [Patch1] SKIP: mismatch"
+			Com_DPrintf( S_COLOR_YELLOW "    [Patch1] SKIP: mismatch"
 				" (case0=0x%05x case1=0x%05x case2=0x%05x"
 				" guard_op=%d guard+9_op=%d)\n",
 				*jt_case0, *jt_case1, *jt_case2,
@@ -1874,14 +1874,13 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 				buf[URT43_INSTR_TR_GUARD_CASE + 9].op );
 		}
 	} else {
-		Com_Printf( S_COLOR_YELLOW "  [Patch1] DISABLED by cvar (bit 2 not set)\n" );
+		Com_DPrintf( S_COLOR_YELLOW "  [Patch1] DISABLED by cvar (bit 2 not set)\n" );
 	}
 
-	if ( applied ) {
-		Com_Printf( S_COLOR_CYAN  "UrT43 cgame patch: applied=0x%x skipped=0x%x\n", applied, skipped );
-	} else {
-		Com_Printf( S_COLOR_YELLOW "UrT43 cgame patch: applied=0x%x skipped=0x%x (no patches applied)\n", applied, skipped );
-	}
+	/* Summary line — always visible */
+	Com_Printf( S_COLOR_CYAN "UrT43 cgame patch: applied=0x%x skipped=0x%x%s\n",
+		applied, skipped,
+		applied ? "" : " (no patches applied)" );
 }
 
 

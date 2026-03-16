@@ -10,3 +10,4 @@ UrbanTerror42_Source/
 .git
 build/
 *.o
+qvmrnd/
