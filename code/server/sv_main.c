@@ -187,6 +187,15 @@ void SV_AddServerCommand( client_t *client, const char *cmd ) {
 	// we check == instead of >= so a broadcast print added by SV_DropClient()
 	// doesn't cause a recursive drop client
 	if ( client->reliableSequence - client->reliableAcknowledge == MAX_RELIABLE_COMMANDS + 1 ) {
+		// If the client has not sent a packet for several seconds they have
+		// disconnected ungracefully (crash / Alt-F4 / OS-level quit without a
+		// clean disconnect packet).  Drop them silently so the slot is freed
+		// immediately and other players see a normal "disconnected" message
+		// rather than the confusing "Server command overflow" error.
+		if ( svs.time - client->lastPacketTime > 5000 ) {
+			SV_DropClient( client, "disconnected" );
+			return;
+		}
 		Com_Printf( "===== pending server commands =====\n" );
 		n = client->reliableSequence - client->reliableAcknowledge;
 		for ( i = 0; i < n; i++ ) {
