@@ -332,6 +332,19 @@ typedef struct {
 static alLoop_t s_al_loops[MAX_GENTITIES];
 static int      s_al_loopFrame = 0;
 
+/* Per-frame multi-hop trace budget.
+ * Each multi-hop run casts up to 16 CM_BoxTrace calls (8 directions × 2 legs).
+ * With 32 players all firing simultaneously, every new weapon sound starts with
+ * occlusionTick=0 and traces on the same frame — potentially hundreds of traces
+ * in one audio tick, starving the audio thread's buffer fill and causing
+ * crackling that scales with the number of concurrent sound events.
+ * Limiting multi-hop to S_AL_MULTIHOP_BUDGET sources per frame keeps the
+ * worst-case trace count bounded.  Sources beyond the budget still run the
+ * fast direct+near-source-probe path; only the two-hop loop is skipped. */
+#define S_AL_MULTIHOP_BUDGET    8
+static int s_al_multihop_frame  = -1; /* s_al_loopFrame when count was reset */
+static int s_al_multihop_used   = 0;  /* multi-hop runs consumed this frame  */
+
 /* Background music stream */
 typedef struct {
     ALuint          source;
@@ -1578,7 +1591,18 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
          * direct listener→source line (already covered by the direct trace).
          * The hop score is penalised by the path-length ratio so longer
          * corridors attenuate more than short doorways. */
-        if (bestFrac < 0.5f && srcDist > 200.f) {
+        /* Budget check: reset counter at the start of each new audio frame,
+         * then skip multi-hop once the per-frame limit is reached.
+         * This prevents a burst of simultaneous sound events (e.g. 32 players
+         * firing at once) from piling up hundreds of CM_BoxTrace calls in a
+         * single tick and starving the audio buffer fill thread. */
+        if (s_al_multihop_frame != s_al_loopFrame) {
+            s_al_multihop_frame = s_al_loopFrame;
+            s_al_multihop_used  = 0;
+        }
+        if (bestFrac < 0.5f && srcDist > 200.f
+                && s_al_multihop_used < S_AL_MULTIHOP_BUDGET) {
+            s_al_multihop_used++;
             static const float hopDirs[8][3] = {
                 { 1.f, 0.f, 0.f}, {-1.f,  0.f, 0.f},
                 { 0.f, 1.f, 0.f}, { 0.f, -1.f, 0.f},
@@ -1682,8 +1706,17 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 floor = base * distScale;
             }
 
-            if (bestFrac < floor)
+            if (bestFrac < floor) {
                 bestFrac = floor;
+                /* Floor wins: the BSP graph says areas are connected, so let
+                 * the sound through at the floor level — but there is no
+                 * meaningful "gap position" to redirect toward.  Keep the
+                 * acoustic position at the real source so the projection step
+                 * below does not amplify a stale multi-hop waypoint (which is
+                 * near the listener, not the source) into a completely wrong
+                 * apparent direction that changes every trace tick. */
+                VectorCopy(srcOrigin, acousticPos);
+            }
         }
     }
 
@@ -5150,13 +5183,24 @@ static void S_AL_Update( int msec )
                                 * (1.0f - occ);
                 s_al_src[i].occlusionTick     = s_al_loopFrame;
                 s_al_src[i].occlusionTarget   = occ;
-                /* Store as offset from real origin so it tracks moving entities */
-                s_al_src[i].acousticOffset[0] = pBlend *
-                    (acousticPos[0] - s_al_src[i].origin[0]);
-                s_al_src[i].acousticOffset[1] = pBlend *
-                    (acousticPos[1] - s_al_src[i].origin[1]);
-                s_al_src[i].acousticOffset[2] = pBlend *
-                    (acousticPos[2] - s_al_src[i].origin[2]);
+                /* IIR-blend offset toward the new target instead of snapping.
+                 * Direct assignment causes the apparent source direction to jump
+                 * abruptly at every trace tick (every 4-8 frames for medium/far
+                 * sources), which is audible as directional crackling with HRTF.
+                 * Blending at step=0.35 matches the gain-opening speed so the
+                 * position and gain fade together without pops. */
+                {
+                    float off0 = pBlend * (acousticPos[0] - s_al_src[i].origin[0]);
+                    float off1 = pBlend * (acousticPos[1] - s_al_src[i].origin[1]);
+                    float off2 = pBlend * (acousticPos[2] - s_al_src[i].origin[2]);
+                    float offStep = 0.35f;
+                    s_al_src[i].acousticOffset[0] +=
+                        (off0 - s_al_src[i].acousticOffset[0]) * offStep;
+                    s_al_src[i].acousticOffset[1] +=
+                        (off1 - s_al_src[i].acousticOffset[1]) * offStep;
+                    s_al_src[i].acousticOffset[2] +=
+                        (off2 - s_al_src[i].acousticOffset[2]) * offStep;
+                }
             }
 
             /* ---- Phase 2: IIR smooth occlusionGain toward target ---- */
