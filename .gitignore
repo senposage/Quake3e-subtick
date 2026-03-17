@@ -14,3 +14,4 @@ qvmrnd/
 
 # Debug log files
 netdebug_*.log
+*.d
