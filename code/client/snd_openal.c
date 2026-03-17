@@ -160,6 +160,7 @@ static ALCvoid     (ALC_APIENTRY *qalcGetIntegerv)(ALCdevice *device, ALCenum pa
 /* ALC_SOFT_HRTF and ALC_SOFT_output_mode extension functions (optional) */
 static LPALCRESETDEVICESOFT  qalcResetDeviceSoft  = NULL;  /* re-configure device */
 static LPALCGETSTRINGISOFT   qalcGetStringiSOFT   = NULL;  /* enumerate HRTF datasets */
+static LPALGETSTRINGISOFT    qalGetStringiSOFT    = NULL;  /* enumerate resamplers */
 
 /* =========================================================================
  * ALC_EXT_EFX function pointers (all optional — graceful no-op if absent)
@@ -378,6 +379,7 @@ static qboolean s_al_started  = qfalse;
 static qboolean s_al_muted    = qfalse;
 static qboolean s_al_hrtf     = qfalse; /* ALC_HRTF_SOFT active */
 static qboolean s_al_inwater  = qfalse;
+static ALint    s_al_bestResampler = -1; /* AL_SOFT_source_resampler index, -1 = use default */
 
 static vec3_t s_al_listener_origin;   /* updated in S_AL_Respatialize */
 static int    s_al_listener_entnum = -1; /* entity number of the listener */
@@ -460,6 +462,9 @@ typedef struct {
     ALuint   echoSlot;        /* auxiliary effect slot for the echo effect */
     ALuint   chorusEffect;    /* AL_EFFECT_CHORUS — underwater modulation wobble (aux send 1) */
     ALuint   chorusSlot;      /* auxiliary effect slot for the chorus effect */
+    ALuint   eqEffect;        /* AL_EFFECT_EQUALIZER — global tone shaping */
+    ALuint   eqSlot;          /* auxiliary effect slot for the EQ */
+    int      eqSend;          /* aux send index used for EQ (-1 = not wired) */
     ALuint   occlusionFilter[S_AL_MAX_SRC];
     qboolean hasEAXReverb;    /* AL_EFFECT_EAXREVERB available (vs plain reverb) */
     ALint    maxSends;        /* ALC_MAX_AUXILIARY_SENDS reported by the device */
@@ -574,6 +579,11 @@ static cvar_t *s_alGrenadeBloomMs;      /* bloom decay duration in ms */
 static cvar_t *s_alGrenadeBloomHFFloor; /* min HF gain during grenade blast [0..1] */
 static cvar_t *s_alGrenadeBloomDuck;       /* 0=off, 1=also apply mild listener-gain duck with bloom */
 static cvar_t *s_alGrenadeBloomDuckFloor;  /* min listener gain during grenade duck [0.5..0.95] */
+/* Global EQ — compensate for occlusion processing making audio soft */
+static cvar_t *s_alEqLow;         /* low shelf gain (linear, 1.0=flat, >1.0=boost) */
+static cvar_t *s_alEqMid;         /* mid band gain */
+static cvar_t *s_alEqHigh;        /* high shelf gain */
+static cvar_t *s_alEqGain;        /* EQ wet mix level [0..1] */
 /* Extra-vol slots: player-configurable sound-path filters with their own volume knob.
  * Each slot is one pattern (optionally prefixed with ! to exclude, suffixed with :-N dB).
  * All slots are CVAR_ARCHIVE so every slot always appears in the config for easy editing. */
@@ -775,6 +785,7 @@ static qboolean S_AL_LoadLibrary( void )
      * These are only present in OpenAL Soft; graceful no-op on other stacks. */
     qalcResetDeviceSoft = (LPALCRESETDEVICESOFT) AL_GetProc(al_handle, "alcResetDeviceSoft");
     qalcGetStringiSOFT  = (LPALCGETSTRINGISOFT)  AL_GetProc(al_handle, "alcGetStringiSOFT");
+    qalGetStringiSOFT   = (LPALGETSTRINGISOFT)   AL_GetProc(al_handle, "alGetStringiSOFT");
 
     return qtrue;
 }
@@ -1643,7 +1654,12 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
 
                 /* Score = clearness of both legs × distance penalty.
                  * Longer corridor paths get more attenuation than short
-                 * doorway paths (triangle inequality: pathLen ≥ srcDist). */
+                 * doorway paths (triangle inequality: pathLen ≥ srcDist).
+                 *
+                 * Hard-cap: multi-hop corridor sound should never exceed
+                 * ~40% of direct LOS.  Sound bending around corners loses
+                 * significant energy; without this cap the wet sends
+                 * (reverb+echo+EQ) stack on top and cause clipping. */
                 hopScore = hop1.fraction * hop2.fraction;
                 {
                     vec3_t leg2Vec;
@@ -1653,12 +1669,18 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 pathLen = leg1Dist + leg2Dist;
                 if (pathLen > srcDist && srcDist > 1.f)
                     hopScore *= srcDist / pathLen;
+                if (hopScore > 0.40f)
+                    hopScore = 0.40f;
 
                 if (hopScore > bestFrac) {
                     bestFrac = hopScore;
-                    VectorCopy(waypoint, acousticPos);
-                    if (bestFrac >= 0.9f)
-                        break; /* clear corridor found */
+                    /* Do NOT update acousticPos from multi-hop waypoints.
+                     * The 8 fixed world-space hop directions produce
+                     * different "winners" as the listener moves, causing
+                     * the acoustic position to oscillate between corridors.
+                     * With HRTF this oscillation is audible as crackling;
+                     * without HRTF it causes panning wobble.
+                     * Only near-source probes (above) update direction. */
                 }
             }
         }
@@ -1753,6 +1775,7 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
         }
     }
 
+    if (bestFrac > 1.0f) bestFrac = 1.0f;
     return 0.1f + 0.9f * bestFrac;
 }
 
@@ -1870,6 +1893,8 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     qalSourcei(sid,  AL_BUFFER,   r->buffer);
     qalSourcef(sid,  AL_GAIN,     (vol / 255.0f) * catVol * src->sampleVol);
     qalSourcei(sid,  AL_LOOPING,  AL_FALSE);
+    if (s_al_bestResampler >= 0)
+        qalSourcei(sid, AL_SOURCE_RESAMPLER_SOFT, s_al_bestResampler);
 
     if (isLocal) {
         qalSourcei(sid, AL_SOURCE_RELATIVE, AL_TRUE);
@@ -1891,6 +1916,13 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
             if (s_al_efx.maxSends >= 2)
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)AL_EFFECTSLOT_NULL, 1, (ALint)AL_FILTER_NULL);
+            /* EQ send — local sources (own weapons/footsteps) get the same
+             * bass/mid boost as world sources for consistent tonal balance. */
+            if (s_al_efx.eqSend >= 0 && s_al_efx.eqSlot) {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)s_al_efx.eqSlot, s_al_efx.eqSend,
+                            (ALint)AL_FILTER_NULL);
+            }
             if (s_alDebugReverb && s_alDebugReverb->integer >= 2)
                 Com_Printf(S_COLOR_CYAN "[alfilter] src#%d local: cleared stale filter\n", idx);
         }
@@ -1939,6 +1971,12 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                     send1 = s_al_efx.echoSlot;
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)send1, 1, (ALint)AL_FILTER_NULL);
+            }
+            /* EQ send — always-on tone shaping for bass/mid presence. */
+            if (s_al_efx.eqSend >= 0 && s_al_efx.eqSlot) {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)s_al_efx.eqSlot, s_al_efx.eqSend,
+                            (ALint)AL_FILTER_NULL);
             }
             /* Pre-set the occlusion filter to pass-through values so the
              * filter object is ready for the first occlusion update tick.
@@ -2006,6 +2044,8 @@ static void S_AL_StopSource( int idx )
     if (s_al_efx.available) {
         qalSource3i(s_al_src[idx].source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 0, AL_FILTER_NULL);
         qalSource3i(s_al_src[idx].source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, 1, AL_FILTER_NULL);
+        if (s_al_efx.eqSend >= 0)
+            qalSource3i(s_al_src[idx].source, AL_AUXILIARY_SEND_FILTER, AL_EFFECTSLOT_NULL, s_al_efx.eqSend, AL_FILTER_NULL);
         qalSourcei(s_al_src[idx].source, AL_DIRECT_FILTER, AL_FILTER_NULL);
     }
     s_al_src[idx].isPlaying  = qfalse;
@@ -2303,11 +2343,50 @@ static void S_AL_InitEFX( void )
         }
     }
 
+    /* Global EQ effect — tone shaping to compensate for occlusion softening.
+     * Uses its own aux send (2 if available, else shares send 1 with echo).
+     * The EQ is additive: dry signal stays, EQ'd copy is mixed in at
+     * s_alEqGain level.  Set s_alEqGain 0 to disable without removing the effect. */
+    s_al_efx.eqSend = -1;
+    if (s_alEqGain && s_alEqGain->value > 0.0f) {
+        int eqSendIdx = (maxSends >= 3) ? 2 : ((maxSends >= 2) ? 1 : -1);
+        if (eqSendIdx >= 0) {
+            qalGetError();
+            qalGenEffects(1, &s_al_efx.eqEffect);
+            qalEffecti(s_al_efx.eqEffect, AL_EFFECT_TYPE, AL_EFFECT_EQUALIZER);
+            if (qalGetError() == AL_NO_ERROR) {
+                float low  = s_alEqLow  ? s_alEqLow->value  : 1.26f;
+                float mid  = s_alEqMid  ? s_alEqMid->value  : 1.26f;
+                float high = s_alEqHigh ? s_alEqHigh->value : 1.0f;
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_LOW_GAIN,    low);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_LOW_CUTOFF,  200.0f);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID1_GAIN,   mid);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID1_CENTER, 800.0f);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID1_WIDTH,  1.0f);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID2_GAIN,   mid);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID2_CENTER, 2500.0f);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID2_WIDTH,  1.0f);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_HIGH_GAIN,   high);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_HIGH_CUTOFF, 6000.0f);
+                qalGenAuxiliaryEffectSlots(1, &s_al_efx.eqSlot);
+                qalAuxiliaryEffectSloti(s_al_efx.eqSlot, AL_EFFECTSLOT_EFFECT,
+                                        (ALint)s_al_efx.eqEffect);
+                qalAuxiliaryEffectSlotf(s_al_efx.eqSlot, AL_EFFECTSLOT_GAIN,
+                                        s_alEqGain->value);
+                s_al_efx.eqSend = eqSendIdx;
+            } else {
+                qalDeleteEffects(1, &s_al_efx.eqEffect);
+                s_al_efx.eqEffect = 0;
+            }
+        }
+    }
+
     s_al_efx.available = qtrue;
-    Com_Printf("S_AL: EFX available (%s reverb, %d aux sends%s%s)\n",
+    Com_Printf("S_AL: EFX available (%s reverb, %d aux sends%s%s%s)\n",
         s_al_efx.hasEAXReverb ? "EAX" : "standard", maxSends,
         s_al_efx.echoSlot   ? ", echo"   : "",
-        s_al_efx.chorusSlot ? ", chorus" : "");
+        s_al_efx.chorusSlot ? ", chorus" : "",
+        s_al_efx.eqSlot     ? ", EQ"     : "");
 }
 
 static void S_AL_Shutdown( void )
@@ -2366,6 +2445,10 @@ static void S_AL_Shutdown( void )
             qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.chorusSlot);
         if (s_al_efx.chorusEffect)
             qalDeleteEffects(1, &s_al_efx.chorusEffect);
+        if (s_al_efx.eqSlot)
+            qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.eqSlot);
+        if (s_al_efx.eqEffect)
+            qalDeleteEffects(1, &s_al_efx.eqEffect);
         for (j = 0; j < S_AL_MAX_SRC; j++)
             if (s_al_efx.occlusionFilter[j])
                 qalDeleteFilters(1, &s_al_efx.occlusionFilter[j]);
@@ -5007,6 +5090,35 @@ static void S_AL_Update( int msec )
             }
             lastInwater = s_al_inwater;
         }
+
+        /* Live-update EQ parameters when cvars change at runtime. */
+        if (s_al_efx.eqSend >= 0 && s_al_efx.eqEffect) {
+            static float lastEqLow  = -1.f;
+            static float lastEqMid  = -1.f;
+            static float lastEqHigh = -1.f;
+            static float lastEqGain = -1.f;
+            float curLow  = s_alEqLow  ? s_alEqLow->value  : 1.26f;
+            float curMid  = s_alEqMid  ? s_alEqMid->value  : 1.26f;
+            float curHigh = s_alEqHigh ? s_alEqHigh->value : 1.0f;
+            float curGain = s_alEqGain ? s_alEqGain->value : 1.0f;
+            if (curLow != lastEqLow || curMid != lastEqMid ||
+                curHigh != lastEqHigh || curGain != lastEqGain) {
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_LOW_GAIN,    curLow);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID1_GAIN,   curMid);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_MID2_GAIN,   curMid);
+                qalEffectf(s_al_efx.eqEffect, AL_EQUALIZER_HIGH_GAIN,   curHigh);
+                /* Re-commit the modified effect into the slot so OpenAL
+                 * picks up the parameter changes immediately. */
+                qalAuxiliaryEffectSloti(s_al_efx.eqSlot, AL_EFFECTSLOT_EFFECT,
+                                        (ALint)s_al_efx.eqEffect);
+                qalAuxiliaryEffectSlotf(s_al_efx.eqSlot, AL_EFFECTSLOT_GAIN,
+                                        curGain);
+                lastEqLow  = curLow;
+                lastEqMid  = curMid;
+                lastEqHigh = curHigh;
+                lastEqGain = curGain;
+            }
+        }
     }
 
     /* Live-update per-category volume when any vol cvar changes.
@@ -6242,6 +6354,23 @@ qboolean S_AL_Init( soundInterface_t *si )
         "2 = verbose: every source setup, buffer queue/unqueue, and state change. "
         "Not archived. Set before starting the game to capture the init sequence.");
 
+    s_alEqLow = Cvar_Get("s_alEqLow", "1.26", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alEqLow,
+        "EQ low-shelf gain (linear). 1.0 = flat, 1.26 = +2 dB (default). "
+        "Range 0.126 – 7.943 (±18 dB). Compensates for occlusion softening.");
+    s_alEqMid = Cvar_Get("s_alEqMid", "1.26", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alEqMid,
+        "EQ mid-band gain (linear). 1.0 = flat, 1.26 = +2 dB (default). "
+        "Applied to both mid1 (800 Hz) and mid2 (2500 Hz) bands.");
+    s_alEqHigh = Cvar_Get("s_alEqHigh", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alEqHigh,
+        "EQ high-shelf gain (linear). 1.0 = flat (default). "
+        "Boost above 6 kHz — leave at 1.0 unless you want extra brightness.");
+    s_alEqGain = Cvar_Get("s_alEqGain", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_SetDescription(s_alEqGain,
+        "EQ effect slot wet-mix level [0..1]. 1.0 = full effect (default), "
+        "0.0 = disabled. Controls how much of the EQ signal is mixed in.");
+
     /* Load library */
     if (!S_AL_LoadLibrary())
         return qfalse;
@@ -6336,6 +6465,34 @@ qboolean S_AL_Init( soundInterface_t *si )
      * We log this at startup and use it in the playback-debug output. */
     qalcGetIntegerv(s_al_device, ALC_FREQUENCY, 1, &s_al_deviceFreq);
     Com_Printf("S_AL: device mixing frequency: %d Hz\n", (int)s_al_deviceFreq);
+
+    /* Pick the highest-quality resampler offered by OpenAL Soft.
+     * Priority: BSinc24 > BSinc12 > Cubic > (default).
+     * This eliminates the tinny/thin quality of the default Linear
+     * resampler on sounds whose sample rate differs from the device rate. */
+    s_al_bestResampler = -1;
+    if (qalGetStringiSOFT && qalIsExtensionPresent("AL_SOFT_source_resampler")) {
+        ALint numResamplers = qalGetInteger(AL_NUM_RESAMPLERS_SOFT);
+        ALint defResampler  = qalGetInteger(AL_DEFAULT_RESAMPLER_SOFT);
+        ALint bestIdx = defResampler;
+        int   bestRank = 0;   /* 1=Cubic, 2=BSinc12, 3=BSinc24 */
+        int   ri;
+        for (ri = 0; ri < numResamplers; ri++) {
+            const char *name = qalGetStringiSOFT(AL_RESAMPLER_NAME_SOFT, ri);
+            if (!name) continue;
+            if (strstr(name, "BSinc24") || strstr(name, "bsinc24")) {
+                if (bestRank < 3) { bestRank = 3; bestIdx = ri; }
+            } else if (strstr(name, "BSinc12") || strstr(name, "bsinc12")) {
+                if (bestRank < 2) { bestRank = 2; bestIdx = ri; }
+            } else if (Q_stricmp(name, "Cubic") == 0) {
+                if (bestRank < 1) { bestRank = 1; bestIdx = ri; }
+            }
+        }
+        s_al_bestResampler = bestIdx;
+        Com_Printf("S_AL: resampler: %s (index %d of %d, default was %d)\n",
+            qalGetStringiSOFT(AL_RESAMPLER_NAME_SOFT, bestIdx),
+            bestIdx, numResamplers, defResampler);
+    }
 
     /* Query actual HRTF status */
     if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
@@ -6454,6 +6611,14 @@ qboolean S_AL_Init( soundInterface_t *si )
     } else {
         S_AL_TRACE(1, "init: music source created (AL id %u)\n",
                    s_al_music.source);
+        /* Route music through EQ for bass/mid presence. */
+        if (s_al_efx.available && s_al_efx.eqSend >= 0 && s_al_efx.eqSlot)
+            qalSource3i(s_al_music.source, AL_AUXILIARY_SEND_FILTER,
+                        (ALint)s_al_efx.eqSlot, s_al_efx.eqSend,
+                        (ALint)AL_FILTER_NULL);
+        if (s_al_bestResampler >= 0)
+            qalSourcei(s_al_music.source, AL_SOURCE_RESAMPLER_SOFT,
+                       s_al_bestResampler);
     }
     qalGenBuffers(S_AL_MUSIC_BUFFERS, s_al_music.buffers);
 

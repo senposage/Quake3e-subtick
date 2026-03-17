@@ -61,6 +61,7 @@ static kbutton_t in_up, in_down;
 static kbutton_t in_buttons[16];
 
 static cvar_t *cl_nodelta;
+static cvar_t *cl_relAckDelay;
 
 static cvar_t *cl_showSend;
 
@@ -576,6 +577,72 @@ static void CL_FinishMove( usercmd_t *cmd ) {
 	// can be determined without allowing cheating
 	cmd->serverTime = cl.serverTime;
 
+	// REMOVED: usercmd serverTime clamp (was capping cmd->serverTime
+	// at snap.serverTime).  The clamp caused usercmd coalescing —
+	// multiple cmds per snapshot with identical serverTime — which
+	// the server skips (SV_UserMove: serverTime <= lastUsercmd).
+	// This slowed commandTime advancement, QVM computed ping=999,
+	// and the server kicked.  FTWGL ships with zero protection here
+	// and works fine on vanilla UT servers.  CL_AdjustTimeDelta
+	// already keeps cl.serverTime close to snap.serverTime; no
+	// wire-side backstop is needed.
+
+	// Track usercmd delta: how much new time this cmd covers.
+	// delta = cmd->serverTime - snap.ps.commandTime
+	// Positive = server will process this cmd.  Zero/negative = skipped.
+	{
+		static int ucmdLastLogTime;
+		static int ucmdSkipCount;
+		static int ucmdTotalCount;
+		static int ucmdMinDelta;
+		static int ucmdMaxDelta;
+		static qboolean ucmdInit;
+		int ucmdDelta = cmd->serverTime - cl.snap.ps.commandTime;
+
+		if ( !ucmdInit ) {
+			ucmdMinDelta = ucmdDelta;
+			ucmdMaxDelta = ucmdDelta;
+			ucmdInit = qtrue;
+		}
+		ucmdTotalCount++;
+		if ( ucmdDelta <= 0 ) ucmdSkipCount++;
+		if ( ucmdDelta < ucmdMinDelta ) ucmdMinDelta = ucmdDelta;
+		if ( ucmdDelta > ucmdMaxDelta ) ucmdMaxDelta = ucmdDelta;
+
+		// Log every skip immediately — these are the dangerous ones
+		if ( ucmdDelta <= 0 ) {
+			char buf[256];
+			Com_sprintf( buf, sizeof(buf),
+				"cmdT=%d snapCmdTime=%d delta=%d snapT=%d dT=%d",
+				cmd->serverTime, cl.snap.ps.commandTime,
+				ucmdDelta, cl.snap.serverTime, cl.serverTimeDelta );
+			SCR_LogNote( "UCMD_SKIP", buf );
+		}
+
+		// Periodic summary every 5 seconds
+		if ( cls.realtime - ucmdLastLogTime > 5000 ) {
+			if ( ucmdTotalCount > 0 ) {
+				char buf[256];
+				Com_sprintf( buf, sizeof(buf),
+					"total=%d skipped=%d delta=[%d,%d]",
+					ucmdTotalCount, ucmdSkipCount,
+					ucmdMinDelta, ucmdMaxDelta );
+				SCR_LogNote( "UCMD_STATS", buf );
+				if ( ucmdSkipCount > 0 ) {
+					Com_Printf( S_COLOR_YELLOW "UCMD: %d/%d skipped in 5s "
+						"(delta range [%d,%d])\n",
+						ucmdSkipCount, ucmdTotalCount,
+						ucmdMinDelta, ucmdMaxDelta );
+				}
+			}
+			ucmdTotalCount = 0;
+			ucmdSkipCount = 0;
+			ucmdMinDelta = ucmdDelta;
+			ucmdMaxDelta = ucmdDelta;
+			ucmdLastLogTime = cls.realtime;
+		}
+	}
+
 	for (i=0 ; i<3 ; i++) {
 		cmd->angles[i] = ANGLE2SHORT(cl.viewangles[i]);
 	}
@@ -780,7 +847,15 @@ void CL_WritePacket( int repeat ) {
 	MSG_WriteLong( &buf, clc.serverMessageSequence );
 
 	// write the last reliable message we received
-	MSG_WriteLong( &buf, clc.serverCommandSequence );
+	// cl_relAckDelay: artificially hold back ack by N commands (debug: simulate small server buffer)
+	{
+		int ackSeq = clc.serverCommandSequence;
+		if ( cl_relAckDelay && cl_relAckDelay->integer > 0 ) {
+			ackSeq -= cl_relAckDelay->integer;
+			if ( ackSeq < 0 ) ackSeq = 0;
+		}
+		MSG_WriteLong( &buf, ackSeq );
+	}
 
 	// write any unacknowledged clientCommands
 	n = clc.reliableSequence - clc.reliableAcknowledge;
@@ -845,7 +920,9 @@ void CL_WritePacket( int repeat ) {
 		Com_Printf( "%i ", buf.cursize );
 	}
 
-	MSG_WriteByte( &buf, clc_EOF );
+	// NOTE: clc_EOF intentionally NOT sent here.  Vanilla ioquake3
+	// servers don't recognize command byte 5 and print warnings
+	// on every packet.  FTWGL doesn't send it either.
 
 	if ( buf.overflowed ) {
 		if ( cls.state >= CA_CONNECTED && cls.state != CA_CINEMATIC ) {
@@ -897,6 +974,21 @@ void CL_SendCmd( void ) {
 	CL_WritePacket( 0 );
 }
 
+
+/*
+============
+CL_TimeRegress — debug: jump cl.serverTime backward to provoke server reaction
+============
+*/
+static void CL_TimeRegress_f( void ) {
+	int ms = 1500;
+	if ( Cmd_Argc() > 1 )
+		ms = atoi( Cmd_Argv(1) );
+	if ( ms <= 0 ) ms = 1500;
+	Com_Printf( "^1TIMEREGRESS: jumping cl.serverTime back by %d ms (was %d, now %d)\n",
+		ms, cl.serverTime, cl.serverTime - ms );
+	cl.serverTime -= ms;
+}
 
 /*
 ============
@@ -966,6 +1058,11 @@ void CL_InitInput( void ) {
 	Cmd_AddCommand ("-button15", IN_Button15Up);
 	Cmd_AddCommand ("+mlook", IN_MLookDown);
 	Cmd_AddCommand ("-mlook", IN_MLookUp);
+
+	Cmd_AddCommand ("timeregress", CL_TimeRegress_f);
+
+	cl_relAckDelay = Cvar_Get( "cl_relAckDelay", "0", CVAR_TEMP );
+	Cvar_SetDescription( cl_relAckDelay, "DEBUG: hold back reliable command ack by N commands (simulates small server buffer)." );
 
 	cl_nodelta = Cvar_Get( "cl_nodelta", "0", CVAR_DEVELOPER );
 	Cvar_SetDescription( cl_nodelta, "Flag server to disable delta compression on server snapshots." );

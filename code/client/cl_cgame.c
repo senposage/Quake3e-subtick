@@ -1140,9 +1140,20 @@ static void CL_AdjustTimeDelta( void ) {
 	deltaDelta = abs( newDelta - cl.serverTimeDelta );
 
 	if ( deltaDelta > resetTime ) {
+		Com_Printf( S_COLOR_YELLOW "TIMING RESET: deltaDelta=%d > resetTime=%d, oldDelta=%d newDelta=%d snapT=%d cmdT=%d\n",
+			deltaDelta, resetTime, cl.serverTimeDelta, newDelta,
+			cl.snap.serverTime, cl.snap.ps.commandTime );
 		cl.serverTimeDelta = newDelta;
-		cl.oldServerTime = cl.snap.serverTime;	// FIXME: is this a problem for cgame?
-		cl.serverTime = cl.snap.serverTime;
+		cl.oldServerTime = cl.snap.serverTime;
+		// Snap to just above the known commandTime rather than to
+		// snap.serverTime.  Snapping all the way to snap.serverTime
+		// would advance commandTime to sv.time on the server, putting
+		// the client briefly "ahead" of the snapshot timeline.
+		if ( cl.snap.ps.commandTime > 0 ) {
+			cl.serverTime = cl.snap.ps.commandTime + 1;
+		} else {
+			cl.serverTime = cl.snap.serverTime;
+		}
 		slowFrac = 0;
 		if ( cl_showTimeDelta->integer ) {
 			Com_Printf( "<RESET> " );
@@ -1151,6 +1162,8 @@ static void CL_AdjustTimeDelta( void ) {
 		SCR_LogTimingEvent( "RESET", cl.serverTimeDelta, deltaDelta );
 	} else if ( deltaDelta > fastAdjust ) {
 		// fast adjust, cut the difference in half
+		Com_Printf( S_COLOR_YELLOW "TIMING FAST: deltaDelta=%d > fastAdjust=%d, oldDelta=%d newDelta=%d\n",
+			deltaDelta, fastAdjust, cl.serverTimeDelta, newDelta );
 		if ( cl_showTimeDelta->integer ) {
 			Com_Printf( "<FAST> " );
 		}
@@ -1181,8 +1194,8 @@ static void CL_AdjustTimeDelta( void ) {
 					// ever reaching the +/-4 commit threshold.  serverTimeDelta stays rock-stable
 					// (no +/-1ms ping jitter) at the cost of a ~50% detection-zone entry rate.
 					// This appears in the netgraph as Ext ~ snapsHz/2 (e.g. ~30/s at 60Hz)
-					// and is EXPECTED BEHAVIOR, not actual client-side extrapolation.  The
-					// safety cap (Clp) prevents cl.serverTime from passing the snapshot.
+					// and is EXPECTED BEHAVIOR, not actual client-side extrapolation.
+					// CL_AdjustTimeDelta pulls cl.serverTime back before it drifts far.
 					// At low fps (snapshotMsec >= 30, e.g. 20Hz): -4 gives a 33% rate.
 					slowFrac -= ( cl.snapshotMsec < 30 ) ? 2 : 4;
 				} else {
@@ -1382,43 +1395,81 @@ void CL_SetCGameTime( void ) {
 		if ( cl.serverTime - cl.oldServerTime < 0 ) {
 			cl.serverTime = cl.oldServerTime;
 		}
-		// Safety cap: keep cl.serverTime strictly below snap.serverTime.
+
+		// commandTime floor: ensure usercmds are never sent "in the past".
 		//
-		// WHY A CAP: usercmd.serverTime is stamped directly from cl.serverTime
-		// (CL_FinishMove), so if cl.serverTime runs ahead of the server's sv.time
-		// the URT game QVM computes a negative (→ 999) ping, triggering a ping-kick
-		// that feeds the zombie-state reconnect flood.  The cap is the architecturally
-		// correct fix — not a workaround — because the alternative would require
-		// decoupling usercmd.serverTime from cl.serverTime.
+		// After a FAST adjust overcorrects (e.g. 150ms OS hitch →
+		// serverTimeDelta averaged to -125 instead of correct -50),
+		// cl.serverTime can land well below the server's commandTime.
+		// Every usercmd is then skipped (serverTime < commandTime) and
+		// the slow drift takes ~4 seconds to recover at +1ms/snapshot.
+		// During those seconds: ping=999, lagometer black bars, and the
+		// server may kick for apparent timeout or sv_maxPing.
 		//
-		// MARGIN vs BACKSTOP: capMs = snapshotMsec/4.  The extrapolate threshold in
-		// the adaptive-timing check below is snapshotMsec/3 — slightly larger than
-		// capMs — so CL_AdjustTimeDelta starts pulling serverTimeDelta back BEFORE
-		// cl.serverTime can reach the cap boundary.  In normal operation the cap
-		// fires rarely (jitter spikes only); it is a backstop, not a primary
-		// timing control.  A margin that is too tight (e.g. 1ms) makes the cap fire
-		// every inter-snapshot client frame, freezing cl.serverTime and causing
-		// visible stutter and movement lag.
-		//
-		// RELEASE (2000ms): once drift ≥ 2s the server is presumed dead (no snapshot
-		// for 2 full seconds).  The cap is released so cl.serverTime can advance and
-		// the engine can extrapolate gracefully until cl_timeout fires.  This is an
-		// absolute wall-clock threshold — not proportional to snapshotMsec — because
-		// "server has been silent for 2 seconds" is rate-independent.
-		{
-			int capMs = cl.snapshotMsec / 4;
-			if ( capMs < 2 ) capMs = 2;
-			if ( capMs > 8 ) capMs = 8;
-			if ( cl.serverTime >= cl.snap.serverTime ) {
-				int drift = cl.serverTime - cl.snap.serverTime;
-				if ( drift < 2000 ) { // release after 2s of silence (server presumed dead)
-					cl.serverTime = cl.snap.serverTime - capMs;
-					SCR_NetMonitorAddCapHit();
-				} else {
-					SCR_LogCapRelease( drift );
-				}
+		// The floor uses commandTime from the latest snapshot as the
+		// minimum.  If cl.serverTime falls below it, snap both
+		// cl.serverTime AND serverTimeDelta so recovery is instant
+		// instead of seconds-long.
+		if ( cl.snap.ps.commandTime > 0 &&
+			 !( cl.snap.ps.pm_flags & 4096 ) && // PMF_FOLLOW — commandTime belongs to followed player
+			 cl.serverTime <= cl.snap.ps.commandTime ) {
+			int oldSrvTime = cl.serverTime;
+			int oldDelta = cl.serverTimeDelta;
+			cl.serverTime = cl.snap.ps.commandTime + 1;
+			// Fix serverTimeDelta to match so the correction persists
+			cl.serverTimeDelta = cl.serverTime - cls.realtime + CL_TimeNudge();
+			{
+				char buf[256];
+				Com_sprintf( buf, sizeof(buf),
+					"srvT %d <= cmdTime %d corrected=%d dT %d->%d snapT=%d",
+					oldSrvTime, cl.snap.ps.commandTime,
+					cl.serverTime, oldDelta, cl.serverTimeDelta,
+					cl.snap.serverTime );
+				Com_Printf( S_COLOR_RED "TIMING FLOOR: %s\n", buf );
+				SCR_LogNote( "TIMING_FLOOR", buf );
 			}
 		}
+
+		// NOTE: serverTime safety cap REMOVED.  It was clamping outgoing
+		// usercmd.serverTime at snap.serverTime in CL_FinishMove, but the
+		// clamp caused usercmd coalescing → server skips → ping=999 → kick.
+		// FTWGL runs with zero protection and no issues on vanilla servers.
+		// CL_AdjustTimeDelta keeps cl.serverTime close enough on its own.
+
+		// Periodic timing state dump — captures the full picture every 5s
+		// so we can see exactly what the timing loop is doing over time.
+		{
+			static int timingLastDump;
+			static int timingMaxOverSnap;   // max(cl.serverTime - snap.serverTime)
+			static int timingMinUnderSnap;  // min(cl.serverTime - snap.serverTime)
+			static int timingFloorHits;
+			static int timingBackwardHits;
+			int overSnap = cl.serverTime - cl.snap.serverTime;
+
+			if ( overSnap > timingMaxOverSnap ) timingMaxOverSnap = overSnap;
+			if ( overSnap < timingMinUnderSnap ) timingMinUnderSnap = overSnap;
+
+			if ( cls.realtime - timingLastDump > 5000 ) {
+				char buf[512];
+				int silenceMs = (clc.lastPacketTime > 0) ?
+					cls.realtime - clc.lastPacketTime : -1;
+				Com_sprintf( buf, sizeof(buf),
+					"srvT=%d snapT=%d cmdTime=%d dT=%d "
+					"overSnap=[%d,%d] extrap=%d realtime=%d "
+					"silenceMs=%d snapMs=%d seqNum=%d",
+					cl.serverTime, cl.snap.serverTime,
+					cl.snap.ps.commandTime, cl.serverTimeDelta,
+					timingMinUnderSnap, timingMaxOverSnap,
+					(int)cl.extrapolatedSnapshot, cls.realtime,
+					silenceMs, cl.snapshotMsec,
+					clc.serverMessageSequence );
+				SCR_LogNote( "TIMING_STATE", buf );
+				timingMaxOverSnap = overSnap;
+				timingMinUnderSnap = overSnap;
+				timingLastDump = cls.realtime;
+			}
+		}
+
 		cl.oldServerTime = cl.serverTime;
 
 		// Compute estimated frameInterpolation for the net monitor widget

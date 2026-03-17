@@ -3000,38 +3000,41 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 		if ( NET_CompareAdr( from, &clc.serverAddress ) ) {
 			if ( cls.state >= CA_CONNECTED ) {
 				if ( cl_noOOBDisconnect->integer ) {
-					static int  oobCount;
-					static int  oobFirstTime;
-
-					// Bombardment guard: if the server keeps sending OOB
-					// disconnects without any in-band snapshots arriving,
-					// eventually honor it instead of hanging in limbo.
-					if ( oobCount == 0 )
-						oobFirstTime = cls.realtime;
-					oobCount++;
-
-					// Reset counter if we've received an in-band snapshot
-					// since the bombardment started (lastPacketTime advanced
-					// by in-band traffic is tracked via clc.lastPacketTime
-					// separately, but here we just check if enough OOBs
-					// piled up in a short window).
-					if ( oobCount > 10 && cls.realtime - oobFirstTime < 30000 ) {
-						oobCount = 0;
-						SCR_LogOOBDisconnect( qtrue );
-						SCR_LogDisconnect( "OOB disconnect bombardment — honoring after 10+ packets" );
-						Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
+					// Time-based guard: honor the OOB disconnect only when
+					// the server has stopped sending game data (sequenced
+					// packets) for a sustained period.  This prevents brief
+					// server hiccups, zombie-state leftovers from a previous
+					// session, and transient auth events from causing
+					// disconnects, while still honoring genuine kicks.
+					//
+					// Returns qfalse so lastPacketTime is NOT updated —
+					// cl_timeout runs from the last real game data packet.
+					if ( cls.state == CA_ACTIVE && clc.lastPacketTime > 0 ) {
+						int silenceMs = cls.realtime - clc.lastPacketTime;
+						if ( silenceMs > 10000 ) { // 10s of no game data
+							SCR_LogOOBDisconnect( qtrue );
+							SCR_LogDisconnect( va( "OOB disconnect honored after %ds of no game data",
+								silenceMs / 1000 ) );
+							Com_Error( ERR_SERVERDISCONNECT, "Server disconnected" );
+						}
 					}
 
-					// Treat as a spurious or undocumented server-side action:
-					// log it for diagnostics but do NOT honour it.  Return qtrue
-					// so that CL_PacketEvent updates clc.lastPacketTime — the server
-					// is still sending us packets, so the cl_timeout clock must not
-					// run from the last in-band packet.  The normal cl_timeout
-					// mechanism will clean up once the server stops sending
-					// *any* packets (including these OOB disconnects).
-					SCR_LogOOBDisconnect( qfalse );
-					Com_Printf( S_COLOR_YELLOW "WARNING: received OOB disconnect from server — ignored (cl_noOOBDisconnect 1)\n" );
-					return qtrue;
+					{
+						static int oobIgnoreCount;
+						static int oobLastLogTime;
+						oobIgnoreCount++;
+						// Rate-limit: log first hit, then summary every 30s
+						if ( oobIgnoreCount == 1 || cls.realtime - oobLastLogTime > 30000 ) {
+							Com_Printf( S_COLOR_YELLOW "[OOB:DISCONNECT] ignored %d in %ds "
+								"(silenceMs=%d)\n", oobIgnoreCount,
+								oobLastLogTime ? (cls.realtime - oobLastLogTime) / 1000 : 0,
+								(clc.lastPacketTime > 0) ? cls.realtime - clc.lastPacketTime : -1 );
+							SCR_LogOOBDisconnect( qfalse );
+							oobIgnoreCount = 0;
+							oobLastLogTime = cls.realtime;
+						}
+					}
+					return qfalse;
 				} else {
 					SCR_LogOOBDisconnect( qtrue );
 					SCR_LogDisconnect( "OOB disconnect from server" );
@@ -3134,6 +3137,24 @@ void CL_PacketEvent( const netadr_t *from, msg_t *msg ) {
 	// client messages, allowing the server to detect a dropped
 	// gamestate
 	clc.serverMessageSequence = LittleLong( *(int32_t *)msg->data );
+
+	// Silence detector: log when the gap between sequenced packets
+	// exceeds notable thresholds.  This is the definitive indicator
+	// of whether the server stopped sending vs our client misbehaving.
+	{
+		int gap = cls.realtime - clc.lastPacketTime;
+		if ( gap > 500 && clc.lastPacketTime > 0 ) {
+			char buf[256];
+			Com_sprintf( buf, sizeof(buf),
+				"gap=%dms seq=%d snapT=%d srvT=%d dT=%d cmdTime=%d",
+				gap, clc.serverMessageSequence,
+				cl.snap.serverTime, cl.serverTime,
+				cl.serverTimeDelta, cl.snap.ps.commandTime );
+			Com_Printf( S_COLOR_RED "PKT GAP: %dms since last sequenced packet "
+				"(seq=%d)\n", gap, clc.serverMessageSequence );
+			SCR_LogNote( "PKT_GAP", buf );
+		}
+	}
 
 	clc.lastPacketTime = cls.realtime;
 	CL_ParseServerMessage( msg );
