@@ -69,6 +69,9 @@ cvar_t	*cl_lanForcePackets;
 
 cvar_t	*cl_guidServerUniq;
 
+// Per-connection spoofed GUID to replace the real cl_guid in userinfo
+static char cl_spoofedGUID[33];
+
 #ifdef USE_AUTH
 cvar_t	*cl_auth_engine;
 cvar_t	*cl_auth;
@@ -1349,6 +1352,27 @@ static void CL_UpdateGUID( const char *prefix, int prefix_len )
 
 
 /*
+====================
+CL_GenerateSpoofedGUID
+
+Generate a random 32-character hex GUID to replace the real cl_guid in
+outgoing userinfo, preventing the auth/QVM from tracking the real key.
+====================
+*/
+static void CL_GenerateSpoofedGUID( void )
+{
+	byte random[16];
+	int i;
+
+	Com_RandomBytes( random, sizeof( random ) );
+	for ( i = 0; i < 16; i++ ) {
+		Com_sprintf( cl_spoofedGUID + (i * 2), 3, "%02X", (unsigned int)random[i] );
+	}
+	cl_spoofedGUID[32] = '\0';
+}
+
+
+/*
 =====================
 CL_ResetOldGame
 =====================
@@ -1836,6 +1860,10 @@ static void CL_Connect_f( void ) {
 		CL_UpdateGUID( serverString, strlen( serverString ) );
 	else
 		CL_UpdateGUID( NULL, 0 );
+
+	// Generate a per-connection random GUID to use in place of the real cl_guid,
+	// so the auth/QVM cannot hijack or track the player's real identifier.
+	CL_GenerateSpoofedGUID();
 
 	// if we aren't playing on a lan, we need to authenticate
 	// with the cd key
@@ -2498,6 +2526,11 @@ static void CL_CheckForResend( void ) {
 		infoTruncated = qfalse;
 		Q_strncpyz( info, Cvar_InfoString( CVAR_USERINFO, &infoTruncated ), sizeof( info ) );
 
+		// Strip the real cl_guid and substitute our per-connection random GUID so the
+		// auth/QVM system cannot hijack or correlate the player's true identifier.
+		Info_RemoveKey( info, "cl_guid" );
+		Info_SetValueForKey_s( info, MAX_USERINFO_LENGTH, "cl_guid", cl_spoofedGUID );
+
 		// remove some non-important keys that may cause overflow during connection
 		if ( strlen( info ) > MAX_USERINFO_LENGTH - 64 ) {
 			infoTruncated |= Info_RemoveKey( info, "xp_name" ) ? qtrue : qfalse;
@@ -2525,9 +2558,8 @@ static void CL_CheckForResend( void ) {
 		notOverflowed &= Info_SetValueForKey_s( info, MAX_USERINFO_LENGTH, "challenge",
 			va( "%i", clc.challenge ) );
 
-		// for now - this will be used to inform server about q3msgboom fix
-		// this is optional key so will not trigger oversize warning
-		Info_SetValueForKey_s( info, MAX_USERINFO_LENGTH, "client", Q3_VERSION );
+		// Do NOT send the "client" key: broadcasting our custom engine version
+		// allows servers to detect that we are using a non-standard client.
 
 		if ( !notOverflowed ) {
 			Com_Printf( S_COLOR_YELLOW "WARNING: oversize userinfo, you might be not able to join remote server!\n" );
