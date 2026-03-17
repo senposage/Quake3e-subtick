@@ -75,6 +75,7 @@ cvar_t	*cl_auth_engine;
 cvar_t	*cl_auth;
 cvar_t	*authc;
 cvar_t	*authl;
+cvar_t	*cl_authSecure;
 #endif
 
 cvar_t	*cl_dlURL;
@@ -1375,6 +1376,7 @@ static void CL_GuidRegen_f( void ) {
 	int i;
 
 	Com_RandomBytes( raw, sizeof( raw ) );
+	/* Convert 16 random bytes to a 32-character lowercase hex string. */
 	for ( i = 0; i < 16; i++ ) {
 		hex[i * 2]     = hexdigits[(raw[i] >> 4) & 0xf];
 		hex[i * 2 + 1] = hexdigits[ raw[i]       & 0xf];
@@ -3113,20 +3115,23 @@ static qboolean CL_ConnectionlessPacket( const netadr_t *from, msg_t *msg ) {
 
 #ifdef USE_AUTH
 	if ( strstr(c, "AUTH:CL") ) {
-		// Only process AUTH:CL packets from the resolved authorizeServer address.
-		// Any other sender — including a malicious game server — is silently
-		// dropped and logged.  This prevents a rogue server from triggering
-		// the UI QVM's UI_AUTHSERVER_PACKET handler (which has UI_CVAR_SET
-		// access) on behalf of an untrusted source.
-		if ( cls.authorizeServer.type == NA_BAD
-			|| !NET_CompareBaseAdr( from, &cls.authorizeServer ) ) {
-			SCR_LogNote( "AUTH:CL_REJECTED",
-				va( "AUTH:CL from unexpected source %s — ignored",
-					NET_AdrToStringwPort( from ) ) );
-			return qfalse;
+		// When cl_authSecure is enabled, only process AUTH:CL packets from
+		// the resolved authorizeServer address.  Any other sender —
+		// including a malicious game server — is dropped and logged.
+		// This prevents a rogue server from triggering the UI QVM's
+		// UI_AUTHSERVER_PACKET handler (which has UI_CVAR_SET access)
+		// on behalf of an untrusted source.
+		if ( cl_authSecure && cl_authSecure->integer ) {
+			if ( cls.authorizeServer.type == NA_BAD
+				|| !NET_CompareBaseAdr( from, &cls.authorizeServer ) ) {
+				SCR_LogNote( "AUTH:CL_REJECTED",
+					va( "AUTH:CL from unexpected source %s — ignored",
+						NET_AdrToStringwPort( from ) ) );
+				return qfalse;
+			}
+			SCR_LogNote( "AUTH:CL_ACCEPTED",
+				va( "AUTH:CL from %s", NET_AdrToStringwPort( from ) ) );
 		}
-		SCR_LogNote( "AUTH:CL_ACCEPTED",
-			va( "AUTH:CL from %s", NET_AdrToStringwPort( from ) ) );
 		Com_Printf( "AUTH:CL packet received from %s\n", NET_AdrToStringwPort( from ) );
 		VM_Call( uivm, 1, UI_AUTHSERVER_PACKET, from );
 		return qfalse;
@@ -4415,6 +4420,19 @@ void CL_Init( void ) {
 	cl_auth = Cvar_Get( "cl_auth", "0", CVAR_TEMP | CVAR_ROM );
 	authc = Cvar_Get( "authc", "0", CVAR_TEMP | CVAR_USERINFO );
 	authl = Cvar_Get( "authl", "", CVAR_TEMP | CVAR_USERINFO );
+
+	// cl_authSecure: when 1 (default), harden the engine against the closed-binary
+	// auth/UI QVM forcing or reading client CVars.  Set to 0 only if a server
+	// requires vanilla auth behaviour and you trust it completely.
+	cl_authSecure = Cvar_Get( "cl_authSecure", "1", CVAR_ARCHIVE | CVAR_PRIVATE );
+	Cvar_CheckRange( cl_authSecure, "0", "1", CV_INTEGER );
+	Cvar_SetDescription( cl_authSecure,
+		"Harden against the closed-binary UrT auth/UI QVM:\n"
+		"  1 (default) — validate AUTH:CL packet source; block the auth QVM\n"
+		"                from forcing or reading protected/private CVars and\n"
+		"                from running dangerous console commands.\n"
+		"  0           — vanilla behaviour (disable all hardening).\n"
+		"Set to 0 only if you fully trust the server's auth module." );
 #endif
 
 	// userinfo

@@ -790,6 +790,30 @@ static qboolean UI_GetValue( char* value, int valueSize, const char* key ) {
 
 /*
 ====================
+UI_IsCvarWriteBlocked
+
+Returns qtrue if the named CVar must not be written by the UI/auth QVM
+when cl_authSecure is enabled.  cl_guid is included because the auth
+system legitimately reads it but must never be allowed to overwrite it.
+====================
+*/
+#ifdef USE_AUTH
+static qboolean UI_IsCvarWriteBlocked( const char *name ) {
+	return ( Q_stricmp( name, "cl_guid"           ) == 0
+		||   Q_stricmp( name, "snaps"             ) == 0
+		||   Q_stricmp( name, "cg_smoothClients"  ) == 0
+		||   Q_stricmp( name, "net_qport"         ) == 0
+		||   Q_stricmp( name, "net_dropsim"       ) == 0
+		||   Q_stricmp( name, "cl_packetdelay"    ) == 0
+		||   Q_stricmp( name, "cl_packetdup"      ) == 0
+		||   Q_stricmp( name, "cl_timeout"        ) == 0
+		||   Q_stricmp( name, "in_mouse"          ) == 0
+		||   Q_stricmp( name, "cl_noOOBDisconnect") == 0 );
+}
+#endif
+
+/*
+====================
 CL_UISystemCalls
 
 The ui module is making a system call
@@ -817,45 +841,47 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_CVAR_SET:
-		// Mirror the CG_CVAR_SET protection: block cvars that could be
-		// weaponised by the closed-binary auth/UI QVM to sabotage the
-		// client or expose identifying information.  Every interception
-		// is logged to the net-debug session log.
-		{
+		// When cl_authSecure is enabled: mirror the CG_CVAR_SET protection
+		// so the closed-binary auth/UI QVM cannot force or fingerprint CVars.
+		// cl_guid is explicitly named because auth reads it legitimately but
+		// must never be allowed to overwrite it.
+		// When cl_authSecure is 0 fall through to the plain Cvar_SetSafe.
+#ifdef USE_AUTH
+		if ( cl_authSecure && cl_authSecure->integer ) {
 			const char *cvarName  = (const char *)VMA(1);
 			const char *cvarValue = (const char *)VMA(2);
 			unsigned cvFlags = Cvar_Flags( cvarName );
 
-			// Unconditionally blocked — same set as CG_CVAR_SET.
-			if ( Q_stricmp( cvarName, "snaps"             ) == 0
-				|| Q_stricmp( cvarName, "cg_smoothClients" ) == 0
-				|| Q_stricmp( cvarName, "net_qport"        ) == 0
-				|| Q_stricmp( cvarName, "net_dropsim"      ) == 0
-				|| Q_stricmp( cvarName, "cl_packetdelay"   ) == 0
-				|| Q_stricmp( cvarName, "cl_packetdup"     ) == 0
-				|| Q_stricmp( cvarName, "cl_timeout"       ) == 0
-				|| Q_stricmp( cvarName, "in_mouse"         ) == 0
-				|| Q_stricmp( cvarName, "cl_noOOBDisconnect" ) == 0
+			if ( UI_IsCvarWriteBlocked( cvarName )
 				|| ( Q_stricmp( cvarName, "rate" ) == 0
 					&& atoi( cvarValue ) <= 0 ) ) {
 				SCR_LogNote( "UI:SET_INTERCEPTED",
 					va( "\"%s\" = \"%s\" (silently ignored)",
 						cvarName, cvarValue ) );
-			} else if ( cvFlags != CVAR_NONEXISTENT
+				return 0;
+			}
+			if ( cvFlags != CVAR_NONEXISTENT
 				&& ( cvFlags & ( CVAR_PROTECTED | CVAR_PRIVATE ) ) ) {
-				// CVAR_PROTECTED/PRIVATE: log and let Cvar_SetSafe refuse it.
 				SCR_LogNote( "UI:SET_BLOCKED",
 					va( "\"%s\" = \"%s\" (protected)",
 						cvarName, cvarValue ) );
-				Cvar_SetSafe( cvarName, cvarValue );
-			} else {
-				Cvar_SetSafe( cvarName, cvarValue );
+				// fall through — Cvar_SetSafe will refuse it
 			}
 		}
+#endif
+		Cvar_SetSafe( VMA(1), VMA(2) );
 		return 0;
 
 	case UI_CVAR_VARIABLEVALUE:
-		return FloatAsInt( Cvar_VariableValue( VMA(1) ) );
+		// Always filter CVAR_PRIVATE — matches existing VARIABLESTRINGBUFFER
+		// behaviour and prevents the auth QVM reading private cvars as floats.
+		{
+			const char *cvarName = (const char *)VMA(1);
+			unsigned cvFlags = Cvar_Flags( cvarName );
+			if ( cvFlags != CVAR_NONEXISTENT && ( cvFlags & CVAR_PRIVATE ) )
+				return FloatAsInt( 0.0f );
+			return FloatAsInt( Cvar_VariableValue( cvarName ) );
+		}
 
 	case UI_CVAR_VARIABLESTRINGBUFFER:
 		VM_CHECKBOUNDS( uivm, args[2], args[3] );
@@ -863,55 +889,49 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_CVAR_SETVALUE:
-		// Same protection as UI_CVAR_SET — block the same set of cvars and
-		// refuse writes to CVAR_PROTECTED/PRIVATE.
-		{
+		// Same gate as UI_CVAR_SET.
+#ifdef USE_AUTH
+		if ( cl_authSecure && cl_authSecure->integer ) {
 			const char *cvarName = (const char *)VMA(1);
 			unsigned cvFlags = Cvar_Flags( cvarName );
 
-			if ( Q_stricmp( cvarName, "snaps"             ) == 0
-				|| Q_stricmp( cvarName, "cg_smoothClients" ) == 0
-				|| Q_stricmp( cvarName, "net_qport"        ) == 0
-				|| Q_stricmp( cvarName, "net_dropsim"      ) == 0
-				|| Q_stricmp( cvarName, "cl_packetdelay"   ) == 0
-				|| Q_stricmp( cvarName, "cl_packetdup"     ) == 0
-				|| Q_stricmp( cvarName, "cl_timeout"       ) == 0
-				|| Q_stricmp( cvarName, "in_mouse"         ) == 0
-				|| Q_stricmp( cvarName, "cl_noOOBDisconnect" ) == 0
+			if ( UI_IsCvarWriteBlocked( cvarName )
 				|| ( Q_stricmp( cvarName, "rate" ) == 0
 					&& VMF(2) <= 0.0f ) ) {
 				SCR_LogNote( "UI:SETVALUE_INTERCEPTED",
 					va( "\"%s\" = \"%g\" (silently ignored)",
 						cvarName, VMF(2) ) );
-			} else if ( cvFlags != CVAR_NONEXISTENT
+				return 0;
+			}
+			if ( cvFlags != CVAR_NONEXISTENT
 				&& ( cvFlags & ( CVAR_PROTECTED | CVAR_PRIVATE ) ) ) {
 				SCR_LogNote( "UI:SETVALUE_BLOCKED",
 					va( "\"%s\" = \"%g\" (protected)",
 						cvarName, VMF(2) ) );
-				Cvar_SetValueSafe( cvarName, VMF(2) );
-			} else {
-				Cvar_SetValueSafe( cvarName, VMF(2) );
+				// fall through — Cvar_SetValueSafe will refuse it
 			}
 		}
+#endif
+		Cvar_SetValueSafe( VMA(1), VMF(2) );
 		return 0;
 
 	case UI_CVAR_RESET:
-		// Block resets of CVAR_PROTECTED and CVAR_PRIVATE cvars.
+		// Block resets of CVAR_PROTECTED/PRIVATE when cl_authSecure is on.
 		// Resetting cl_guidOverride would clear the user's random GUID;
-		// resetting cl_noOOBDisconnect / cl_timeNudge etc. would undo
-		// our hardening.
-		{
+		// resetting cl_noOOBDisconnect / cl_timeNudge etc. undoes hardening.
+#ifdef USE_AUTH
+		if ( cl_authSecure && cl_authSecure->integer ) {
 			const char *cvarName = (const char *)VMA(1);
 			unsigned cvFlags = Cvar_Flags( cvarName );
-
 			if ( cvFlags != CVAR_NONEXISTENT
 				&& ( cvFlags & ( CVAR_PROTECTED | CVAR_PRIVATE ) ) ) {
 				SCR_LogNote( "UI:RESET_BLOCKED",
 					va( "\"%s\" (protected)", cvarName ) );
-			} else {
-				Cvar_Reset( cvarName );
+				return 0;
 			}
 		}
+#endif
+		Cvar_Reset( VMA(1) );
 		return 0;
 
 	case UI_CVAR_CREATE:
@@ -919,7 +939,16 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_CVAR_INFOSTRINGBUFFER:
+		// Log all calls under cl_authSecure so info-dump attempts by the
+		// auth QVM are visible in the session log.  The call itself is
+		// always allowed — the UI needs this to display server/client info.
 		VM_CHECKBOUNDS( uivm, args[2], args[3] );
+#ifdef USE_AUTH
+		if ( cl_authSecure && cl_authSecure->integer ) {
+			SCR_LogNote( "UI:INFOSTRING",
+				va( "flags=0x%x", (unsigned)args[1] ) );
+		}
+#endif
 		Cvar_InfoStringBuffer( args[1], VMA(2), args[3] );
 		return 0;
 
@@ -932,45 +961,48 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_CMD_EXECUTETEXT:
-		// Log every command the UI QVM (which includes the auth module)
-		// attempts to execute, and block a wider set of dangerous commands
-		// than the original upstream check.
+		// When cl_authSecure is enabled: log every command the UI QVM
+		// (including the auth module) injects, and block a wider set of
+		// dangerous commands than the original upstream check.
 		{
 			const char *uiCmd = (const char *)VMA(2);
-			char tok[64];
-			size_t ti = 0;
+#ifdef USE_AUTH
+			if ( cl_authSecure && cl_authSecure->integer ) {
+				char tok[64];
+				size_t ti = 0;
 
-			// Extract first token.
-			while ( ti < sizeof(tok) - 1 && uiCmd[ti]
-				&& uiCmd[ti] != ' ' && uiCmd[ti] != '\t'
-				&& uiCmd[ti] != '\n' && uiCmd[ti] != ';' ) {
-				tok[ti] = uiCmd[ti]; ti++;
+				// Extract first token.
+				while ( ti < sizeof(tok) - 1 && uiCmd[ti]
+					&& uiCmd[ti] != ' ' && uiCmd[ti] != '\t'
+					&& uiCmd[ti] != '\n' && uiCmd[ti] != ';' ) {
+					tok[ti] = uiCmd[ti]; ti++;
+				}
+				tok[ti] = '\0';
+
+				// Block dangerous commands regardless of exec mode.
+				if ( Q_stricmp( tok, "quit"         ) == 0
+					|| Q_stricmp( tok, "exit"        ) == 0
+					|| Q_stricmp( tok, "exec"        ) == 0
+					|| Q_stricmp( tok, "writeconfig" ) == 0
+					|| Q_stricmp( tok, "condump"     ) == 0 ) {
+					SCR_LogNote( "UI:EXEC_BLOCKED",
+						va( "dangerous cmd blocked: \"%s\"", uiCmd ) );
+					Com_Printf( S_COLOR_YELLOW
+						"WARNING: UI QVM tried to inject dangerous command"
+						" — blocked: \"%s\"\n", uiCmd );
+					return 0;
+				}
+
+				SCR_LogNote( "UI:EXEC",
+					va( "mode=%d cmd=\"%s\"", (int)args[1], uiCmd ) );
 			}
-			tok[ti] = '\0';
-
-			// Block dangerous commands regardless of exec mode.
-			if ( Q_stricmp( tok, "quit"           ) == 0
-				|| Q_stricmp( tok, "exit"          ) == 0
-				|| Q_stricmp( tok, "exec"          ) == 0
-				|| Q_stricmp( tok, "writeconfig"   ) == 0
-				|| Q_stricmp( tok, "condump"       ) == 0 ) {
-				SCR_LogNote( "UI:EXEC_BLOCKED",
-					va( "dangerous cmd blocked: \"%s\"", uiCmd ) );
-				Com_Printf( S_COLOR_YELLOW
-					"WARNING: UI QVM tried to inject dangerous command — blocked: \"%s\"\n",
-					uiCmd );
-				return 0;
-			}
-
-			SCR_LogNote( "UI:EXEC", va( "mode=%d cmd=\"%s\"", (int)args[1], uiCmd ) );
-
-			// Upstream guard: prevent EXEC_NOW on restart/disconnect cmds
-			// (they must go through the normal command buffer ordering).
+#endif
+			// Upstream guard: prevent EXEC_NOW on restart/disconnect cmds.
 			if ( args[1] == EXEC_NOW
-				&& ( !strncmp( uiCmd, "snd_restart",  11 )
-					|| !strncmp( uiCmd, "vid_restart",  11 )
-					|| !strncmp( uiCmd, "disconnect",   10 )
-					|| !strncmp( uiCmd, "quit",          4 ) ) ) {
+				&& ( !Q_stricmp( uiCmd, "snd_restart" )
+					|| !Q_stricmp( uiCmd, "vid_restart" )
+					|| !Q_stricmp( uiCmd, "disconnect"  )
+					|| !Q_stricmp( uiCmd, "quit"        ) ) ) {
 				Com_Printf( S_COLOR_YELLOW
 					"turning EXEC_NOW '%.11s' into EXEC_INSERT\n", uiCmd );
 				args[1] = EXEC_INSERT;

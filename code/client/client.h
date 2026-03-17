@@ -454,6 +454,7 @@ extern	cvar_t	*cl_auth_engine;
 extern	cvar_t	*cl_auth;
 extern	cvar_t	*authc;
 extern	cvar_t	*authl;
+extern	cvar_t	*cl_authSecure;
 #endif
 
 extern	cvar_t	*com_maxfps;
