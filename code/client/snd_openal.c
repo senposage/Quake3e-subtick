@@ -513,6 +513,11 @@ static alEfx_t s_al_efx;
  * entity (e.g. the very first frame of a new map).
  * ========================================================================= */
 #define S_AL_BSP_SPEAKERS_MAX 256
+/* Maximum squared distance (in game units) for matching a loop entity's
+ * origin to a BSP speaker origin when tagging isBspSpeaker.  4 units gives
+ * a 4-unit sphere that comfortably covers floating-point precision differences
+ * between the BSP-parsed string origin and the cgame-supplied loop origin. */
+#define S_AL_BSP_SPEAKER_ORIGIN_MATCH_SQ 16.0f
 
 typedef struct {
     char   noise[MAX_QPATH]; /* "noise" key value — sound file path */
@@ -2844,8 +2849,12 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
              * duration so trigger-bound sounds cannot re-stack while the
              * previous instance is still playing — regardless of how
              * s_alDedupMs is configured.  Weapon channels keep the minimum
-             * window so rapid fire is never suppressed. */
-            if (entchannel != CHAN_WEAPON && sfx >= 0 && sfx < s_al_numSfx) {
+             * window so rapid fire is never suppressed.
+             * ENTITYNUM_WORLD is excluded: it has its own hard 100 ms floor
+             * (set above) and should never suppress rapid world impacts from
+             * different locations for the full sample duration. */
+            if (entchannel != CHAN_WEAPON && entnum != ENTITYNUM_WORLD &&
+                    sfx >= 0 && sfx < s_al_numSfx) {
                 alSfxRec_t *sr = &s_al_sfx[sfx];
                 if (sr->fileRate > 0 && sr->soundLength > 0) {
                     /* Cast to int64 before multiplying to avoid signed 32-bit
@@ -3802,12 +3811,22 @@ static void S_AL_UpdateLoops( void )
                                       ? s_al_sfx[lp->sfx].name : NULL;
                 if (sfxName) {
                     for (bk = 0; bk < s_al_numBspSpeakers; bk++) {
+                        float dx, dy, dz;
                         if (s_al_bspSpeakers[bk].spawnflags & 1) continue;
-                        if (Q_stristr(sfxName, s_al_bspSpeakers[bk].noise) ||
-                                Q_stristr(s_al_bspSpeakers[bk].noise, sfxName)) {
-                            s_al_src[srcIdx].isBspSpeaker = qtrue;
-                            break;
-                        }
+                        if (!(Q_stristr(sfxName, s_al_bspSpeakers[bk].noise) ||
+                                Q_stristr(s_al_bspSpeakers[bk].noise, sfxName))) continue;
+                        /* Confirm by position: only tag if this loop entity is
+                         * actually at the BSP speaker's origin (within 4 units).
+                         * This prevents misclassifying a non-speaker loop that
+                         * happens to share the same sound file with a BSP speaker
+                         * at a different location (e.g. a global speaker playing
+                         * the same noise as a non-global one). */
+                        dx = loopOrigin[0] - s_al_bspSpeakers[bk].origin[0];
+                        dy = loopOrigin[1] - s_al_bspSpeakers[bk].origin[1];
+                        dz = loopOrigin[2] - s_al_bspSpeakers[bk].origin[2];
+                        if (dx*dx + dy*dy + dz*dz > S_AL_BSP_SPEAKER_ORIGIN_MATCH_SQ) continue;
+                        s_al_src[srcIdx].isBspSpeaker = qtrue;
+                        break;
                     }
                 }
             }
@@ -3864,10 +3883,19 @@ static void S_AL_UpdateLoops( void )
          * active ambient loops regardless of fade state.  The vol-update block
          * in S_AL_Update skips loop sources precisely because this step is the
          * authoritative gain writer for all loop sources — both mid-fade and
-         * settled. */
+         * settled.
+         *
+         * For BSP speaker loops without EFX, the occlusion pass cannot write
+         * AL_GAIN itself (this step would overwrite it), so we read the
+         * smoothed occlusionGain back here and fold it into the final value. */
         {
             alSrc_t *src    = &s_al_src[lp->srcIdx];
             float    catVol = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
+            /* Non-EFX BSP speaker occlusion: occlusionGain is maintained by
+             * the S_Update occlusion pass; fold it in here so S_AL_UpdateLoops
+             * doesn't overwrite the muffled level with the unoccluded value. */
+            float    occFactor = (src->isBspSpeaker && !s_al_efx.available)
+                                 ? src->occlusionGain : 1.0f;
             if (lp->sfx >= 0 && lp->sfx < s_al_numSfx)
                 catVol *= s_al_sfx[lp->sfx].normGain;
 
@@ -3885,13 +3913,13 @@ static void S_AL_UpdateLoops( void )
                     fadeGain = (float)elapsed / (float)fiMs;
                 }
                 qalSourcef(src->source, AL_GAIN,
-                           (src->master_vol / 255.f) * catVol * fadeGain);
+                           (src->master_vol / 255.f) * catVol * fadeGain * occFactor);
             } else {
                 /* Settled level — write every frame so live cvar adjustments
                  * (s_alVolEnv, s_alVolSelf, etc.) are immediately reflected.
                  * Cost is negligible: one qalSourcef per active ambient loop. */
                 qalSourcef(src->source, AL_GAIN,
-                           (src->master_vol / 255.f) * catVol);
+                           (src->master_vol / 255.f) * catVol * occFactor);
             }
         }
     }
@@ -5643,9 +5671,10 @@ static void S_AL_Update( int msec )
                     /* No EFX: approximate occlusion by direct gain reduction.
                      * Do NOT multiply by masterGain here — the listener AL_GAIN
                      * already applies s_volume; including it again would double it.
-                     * BSP speaker loop sources are skipped: S_AL_UpdateLoops
-                     * owns AL_GAIN for all loop sources and runs after this loop,
-                     * so any gain write here would be immediately overwritten. */
+                     * Loop sources (including BSP speaker loops) are skipped: the
+                     * occlusion factor is folded into the gain by S_AL_UpdateLoops
+                     * Step 5 via src->occlusionGain, which is maintained by the
+                     * smoothing logic above. */
                     qalSourcef(s_al_src[i].source, AL_GAIN,
                         (s_al_src[i].master_vol / 255.0f) *
                         S_AL_GetCategoryVol(s_al_src[i].category) *
