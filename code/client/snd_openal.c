@@ -222,6 +222,11 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
  *           sound tapers off instead of cutting to silence mid-cycle. */
 #define S_AL_LOOP_FADEIN_MS   600   /* ms — ~36 frames at 60 fps (was 150) */
 #define S_AL_LOOP_FADEOUT_MS  500   /* ms — ~30 frames at 60 fps (was 120) */
+/* Maximum dedup window applied to the duration-based extension for non-weapon
+ * channels.  Caps the int64→int narrowing and prevents absurdly long tracks
+ * (streamed music registered as loop sfx) from locking out re-triggers for
+ * an impractical length of time. */
+#define S_AL_DEDUP_MAX_DUR_MS 600000  /* 10 minutes */
 
 /* CHAN_WEAPON gun-muzzle proximity: sources on the weapon channel within this
  * distance of the listener are treated as "own gun barrel" and bypass occlusion
@@ -230,11 +235,26 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
  * the player's own weapon fire even when the sound was emitted as a world sound. */
 #define S_AL_WEAPON_NOOCC_DIST  160.0f
 
-/* Dedup window removed — vanilla URT has the same double-start behaviour
- * and nobody notices.  Culling is handled by distance rejection and by the
- * priority-ordered eviction in S_AL_GetFreeSource.
- * s_alDedupMs is registered as a cvar for potential future use; no code
- * currently reads it (value is ignored at runtime). */
+/* One-shot dedup window (s_alDedupMs).
+ *
+ * Two-tier dedup applied in S_AL_StartSound:
+ *
+ *   CHAN_WEAPON:       minimum window only (default 20 ms ≈ 1 frame).
+ *                     Blocks same-frame double-starts (e.g. cgame submitting
+ *                     the same fire event twice) but lets every intentional
+ *                     shot through at any fire rate.
+ *
+ *   All other channels: extend the window to the FULL SOUND DURATION when a
+ *                     source with the same (entnum, sfx) is still playing.
+ *                     Prevents trigger sounds (birds, ambient music,
+ *                     environment cues) from re-stacking when the player
+ *                     stands on overlapping trigger bounds or moves in/out
+ *                     of a trigger area before the previous instance ends.
+ *
+ *   ENTITYNUM_WORLD:  hard 100 ms floor regardless of the cvar, matching
+ *                     DMA's hardcoded world-entity throttle
+ *                     (dma.speed * 100 / 1000) that limits impact/casing
+ *                     accumulation at sv_fps rate. */
 
 /* Per-sound-file data */
 typedef struct alSfxRec_s {
@@ -306,6 +326,9 @@ typedef struct {
     float           sampleVol;         /* per-sample linear scale from ":-N" dB suffix in the matching
                                          * s_alExtraVolEntryN slot; 1.0 for non-EXTRAVOL sources and
                                          * EXTRAVOL slots without a suffix */
+    qboolean        isBspSpeaker;      /* qtrue when this is a non-global BSP target_speaker loop —
+                                         * allows the occlusion pass to mute it through walls while
+                                         * keeping AL_POSITION / AL_GAIN owned by S_AL_UpdateLoops */
 } alSrc_t;
 
 static alSrc_t  s_al_src[S_AL_MAX_SRC];
@@ -1808,6 +1831,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->occlusionTick   = 0;
     VectorClear(src->acousticOffset);
     src->sampleVol       = 1.0f;
+    src->isBspSpeaker    = qfalse;  /* set by UpdateLoops for non-global BSP loops */
 
     /* Classify into volume category.
      * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
@@ -2796,6 +2820,55 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             return;   /* beyond audible range — no slot needed */
     }
 
+    /* One-shot dedup — see comment block above S_AL_StartSound definition. */
+    if (s_alDedupMs && s_alDedupMs->integer > 0) {
+        int dedupMs = s_alDedupMs->integer;
+        int nowMs   = Com_Milliseconds();
+        int i;
+
+        /* ENTITYNUM_WORLD hard floor: match DMA's 100 ms world-entity throttle. */
+        if (entnum == ENTITYNUM_WORLD && dedupMs < 100)
+            dedupMs = 100;
+
+        for (i = 0; i < s_al_numSrc; i++) {
+            alSrc_t *src = &s_al_src[i];
+            int      elapsed, window;
+
+            if (!src->isPlaying || src->loopSound) continue;
+            if (src->entnum != entnum || src->sfx != sfx) continue;
+
+            elapsed = nowMs - src->allocTime;
+            window  = dedupMs;
+
+            /* Non-weapon channels: extend the window to the full sound
+             * duration so trigger-bound sounds cannot re-stack while the
+             * previous instance is still playing — regardless of how
+             * s_alDedupMs is configured.  Weapon channels keep the minimum
+             * window so rapid fire is never suppressed. */
+            if (entchannel != CHAN_WEAPON && sfx >= 0 && sfx < s_al_numSfx) {
+                alSfxRec_t *sr = &s_al_sfx[sfx];
+                if (sr->fileRate > 0 && sr->soundLength > 0) {
+                    /* Cast to int64 before multiplying to avoid signed 32-bit
+                     * overflow: at 44100 Hz any sound > ~49 s causes
+                     * soundLength * 1000 to wrap negative, silently disabling
+                     * the duration guard for the longest ambient tracks. */
+                    int durMs = (int)(((int64_t)sr->soundLength * 1000)
+                                      / sr->fileRate);
+                    if (durMs < 0 || durMs > S_AL_DEDUP_MAX_DUR_MS)
+                        durMs = S_AL_DEDUP_MAX_DUR_MS;
+                    if (durMs > window) window = durMs;
+                }
+            }
+
+            if (elapsed < window) {
+                S_AL_TRACE(2, "StartSound: dedup blocked sfx=%d ent=%d ch=%d "
+                              "(%d ms elapsed < %d ms window)\n",
+                           sfx, entnum, entchannel, elapsed, window);
+                return;
+            }
+        }
+    }
+
     srcIdx = S_AL_GetFreeSource();
     if (srcIdx < 0) return;
 
@@ -3614,12 +3687,33 @@ static void S_AL_UpdateLoops( void )
 
         /* ---- Step 3: Cancel fade-out if the entity was re-added ---- *
          * (active=true while a previous fade-out is still running means the
-         * entity re-entered the snapshot before the fade finished.) */
+         * entity re-entered the snapshot before the fade finished.)
+         *
+         * We compute the current fade-out gain so the fade-in begins from
+         * exactly that level — preventing a gain jump (pop) at re-activation.
+         * fadeStartMs is offset into the past so that Step 5's (elapsed/fiMs)
+         * equals the current gain on its very first application. */
         if (lp->fadeOutStartMs > 0) {
-            /* Don't restart the source — just cancel the fade-out and let
-             * the fade-in ramp bring gain back up from here. */
+            int foMs = s_alLoopFadeOutMs ? (int)s_alLoopFadeOutMs->value
+                                         : S_AL_LOOP_FADEOUT_MS;
+            int fiMs = s_alLoopFadeInMs  ? (int)s_alLoopFadeInMs->value
+                                         : S_AL_LOOP_FADEIN_MS;
+            if (foMs < 1) foMs = 1;
+            if (fiMs < 1) fiMs = 1;
+            {
+                int   elapsedOut = now - lp->fadeOutStartMs;
+                /* Guard against clock skew / NTP jumps: a negative elapsed
+                 * would produce a curGain > fadeOutStartGain (> 1.0).  The
+                 * clamps below would catch it, but clamping elapsedOut here
+                 * is cleaner and avoids a spurious fadeStartMs offset. */
+                if (elapsedOut < 0) elapsedOut = 0;
+                float curGain = (elapsedOut >= foMs) ? 0.0f
+                    : lp->fadeOutStartGain * (1.0f - (float)elapsedOut / (float)foMs);
+                if (curGain < 0.0f) curGain = 0.0f;
+                if (curGain > 1.0f) curGain = 1.0f;
+                lp->fadeStartMs = now - (int)(curGain * (float)fiMs);
+            }
             lp->fadeOutStartMs = 0;
-            lp->fadeStartMs    = (now > 0) ? now : 1;
         }
 
         /* ---- Step 4: Start a new source if needed ---- */
@@ -3632,30 +3726,59 @@ static void S_AL_UpdateLoops( void )
         {
         const float *loopOrigin = (i == s_al_listener_entnum && s_al_listener_entnum >= 0)
                                   ? s_al_listener_origin : lp->origin;
-        if (lp->srcIdx < 0 || !s_al_src[lp->srcIdx].isPlaying) {
-            /* Dedup: mirror DMA S_AddLoopSounds() merge behaviour.
-             * When two or more map entities reference the same sfx (e.g.
-             * ut4_austria has three ambient entities playing the same Bach
-             * prelude loop), only ONE AL source is ever running for that sfx.
-             * We scan ALL loop slots (not just k < i) so that a higher-index
-             * entity that already owns a source also blocks a lower-index
-             * newcomer — whichever entity entered PVS first keeps the source.
-             * When the owning entity leaves PVS its active flag clears (Step 1),
-             * which immediately lets any remaining duplicate claim a source on
-             * the next frame (smooth cross-fade rather than a hard cut).
-             * Without this, N entities → N simultaneous sources → N× volume
-             * ("double running", confirmed by 3 identical stop-offsets in
-             *  ut4_austria logs). */
-            if (lp->srcIdx < 0) {
+
+        /* Normalise a stale srcIdx before the dedup check so that the dedup
+         * scan always runs when we truly need a new source.
+         *
+         * Two cases make an existing srcIdx stale on an active entity:
+         *   (a) The source stopped without going through our fade-out path
+         *       (driver reset, or StopAllSounds without clearing loop state).
+         *       isPlaying (our software flag) is still qtrue; we detect
+         *       staleness only when srcIdx >= 0 and !isPlaying.
+         *   (b) The entity's desired sfx changed while the source was playing
+         *       (e.g. weapon swap — must restart immediately on the new buffer).
+         *
+         * In case (b) we hard-stop the old source.  The new source will begin
+         * a normal fade-in via the freshly-cleared fadeStartMs below. */
+        if (lp->srcIdx >= 0 && lp->srcIdx < s_al_numSrc) {
+            qboolean stale = !s_al_src[lp->srcIdx].isPlaying;
+            if (!stale && s_al_src[lp->srcIdx].sfx != lp->sfx)
+                stale = qtrue;
+            if (stale) {
+                if (s_al_src[lp->srcIdx].isPlaying)
+                    S_AL_StopSource(lp->srcIdx);
+                s_al_src[lp->srcIdx].loopSound = qfalse;
+                lp->srcIdx      = -1;
+                lp->fadeStartMs = 0;
+            }
+        }
+
+        if (lp->srcIdx < 0) {
+            /* Dedup: only ONE AL source per sfx may run at a time.
+             *
+             * Scan ALL loop slots — active AND fading-out — for any slot
+             * that has a source still playing on the same sfx.  The old
+             * guard `!other->active` was removed intentionally: a slot that
+             * is fading out (active=false, srcIdx valid, isPlaying=true) is
+             * still driving audio from an independent playback cursor.  If we
+             * started a second source now, both cursors would drift apart with
+             * every loop cycle, producing constructive/destructive interference
+             * heard as wavering distortion at the loop boundary.
+             *
+             * The newcomer waits until the fade-out fully stops the existing
+             * source (srcIdx → -1), then claims a source on the next frame.
+             * The brief holdoff (≤ fade-out duration) is inaudible; the
+             * phase-divergence distortion it prevents is very much audible. */
+            {
                 int      k;
                 qboolean sfxDuped = qfalse;
                 for (k = 0; k < MAX_GENTITIES; k++) {
                     alLoop_t *other;
                     if (k == i) continue;
                     other = &s_al_loops[k];
-                    if (!other->active || other->srcIdx < 0) continue;
-                    if (other->sfx != lp->sfx)              continue;
-                    if (s_al_src[other->srcIdx].isPlaying)  { sfxDuped = qtrue; break; }
+                    if (other->srcIdx < 0) continue;        /* no source */
+                    if (other->sfx != lp->sfx) continue;    /* different sfx */
+                    if (s_al_src[other->srcIdx].isPlaying) { sfxDuped = qtrue; break; }
                 }
                 if (sfxDuped) continue;
             }
@@ -3669,6 +3792,25 @@ static void S_AL_UpdateLoops( void )
             }
             s_al_src[srcIdx].loopSound = qtrue;
             qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
+            /* Tag non-global BSP target_speaker loops so the occlusion
+             * pass can apply wall-muffling to them.  Global speakers
+             * (spawnflags & 1) are intentionally heard everywhere; they
+             * are excluded so they are never attenuated through walls. */
+            {
+                int bk;
+                const char *sfxName = (lp->sfx >= 0 && lp->sfx < s_al_numSfx)
+                                      ? s_al_sfx[lp->sfx].name : NULL;
+                if (sfxName) {
+                    for (bk = 0; bk < s_al_numBspSpeakers; bk++) {
+                        if (s_al_bspSpeakers[bk].spawnflags & 1) continue;
+                        if (Q_stristr(sfxName, s_al_bspSpeakers[bk].noise) ||
+                                Q_stristr(s_al_bspSpeakers[bk].noise, sfxName)) {
+                            s_al_src[srcIdx].isBspSpeaker = qtrue;
+                            break;
+                        }
+                    }
+                }
+            }
             /* Start gain: normally 0 (time-based fade-in prevents pop).
              * When s_alLoopFadeDist > 0, compute the distance-proportional
              * gain so a source that appears far from the listener starts
@@ -3717,27 +3859,40 @@ static void S_AL_UpdateLoops( void )
         }
         } /* end loopOrigin scope */
 
-        /* ---- Step 5: Apply fade-in gain ramp ---- */
-        if (lp->fadeStartMs > 0) {
-            int     elapsed = now - lp->fadeStartMs;
-            float   fadeGain;
+        /* ---- Step 5: Apply gain (fade-in ramp, or settled level) ---- *
+         * Runs every frame so that s_alVolEnv cvar changes take effect on
+         * active ambient loops regardless of fade state.  The vol-update block
+         * in S_AL_Update skips loop sources precisely because this step is the
+         * authoritative gain writer for all loop sources — both mid-fade and
+         * settled. */
+        {
             alSrc_t *src    = &s_al_src[lp->srcIdx];
             float    catVol = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
             if (lp->sfx >= 0 && lp->sfx < s_al_numSfx)
                 catVol *= s_al_sfx[lp->sfx].normGain;
-            {
-                int fiMs = s_alLoopFadeInMs ? (int)s_alLoopFadeInMs->value
-                                            : S_AL_LOOP_FADEIN_MS;
+
+            if (lp->fadeStartMs > 0) {
+                /* Fade-in ramp: gain 0 → 1 over fadeInMs. */
+                float fadeGain;
+                int   elapsed = now - lp->fadeStartMs;
+                int   fiMs    = s_alLoopFadeInMs ? (int)s_alLoopFadeInMs->value
+                                                  : S_AL_LOOP_FADEIN_MS;
                 if (fiMs < 1) fiMs = 1;
                 if (elapsed >= fiMs) {
                     fadeGain        = 1.0f;
-                    lp->fadeStartMs = 0;   /* fade complete — stop updating gain */
+                    lp->fadeStartMs = 0;   /* fade complete */
                 } else {
                     fadeGain = (float)elapsed / (float)fiMs;
                 }
+                qalSourcef(src->source, AL_GAIN,
+                           (src->master_vol / 255.f) * catVol * fadeGain);
+            } else {
+                /* Settled level — write every frame so live cvar adjustments
+                 * (s_alVolEnv, s_alVolSelf, etc.) are immediately reflected.
+                 * Cost is negligible: one qalSourcef per active ambient loop. */
+                qalSourcef(src->source, AL_GAIN,
+                           (src->master_vol / 255.f) * catVol);
             }
-            qalSourcef(src->source, AL_GAIN,
-                       (src->master_vol / 255.f) * catVol * fadeGain);
         }
     }
 }
@@ -5201,11 +5356,11 @@ static void S_AL_Update( int msec )
             for (j = 0; j < s_al_numSrc; j++) {
                 float catGain;
                 if (!s_al_src[j].isPlaying) continue;
-                /* Skip ALL loop sources — S_AL_UpdateLoops runs after this
-                 * block and writes the correct gain (including fade-in/out
-                 * ramps) for every active loop source on every frame, so
-                 * there is no need to update them here, and doing so would
-                 * reset a loop that is mid-fade back to its full target gain. */
+                /* Skip ALL loop sources — S_AL_UpdateLoops Step 5 runs after
+                 * this block and is the authoritative gain writer for every
+                 * active loop source (both mid-fade and settled).  Touching
+                 * them here would overwrite a mid-fade ramp with the full
+                 * target gain, popping the volume instead of ramping. */
                 if (s_al_src[j].loopSound) continue;
                 catGain = S_AL_GetCategoryVol(s_al_src[j].category);
                 /* Re-apply per-sample normalisation for ambient sources */
@@ -5231,9 +5386,17 @@ static void S_AL_Update( int msec )
     }
 
     /* Reap stopped sources — mark them free immediately so the next
-     * S_AL_GetFreeSource pass 1 finds them without growing or stealing. */
+     * S_AL_GetFreeSource pass 1 finds them without growing or stealing.
+     * Also runs occlusion for non-global BSP target_speaker loop sources —
+     * those are always-on AL_LOOPING sources at fixed world positions that
+     * should realistically be muffled through walls, just like one-shot
+     * world sounds.  Generic (non-BSP) loop sources are still skipped. */
     for (i = 0; i < s_al_numSrc; i++) {
-        if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
+        if (!s_al_src[i].isPlaying) continue;
+        /* Non-BSP loop sources: skip entirely (reap doesn't apply; occlusion
+         * is not safe because AL_POSITION and AL_GAIN are owned by
+         * S_AL_UpdateLoops which runs after this loop). */
+        if (s_al_src[i].loopSound && !s_al_src[i].isBspSpeaker) continue;
 
         qalGetSourcei(s_al_src[i].source, AL_SOURCE_STATE, &state);
         if (state == AL_STOPPED) {
@@ -5342,8 +5505,14 @@ static void S_AL_Update( int msec )
                  * abruptly at every trace tick (every 4-8 frames for medium/far
                  * sources), which is audible as directional crackling with HRTF.
                  * Blending at step=0.35 matches the gain-opening speed so the
-                 * position and gain fade together without pops. */
-                {
+                 * position and gain fade together without pops.
+                 *
+                 * BSP speaker loop sources: skip the position redirect.
+                 * S_AL_UpdateLoops writes AL_POSITION each frame from the
+                 * entity origin; applying an acousticOffset here would race
+                 * with that write and produce no net benefit.  The filter
+                 * (gain + HF) is still applied — that is the primary cue. */
+                if (!s_al_src[i].loopSound) {
                     float off0 = pBlend * (acousticPos[0] - s_al_src[i].origin[0]);
                     float off1 = pBlend * (acousticPos[1] - s_al_src[i].origin[1]);
                     float off2 = pBlend * (acousticPos[2] - s_al_src[i].origin[2]);
@@ -5434,8 +5603,14 @@ static void S_AL_Update( int msec )
                     gainHF *= srcSuppressHF * s_al_grenadeHF * s_al_healthHF;
                 }
 
-                qalSource3f(s_al_src[i].source, AL_POSITION,
-                            pos[0], pos[1], pos[2]);
+                /* BSP speaker loop sources: skip the AL_POSITION write.
+                 * S_AL_UpdateLoops writes the authoritative world position
+                 * each frame (it runs after this loop); overwriting it here
+                 * with the gap-redirected pos would race and gain nothing —
+                 * acousticOffset is always kept zero for loop sources anyway. */
+                if (!s_al_src[i].loopSound)
+                    qalSource3f(s_al_src[i].source, AL_POSITION,
+                                pos[0], pos[1], pos[2]);
 
                 if (s_al_efx.available) {
                     if (occ > 0.98f && gainHF > 0.97f) {
@@ -5464,10 +5639,13 @@ static void S_AL_Update( int msec )
                         qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
                                    (ALint)s_al_efx.occlusionFilter[i]);
                     }
-                } else {
+                } else if (!s_al_src[i].loopSound) {
                     /* No EFX: approximate occlusion by direct gain reduction.
                      * Do NOT multiply by masterGain here — the listener AL_GAIN
-                     * already applies s_volume; including it again would double it. */
+                     * already applies s_volume; including it again would double it.
+                     * BSP speaker loop sources are skipped: S_AL_UpdateLoops
+                     * owns AL_GAIN for all loop sources and runs after this loop,
+                     * so any gain write here would be immediately overwritten. */
                     qalSourcef(s_al_src[i].source, AL_GAIN,
                         (s_al_src[i].master_vol / 255.0f) *
                         S_AL_GetCategoryVol(s_al_src[i].category) *
@@ -6391,16 +6569,22 @@ qboolean S_AL_Init( soundInterface_t *si )
         "hardware; reduce only if the audio driver reports resource errors.  "
         "Requires vid_restart (LATCH).");
 
-    /* Dedup window — disabled by default (0).  Set to e.g. 20 to suppress
-     * identical (entity, sfx) re-submissions within that many milliseconds.
-     * Vanilla URT doesn't bother and nobody notices; kept as a cvar in case
-     * it is ever needed for unusual sound designs. */
-    s_alDedupMs = Cvar_Get("s_alDedupMs", "0", CVAR_ARCHIVE_ND);
-    Cvar_CheckRange(s_alDedupMs, "0", "200", CV_INTEGER);
+    /* Dedup window — default 20 ms to match DMA's hardcoded per-entity window.
+     * ENTITYNUM_WORLD always uses max(this, 100 ms) to match DMA's world throttle.
+     * Non-weapon channels additionally extend the window to the sound duration
+     * so trigger sounds cannot re-stack while the previous instance plays. */
+    s_alDedupMs = Cvar_Get("s_alDedupMs", "20", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alDedupMs, "0", "10000", CV_INTEGER);
     Cvar_SetDescription(s_alDedupMs,
-        "Same-entity same-sfx dedup window in milliseconds.  0 = disabled (default).  "
-        "When > 0, suppresses a second start of the exact same sound from the same "
-        "entity within this window — prevents audible doubling on rapid re-triggers.");
+        "Same-entity same-sfx dedup window in milliseconds (default 20, matching the DMA backend). "
+        "0 = disabled. "
+        "Blocks a second S_StartSound for the same (entity, sfx) pair within this window. "
+        "CHAN_WEAPON uses only this fixed window — rapid fire is never suppressed. "
+        "All other channels additionally extend the window to the full sound duration so "
+        "trigger-bound sounds (birds, ambient cues, map music) cannot re-stack while the "
+        "previous instance is still playing, regardless of how quickly the trigger is re-tripped. "
+        "ENTITYNUM_WORLD always uses max(s_alDedupMs, 100) to throttle impact/casing "
+        "accumulation at sv_fps rate.");
 
     s_alTrace = Cvar_Get("s_alTrace", "0", CVAR_TEMP);
     Cvar_CheckRange(s_alTrace, "0", "2", CV_INTEGER);

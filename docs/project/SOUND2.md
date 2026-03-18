@@ -52,6 +52,14 @@ Every session required re-decoding audio files to recompute `normGain`.  There
 was no way for a player or server admin to tune the per-map ambient balance
 without recompiling.
 
+### 5. MAP sounds not occluded through walls
+
+BSP `target_speaker` loop sources (ambient machinery, fans, dripping water,
+etc.) were **completely excluded from occlusion processing** — the
+`S_Update` occlusion loop skipped every source with `loopSound == qtrue`.
+This meant a player on the other side of a thick concrete wall still heard
+the speaker at full volume and full brightness.
+
 ---
 
 ## Changes overview
@@ -171,7 +179,7 @@ Rate-mismatch `[alDbg]` line now includes `normGain=%.3f`.
 
 ---
 
-### G. New functions — map audio init + normcache  ❌ NOT YET STARTED
+### G. New functions — map audio init + normcache  ✅ DONE
 
 All of the following functions need to be **inserted between**
 `S_AL_StopAllSounds` and `S_AL_ClearLoopingSounds`
@@ -499,7 +507,7 @@ static void S_AL_RebuildNormCache_f( void )
 
 ---
 
-### H. `S_AL_BeginRegistration` — load normcache early  ❌ NOT YET STARTED
+### H. `S_AL_BeginRegistration` — load normcache early  ✅ DONE
 
 `BeginRegistration` is called **before** sounds are registered for a new map.
 Loading the normcache here means every subsequent `RegisterSound` call
@@ -527,7 +535,7 @@ static void S_AL_BeginRegistration( void )
 
 ---
 
-### I. `S_AL_UpdateDynamicReverb` — snap branch + `hasSky` hint  ❌ NOT YET STARTED
+### I. `S_AL_UpdateDynamicReverb` — snap branch + `hasSky` hint  ✅ DONE
 
 #### I.1 Snap branch — call `S_AL_InitMapAudio`
 
@@ -566,7 +574,7 @@ if (s_al_mapHints.hasSky && caveBonus > 0.f)
 
 ---
 
-### J. `s_alDebugNorm` — per-frame ambient normGain dump  ❌ NOT YET STARTED
+### J. `s_alDebugNorm` — per-frame ambient normGain dump  ✅ DONE
 
 #### J.1 Register the cvar in `S_AL_Init`
 
@@ -611,7 +619,7 @@ if (s_alDebugNorm && s_alDebugNorm->integer) {
 
 ---
 
-### K. SOUND.md — documentation update  ❌ NOT YET STARTED
+### K. SOUND.md — documentation update  ✅ DONE
 
 Add a new section after the existing **"Key Sound Cvars"** table:
 
@@ -632,13 +640,95 @@ Add a new section after the existing **"Key Sound Cvars"** table:
 
 ---
 
+### L. BSP speaker occlusion filtering  ✅ DONE
+
+**File:** `code/client/snd_openal.c`
+
+**Problem:** Non-global `target_speaker` loop sources were excluded from the
+`S_Update` occlusion pass (`loopSound == qtrue` caused an unconditional
+`continue`).  Players heard map ambient sounds (fans, water, machinery) at
+full volume and brightness regardless of intervening walls.
+
+**Solution — three coordinated changes:**
+
+#### L.1 `isBspSpeaker` flag in `alSrc_t`
+
+```c
+qboolean isBspSpeaker;  /* qtrue: non-global BSP target_speaker loop */
+```
+
+Initialised to `qfalse` in `S_AL_SrcSetup`.
+
+#### L.2 Tagging in `S_AL_UpdateLoops`
+
+Immediately after `s_al_src[srcIdx].loopSound = qtrue`, a lookup against
+`s_al_bspSpeakers[]` tags the new source:
+
+```c
+for (bk = 0; bk < s_al_numBspSpeakers; bk++) {
+    if (s_al_bspSpeakers[bk].spawnflags & 1) continue; /* global → skip */
+    if (Q_stristr(sfxName, s_al_bspSpeakers[bk].noise) ||
+            Q_stristr(s_al_bspSpeakers[bk].noise, sfxName)) {
+        s_al_src[srcIdx].isBspSpeaker = qtrue;
+        break;
+    }
+}
+```
+
+Global speakers (`spawnflags & 1`) are intentionally excluded — they are
+designed to be heard everywhere and should never be attenuated by walls.
+
+#### L.3 Occlusion loop skip guard
+
+Old:
+```c
+if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
+```
+
+New:
+```c
+if (!s_al_src[i].isPlaying) continue;
+if (s_al_src[i].loopSound && !s_al_src[i].isBspSpeaker) continue;
+```
+
+Non-BSP loop sources still skip entirely (they are managed by
+`S_AL_UpdateLoops` which owns their `AL_POSITION` and `AL_GAIN`).
+BSP speaker loops fall through and receive all three occlusion phases.
+
+#### L.4 Phase guards — don't race with `S_AL_UpdateLoops`
+
+`S_AL_UpdateLoops` runs **after** the occlusion loop and writes the
+authoritative `AL_POSITION` and (in non-EFX mode) `AL_GAIN` for every
+loop source.  To avoid overwriting those:
+
+- **Phase 1** — `acousticOffset` IIR blend is skipped for `loopSound`
+  sources.  The EFX filter (gain + HF muffle) is still updated.
+- **Phase 3** — `qalSource3f(AL_POSITION, …)` is skipped for `loopSound`.
+- **Phase 3 (no EFX)** — `qalSourcef(AL_GAIN, …)` is skipped for
+  `loopSound`; `S_AL_UpdateLoops` applies gain after this loop anyway.
+
+With EFX available the `AL_DIRECT_FILTER` (lowpass gain + HF) is written
+by the occlusion pass — that filter slot is not touched by `UpdateLoops`,
+so there is no race.
+
+#### Design: no `acousticOffset` for BSP speakers
+
+Map speakers are fixed-position entities.  The gap-finding redirect
+(`acousticOffset`) is useful for moving players (sounds "leak" around
+corners toward the listener) but is not applied to speakers since their
+direction relative to the player is stable and `UpdateLoops` owns the
+position write.  Occlusion through walls is achieved purely via the
+lowpass gain/HF attenuation — which is the primary perceptual cue.
+
+---
+
 ## File locations
 
 | File | Role |
 |---|---|
 | `code/client/snd_openal.c` | All audio engine changes |
 | `normcache/<mapbase>.cfg`  | Per-map normGain cache (written to FS home path) |
-| `docs/project/SOUND.md`    | Existing audio reference doc (needs K updates) |
+| `docs/project/SOUND.md`    | Existing audio reference doc |
 | `docs/project/SOUND2.md`   | **This file** — in-progress redesign notes |
 
 ---
@@ -657,6 +747,10 @@ Add a new section after the existing **"Key Sound Cvars"** table:
      console should print "loaded normcache" and the edited value should be used.
   4. Load a second map — verify `normcache/<mapname>.cfg` is created for it too.
   5. Load ut4_turnpike again — verify "loaded normcache" is printed (not "wrote").
+  6. Stand behind a solid wall near a `target_speaker` with `s_alOcclusion 1`.
+     Enable `s_alDebugOcc 1` — the BSP speaker source should show `occ < 1.0`
+     and the sound should be muffled.  Walk around the corner into line-of-sight
+     — the filter should clear and the sound restore within a few frames.
 
 ---
 
@@ -671,13 +765,14 @@ Add a new section after the existing **"Key Sound Cvars"** table:
 | `alBspSpeaker_t` | struct | ✅ done |
 | `alMapHints_t` | struct | ✅ done |
 | `alNormCacheEntry_t` | struct | ✅ done |
+| `alSrc_t.isBspSpeaker` | field | ✅ done |
 | `s_al_mapHints` | static | ✅ done |
 | `s_al_bspSpeakers[]` | static | ✅ done |
 | `s_al_numBspSpeakers` | static | ✅ done |
 | `s_al_normCache[]` | static | ✅ done |
 | `s_al_normCacheCount` | static | ✅ done |
 | `s_al_normCacheWritten` | static | ✅ done |
-| `s_alDebugNorm` cvar ptr | static | ✅ declared, ❌ not registered |
+| `s_alDebugNorm` cvar ptr | static | ✅ done |
 | `S_AL_CalcNormGain` | function | ✅ rewritten |
 | normcache override in `RegisterSound` | code block | ✅ done |
 | BSP origin fallback in `StartSound` | code block | ✅ done |
@@ -694,7 +789,11 @@ Add a new section after the existing **"Key Sound Cvars"** table:
 | `s_alDebugNorm` cvar registration | code block | ✅ done |
 | `snd_normcache_rebuild` cmd | code block | ✅ done |
 | per-frame `s_alDebugNorm` output | code block | ✅ done |
+| `isBspSpeaker` tagging in `UpdateLoops` | code block | ✅ done |
+| occlusion loop BSP speaker guard | code block | ✅ done |
+| phase guards (pos / gain / offset) | code block | ✅ done |
 | `SOUND.md` updates | doc | ✅ done |
+| `SOUND2.md` updates | doc | ✅ done |
 
 ---
 
@@ -702,3 +801,4 @@ Add a new section after the existing **"Key Sound Cvars"** table:
 
 **All items are complete (✅).**  Run `code_review` then `codeql_checker`
 to finalise the PR.
+
