@@ -575,7 +575,7 @@ instead of starting and stopping abruptly:
 |---|---|---|
 | Source starts / re-enters range | `S_AL_LOOP_FADEIN_MS` = 600 ms | Gain 0 → 1 (cold-start pop eliminated) |
 | Entity leaves PVS / out of range | `S_AL_LOOP_FADEOUT_MS` = 500 ms | Gain 1 → 0 (hard cut eliminated) |
-| Entity re-enters during fade-out | Immediate | Fade-out cancelled; fade-in from current level |
+| Entity re-enters during fade-out | Immediate | Fade-out cancelled; fade-in resumes from current gain level — no discontinuity |
 
 #### Ambient loop deduplication (same-sfx entities)
 
@@ -587,13 +587,15 @@ giving N× volume for maps that place N ambient entities using the same file
 producing triple-volume output and three stop-log entries at identical sample
 offsets).
 
-`S_AL_UpdateLoops` now mirrors this behaviour: before allocating a new AL source
-for entity `i`, it scans **all** other loop slots — both lower- and higher-index.
-If any other *active* entity already has a playing source for the same sfx, entity
-`i` is skipped (no new source allocated).  This prevents double-start regardless
-of which entity entered PVS first.  When the owning entity leaves PVS its `active`
-flag clears immediately, allowing any remaining duplicate to claim a source on the
-next frame (smooth cross-fade rather than a hard cut).
+`S_AL_UpdateLoops` enforces this: before allocating a new AL source for entity
+`i`, it scans **all** other loop slots for any slot that has a source still
+playing on the same sfx — regardless of whether that slot is `active` or fading
+out.  This last point is critical: a fading-out slot (`active=false`) still has
+an independent playback cursor running in the OpenAL driver.  If a second source
+were started now, both cursors would drift apart on every loop cycle, producing
+constructive/destructive interference heard as wavering distortion at the loop
+boundary.  The newcomer therefore waits until the fade-out fully stops the
+existing source (srcIdx → -1), then claims a source on the next frame.
 
 #### Occlusion update cadence (distance-adaptive)
 

@@ -3614,12 +3614,28 @@ static void S_AL_UpdateLoops( void )
 
         /* ---- Step 3: Cancel fade-out if the entity was re-added ---- *
          * (active=true while a previous fade-out is still running means the
-         * entity re-entered the snapshot before the fade finished.) */
+         * entity re-entered the snapshot before the fade finished.)
+         *
+         * We compute the current fade-out gain so the fade-in begins from
+         * exactly that level — preventing a gain jump (pop) at re-activation.
+         * fadeStartMs is offset into the past so that Step 5's (elapsed/fiMs)
+         * equals the current gain on its very first application. */
         if (lp->fadeOutStartMs > 0) {
-            /* Don't restart the source — just cancel the fade-out and let
-             * the fade-in ramp bring gain back up from here. */
+            int foMs = s_alLoopFadeOutMs ? (int)s_alLoopFadeOutMs->value
+                                         : S_AL_LOOP_FADEOUT_MS;
+            int fiMs = s_alLoopFadeInMs  ? (int)s_alLoopFadeInMs->value
+                                         : S_AL_LOOP_FADEIN_MS;
+            if (foMs < 1) foMs = 1;
+            if (fiMs < 1) fiMs = 1;
+            {
+                int   elapsed_out = now - lp->fadeOutStartMs;
+                float curGain = (elapsed_out >= foMs) ? 0.0f
+                    : lp->fadeOutStartGain * (1.0f - (float)elapsed_out / (float)foMs);
+                if (curGain < 0.0f) curGain = 0.0f;
+                if (curGain > 1.0f) curGain = 1.0f;
+                lp->fadeStartMs = now - (int)(curGain * (float)fiMs);
+            }
             lp->fadeOutStartMs = 0;
-            lp->fadeStartMs    = (now > 0) ? now : 1;
         }
 
         /* ---- Step 4: Start a new source if needed ---- */
@@ -3632,30 +3648,59 @@ static void S_AL_UpdateLoops( void )
         {
         const float *loopOrigin = (i == s_al_listener_entnum && s_al_listener_entnum >= 0)
                                   ? s_al_listener_origin : lp->origin;
-        if (lp->srcIdx < 0 || !s_al_src[lp->srcIdx].isPlaying) {
-            /* Dedup: mirror DMA S_AddLoopSounds() merge behaviour.
-             * When two or more map entities reference the same sfx (e.g.
-             * ut4_austria has three ambient entities playing the same Bach
-             * prelude loop), only ONE AL source is ever running for that sfx.
-             * We scan ALL loop slots (not just k < i) so that a higher-index
-             * entity that already owns a source also blocks a lower-index
-             * newcomer — whichever entity entered PVS first keeps the source.
-             * When the owning entity leaves PVS its active flag clears (Step 1),
-             * which immediately lets any remaining duplicate claim a source on
-             * the next frame (smooth cross-fade rather than a hard cut).
-             * Without this, N entities → N simultaneous sources → N× volume
-             * ("double running", confirmed by 3 identical stop-offsets in
-             *  ut4_austria logs). */
-            if (lp->srcIdx < 0) {
+
+        /* Normalise a stale srcIdx before the dedup check so that the dedup
+         * scan always runs when we truly need a new source.
+         *
+         * Two cases make an existing srcIdx stale on an active entity:
+         *   (a) The source stopped without going through our fade-out path
+         *       (driver reset, or StopAllSounds without clearing loop state).
+         *       isPlaying (our software flag) is still qtrue; we detect
+         *       staleness only when srcIdx >= 0 and !isPlaying.
+         *   (b) The entity's desired sfx changed while the source was playing
+         *       (e.g. weapon swap — must restart immediately on the new buffer).
+         *
+         * In case (b) we hard-stop the old source.  The new source will begin
+         * a normal fade-in via the freshly-cleared fadeStartMs below. */
+        if (lp->srcIdx >= 0 && lp->srcIdx < s_al_numSrc) {
+            qboolean stale = !s_al_src[lp->srcIdx].isPlaying;
+            if (!stale && s_al_src[lp->srcIdx].sfx != lp->sfx)
+                stale = qtrue;
+            if (stale) {
+                if (s_al_src[lp->srcIdx].isPlaying)
+                    S_AL_StopSource(lp->srcIdx);
+                s_al_src[lp->srcIdx].loopSound = qfalse;
+                lp->srcIdx      = -1;
+                lp->fadeStartMs = 0;
+            }
+        }
+
+        if (lp->srcIdx < 0) {
+            /* Dedup: only ONE AL source per sfx may run at a time.
+             *
+             * Scan ALL loop slots — active AND fading-out — for any slot
+             * that has a source still playing on the same sfx.  The old
+             * guard `!other->active` was removed intentionally: a slot that
+             * is fading out (active=false, srcIdx valid, isPlaying=true) is
+             * still driving audio from an independent playback cursor.  If we
+             * started a second source now, both cursors would drift apart with
+             * every loop cycle, producing constructive/destructive interference
+             * heard as wavering distortion at the loop boundary.
+             *
+             * The newcomer waits until the fade-out fully stops the existing
+             * source (srcIdx → -1), then claims a source on the next frame.
+             * The brief holdoff (≤ fade-out duration) is inaudible; the
+             * phase-divergence distortion it prevents is very much audible. */
+            {
                 int      k;
                 qboolean sfxDuped = qfalse;
                 for (k = 0; k < MAX_GENTITIES; k++) {
                     alLoop_t *other;
                     if (k == i) continue;
                     other = &s_al_loops[k];
-                    if (!other->active || other->srcIdx < 0) continue;
-                    if (other->sfx != lp->sfx)              continue;
-                    if (s_al_src[other->srcIdx].isPlaying)  { sfxDuped = qtrue; break; }
+                    if (other->srcIdx < 0) continue;        /* no source */
+                    if (other->sfx != lp->sfx) continue;    /* different sfx */
+                    if (s_al_src[other->srcIdx].isPlaying) { sfxDuped = qtrue; break; }
                 }
                 if (sfxDuped) continue;
             }
