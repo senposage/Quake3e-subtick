@@ -465,6 +465,11 @@ typedef struct {
     ALuint   eqEffect;        /* AL_EFFECT_EQUALIZER — global tone shaping */
     ALuint   eqSlot;          /* auxiliary effect slot for the EQ */
     int      eqSend;          /* aux send index used for EQ (-1 = not wired) */
+    ALuint   eqNormFilter;    /* lowpass filter at eqCompGain: applied to both the direct
+                               * path and the EQ auxiliary send to prevent the additive
+                               * wet signal from pushing dry+wet above the source level */
+    float    eqCompGain;      /* 1/(1+max_band*slot_gain): normalization factor so that
+                               * direct*comp + EQ_wet*comp*band = source at the peak band */
     ALuint   occlusionFilter[S_AL_MAX_SRC];
     qboolean hasEAXReverb;    /* AL_EFFECT_EAXREVERB available (vs plain reverb) */
     ALint    maxSends;        /* ALC_MAX_AUXILIARY_SENDS reported by the device */
@@ -1917,11 +1922,15 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)AL_EFFECTSLOT_NULL, 1, (ALint)AL_FILTER_NULL);
             /* EQ send — local sources (own weapons/footsteps) get the same
-             * bass/mid boost as world sources for consistent tonal balance. */
+             * bass/mid boost as world sources for consistent tonal balance.
+             * Use eqNormFilter on the send to compensate for the additive
+             * wet path (prevents dry+wet from boosting above source level). */
             if (s_al_efx.eqSend >= 0 && s_al_efx.eqSlot) {
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)s_al_efx.eqSlot, s_al_efx.eqSend,
-                            (ALint)AL_FILTER_NULL);
+                            (ALint)(s_al_efx.eqNormFilter
+                                    ? s_al_efx.eqNormFilter
+                                    : AL_FILTER_NULL));
             }
             if (s_alDebugReverb && s_alDebugReverb->integer >= 2)
                 Com_Printf(S_COLOR_CYAN "[alfilter] src#%d local: cleared stale filter\n", idx);
@@ -1972,11 +1981,15 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)send1, 1, (ALint)AL_FILTER_NULL);
             }
-            /* EQ send — always-on tone shaping for bass/mid presence. */
+            /* EQ send — always-on tone shaping for bass/mid presence.
+             * Use eqNormFilter on the send to normalize the wet path so
+             * dry+wet stays at the original source level without distortion. */
             if (s_al_efx.eqSend >= 0 && s_al_efx.eqSlot) {
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)s_al_efx.eqSlot, s_al_efx.eqSend,
-                            (ALint)AL_FILTER_NULL);
+                            (ALint)(s_al_efx.eqNormFilter
+                                    ? s_al_efx.eqNormFilter
+                                    : AL_FILTER_NULL));
             }
             /* Pre-set the occlusion filter to pass-through values so the
              * filter object is ready for the first occlusion update tick.
@@ -2345,8 +2358,11 @@ static void S_AL_InitEFX( void )
 
     /* Global EQ effect — tone shaping to compensate for occlusion softening.
      * Uses its own aux send (2 if available, else shares send 1 with echo).
-     * The EQ is additive: dry signal stays, EQ'd copy is mixed in at
-     * s_alEqGain level.  Set s_alEqGain 0 to disable without removing the effect. */
+     * The EQ auxiliary send is inherently additive (wet adds to dry), which
+     * would boost the signal and cause distortion.  A normalization filter
+     * (eqNormFilter at gain 1/(1+max_band*slot_gain)) is applied to both the
+     * direct path and the EQ send so the combined dry+wet output stays at the
+     * original source level.  Set s_alEqGain 0 to disable without re-init. */
     s_al_efx.eqSend = -1;
     if (s_alEqGain && s_alEqGain->value > 0.0f) {
         int eqSendIdx = (maxSends >= 3) ? 2 : ((maxSends >= 2) ? 1 : -1);
@@ -2374,6 +2390,20 @@ static void S_AL_InitEFX( void )
                 qalAuxiliaryEffectSlotf(s_al_efx.eqSlot, AL_EFFECTSLOT_GAIN,
                                         s_alEqGain->value);
                 s_al_efx.eqSend = eqSendIdx;
+                /* Compute normalization gain so dry + EQ-wet stays at input level.
+                 * When the same gain is applied to both the direct path and the EQ
+                 * auxiliary send, the total at the peak-boosted band equals the
+                 * original source signal: comp*(1) + comp*band*slot = source.
+                 * Without this, the additive wet path boosts the signal by up to
+                 * (1 + max_band * slot_gain)x, which causes clipping / distortion. */
+                {
+                    float maxBand = MAX(MAX(low, mid), high);
+                    s_al_efx.eqCompGain = 1.0f / (1.0f + maxBand * s_alEqGain->value);
+                    qalGenFilters(1, &s_al_efx.eqNormFilter);
+                    qalFilteri(s_al_efx.eqNormFilter, AL_FILTER_TYPE, AL_FILTER_LOWPASS);
+                    qalFilterf(s_al_efx.eqNormFilter, AL_LOWPASS_GAIN,   s_al_efx.eqCompGain);
+                    qalFilterf(s_al_efx.eqNormFilter, AL_LOWPASS_GAINHF, 1.0f);
+                }
             } else {
                 qalDeleteEffects(1, &s_al_efx.eqEffect);
                 s_al_efx.eqEffect = 0;
@@ -2449,6 +2479,8 @@ static void S_AL_Shutdown( void )
             qalDeleteAuxiliaryEffectSlots(1, &s_al_efx.eqSlot);
         if (s_al_efx.eqEffect)
             qalDeleteEffects(1, &s_al_efx.eqEffect);
+        if (s_al_efx.eqNormFilter)
+            qalDeleteFilters(1, &s_al_efx.eqNormFilter);
         for (j = 0; j < S_AL_MAX_SRC; j++)
             if (s_al_efx.occlusionFilter[j])
                 qalDeleteFilters(1, &s_al_efx.occlusionFilter[j]);
@@ -5113,6 +5145,16 @@ static void S_AL_Update( int msec )
                                         (ALint)s_al_efx.eqEffect);
                 qalAuxiliaryEffectSlotf(s_al_efx.eqSlot, AL_EFFECTSLOT_GAIN,
                                         curGain);
+                /* Recompute the normalization filter gain so it tracks the
+                 * updated band gains and slot gain.  Per-source direct filters
+                 * and EQ send filters are updated by the per-frame occlusion
+                 * loop — only the global filter object gain changes here. */
+                if (s_al_efx.eqNormFilter) {
+                    s_al_efx.eqCompGain = 1.0f
+                        / (1.0f + MAX(MAX(curLow, curMid), curHigh) * curGain);
+                    qalFilterf(s_al_efx.eqNormFilter, AL_LOWPASS_GAIN,
+                               s_al_efx.eqCompGain);
+                }
                 lastEqLow  = curLow;
                 lastEqMid  = curMid;
                 lastEqHigh = curHigh;
@@ -5397,17 +5439,26 @@ static void S_AL_Update( int msec )
 
                 if (s_al_efx.available) {
                     if (occ > 0.98f && gainHF > 0.97f) {
-                        /* Fully clear and no disruption: bypass filter entirely.
-                         * Even a passthrough biquad introduces subtle phase-shift
-                         * coloration — AL_FILTER_NULL is the cleanest path.
+                        /* Fully clear and no disruption: use the EQ normalization
+                         * filter if EQ is active (to keep dry+wet at source level),
+                         * otherwise bypass filter entirely to avoid phase-shift coloration.
                          * 0.98 / 0.97: small epsilon below 1.0 to absorb IIR
                          * rounding so we don't oscillate between NULL and filter
                          * on every frame when all values are nominally 1.0. */
-                        qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
-                                   (ALint)AL_FILTER_NULL);
+                        if (s_al_efx.eqNormFilter && s_al_efx.eqSend >= 0)
+                            qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                       (ALint)s_al_efx.eqNormFilter);
+                        else
+                            qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
+                                       (ALint)AL_FILTER_NULL);
                     } else {
+                        /* Multiply occlusion gain by EQ comp factor so the
+                         * attenuated direct path stays in correct proportion
+                         * with the normalized EQ wet send. */
+                        float normGain = (s_al_efx.eqNormFilter && s_al_efx.eqSend >= 0)
+                                         ? s_al_efx.eqCompGain : 1.0f;
                         qalFilterf(s_al_efx.occlusionFilter[i],
-                                   AL_LOWPASS_GAIN,   gain);
+                                   AL_LOWPASS_GAIN,   gain * normGain);
                         qalFilterf(s_al_efx.occlusionFilter[i],
                                    AL_LOWPASS_GAINHF, gainHF);
                         qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
@@ -5450,10 +5501,17 @@ static void S_AL_Update( int msec )
                                       + (s_al_suppressHF - 1.0f) * rearGain;
                 }
                 {
-                    float combHF = localSuppressHF * s_al_grenadeHF * s_al_healthHF;
-                    if (combHF < 0.97f) {
+                    float combHF   = localSuppressHF * s_al_grenadeHF * s_al_healthHF;
+                    float normGain = (s_al_efx.eqNormFilter && s_al_efx.eqSend >= 0)
+                                     ? s_al_efx.eqCompGain : 1.0f;
+                    /* Apply the filter when either condition requires attenuation.
+                     * combHF < 0.97: HF suppression threshold (matches world source).
+                     * normGain < 0.98: EQ compensation reduces direct path by > 2%;
+                     *   use occlusionFilter rather than AL_FILTER_NULL so both
+                     *   gain and gainHF can be set independently on the same object. */
+                    if (combHF < 0.97f || normGain < 0.98f) {
                         qalFilterf(s_al_efx.occlusionFilter[i],
-                                   AL_LOWPASS_GAIN,   1.0f);
+                                   AL_LOWPASS_GAIN,   normGain);
                         qalFilterf(s_al_efx.occlusionFilter[i],
                                    AL_LOWPASS_GAINHF, combHF);
                         qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
@@ -6357,19 +6415,24 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alEqLow = Cvar_Get("s_alEqLow", "1.26", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqLow,
         "EQ low-shelf gain (linear). 1.0 = flat, 1.26 = +2 dB (default). "
-        "Range 0.126 – 7.943 (±18 dB). Compensates for occlusion softening.");
+        "Range 0.126 – 7.943 (±18 dB). The EQ uses level normalization: both "
+        "the direct path and the EQ send are attenuated by 1/(1+max_band*slot_gain) "
+        "so dry+wet stays at source level regardless of the band boost applied.");
     s_alEqMid = Cvar_Get("s_alEqMid", "1.26", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqMid,
         "EQ mid-band gain (linear). 1.0 = flat, 1.26 = +2 dB (default). "
-        "Applied to both mid1 (800 Hz) and mid2 (2500 Hz) bands.");
+        "Applied to both mid1 (800 Hz) and mid2 (2500 Hz) bands. "
+        "See s_alEqLow for normalization details.");
     s_alEqHigh = Cvar_Get("s_alEqHigh", "1.0", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqHigh,
         "EQ high-shelf gain (linear). 1.0 = flat (default). "
-        "Boost above 6 kHz — leave at 1.0 unless you want extra brightness.");
+        "Boost above 6 kHz — leave at 1.0 unless you want extra brightness. "
+        "See s_alEqLow for normalization details.");
     s_alEqGain = Cvar_Get("s_alEqGain", "1.0", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqGain,
         "EQ effect slot wet-mix level [0..1]. 1.0 = full effect (default), "
-        "0.0 = disabled. Controls how much of the EQ signal is mixed in.");
+        "0.0 = disabled. The normalization filter gain is recalculated automatically "
+        "when this changes, so the total signal level stays consistent.");
 
     /* Load library */
     if (!S_AL_LoadLibrary())
@@ -6611,11 +6674,19 @@ qboolean S_AL_Init( soundInterface_t *si )
     } else {
         S_AL_TRACE(1, "init: music source created (AL id %u)\n",
                    s_al_music.source);
-        /* Route music through EQ for bass/mid presence. */
-        if (s_al_efx.available && s_al_efx.eqSend >= 0 && s_al_efx.eqSlot)
+        /* Route music through EQ for bass/mid presence.
+         * Apply eqNormFilter on both the EQ send and the direct path so the
+         * additive wet signal does not push total output above the source level. */
+        if (s_al_efx.available && s_al_efx.eqSend >= 0 && s_al_efx.eqSlot) {
             qalSource3i(s_al_music.source, AL_AUXILIARY_SEND_FILTER,
                         (ALint)s_al_efx.eqSlot, s_al_efx.eqSend,
-                        (ALint)AL_FILTER_NULL);
+                        (ALint)(s_al_efx.eqNormFilter
+                                ? s_al_efx.eqNormFilter
+                                : AL_FILTER_NULL));
+            if (s_al_efx.eqNormFilter)
+                qalSourcei(s_al_music.source, AL_DIRECT_FILTER,
+                           (ALint)s_al_efx.eqNormFilter);
+        }
         if (s_al_bestResampler >= 0)
             qalSourcei(s_al_music.source, AL_SOURCE_RESAMPLER_SOFT,
                        s_al_bestResampler);
