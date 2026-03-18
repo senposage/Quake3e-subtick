@@ -222,6 +222,11 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
  *           sound tapers off instead of cutting to silence mid-cycle. */
 #define S_AL_LOOP_FADEIN_MS   600   /* ms — ~36 frames at 60 fps (was 150) */
 #define S_AL_LOOP_FADEOUT_MS  500   /* ms — ~30 frames at 60 fps (was 120) */
+/* Maximum dedup window applied to the duration-based extension for non-weapon
+ * channels.  Caps the int64→int narrowing and prevents absurdly long tracks
+ * (streamed music registered as loop sfx) from locking out re-triggers for
+ * an impractical length of time. */
+#define S_AL_DEDUP_MAX_DUR_MS 600000  /* 10 minutes */
 
 /* CHAN_WEAPON gun-muzzle proximity: sources on the weapon channel within this
  * distance of the listener are treated as "own gun barrel" and bypass occlusion
@@ -2839,7 +2844,14 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             if (entchannel != CHAN_WEAPON && sfx >= 0 && sfx < s_al_numSfx) {
                 alSfxRec_t *sr = &s_al_sfx[sfx];
                 if (sr->fileRate > 0 && sr->soundLength > 0) {
-                    int durMs = (int)((sr->soundLength * 1000) / sr->fileRate);
+                    /* Cast to int64 before multiplying to avoid signed 32-bit
+                     * overflow: at 44100 Hz any sound > ~49 s causes
+                     * soundLength * 1000 to wrap negative, silently disabling
+                     * the duration guard for the longest ambient tracks. */
+                    int durMs = (int)(((int64_t)sr->soundLength * 1000)
+                                      / sr->fileRate);
+                    if (durMs < 0 || durMs > S_AL_DEDUP_MAX_DUR_MS)
+                        durMs = S_AL_DEDUP_MAX_DUR_MS;
                     if (durMs > window) window = durMs;
                 }
             }
@@ -3686,6 +3698,11 @@ static void S_AL_UpdateLoops( void )
             if (fiMs < 1) fiMs = 1;
             {
                 int   elapsedOut = now - lp->fadeOutStartMs;
+                /* Guard against clock skew / NTP jumps: a negative elapsed
+                 * would produce a curGain > fadeOutStartGain (> 1.0).  The
+                 * clamps below would catch it, but clamping elapsedOut here
+                 * is cleaner and avoids a spurious fadeStartMs offset. */
+                if (elapsedOut < 0) elapsedOut = 0;
                 float curGain = (elapsedOut >= foMs) ? 0.0f
                     : lp->fadeOutStartGain * (1.0f - (float)elapsedOut / (float)foMs);
                 if (curGain < 0.0f) curGain = 0.0f;
@@ -3819,27 +3836,40 @@ static void S_AL_UpdateLoops( void )
         }
         } /* end loopOrigin scope */
 
-        /* ---- Step 5: Apply fade-in gain ramp ---- */
-        if (lp->fadeStartMs > 0) {
-            int     elapsed = now - lp->fadeStartMs;
-            float   fadeGain;
+        /* ---- Step 5: Apply gain (fade-in ramp, or settled level) ---- *
+         * Runs every frame so that s_alVolEnv cvar changes take effect on
+         * active ambient loops regardless of fade state.  The vol-update block
+         * in S_AL_Update skips loop sources precisely because this step is the
+         * authoritative gain writer for all loop sources — both mid-fade and
+         * settled. */
+        {
             alSrc_t *src    = &s_al_src[lp->srcIdx];
             float    catVol = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
             if (lp->sfx >= 0 && lp->sfx < s_al_numSfx)
                 catVol *= s_al_sfx[lp->sfx].normGain;
-            {
-                int fiMs = s_alLoopFadeInMs ? (int)s_alLoopFadeInMs->value
-                                            : S_AL_LOOP_FADEIN_MS;
+
+            if (lp->fadeStartMs > 0) {
+                /* Fade-in ramp: gain 0 → 1 over fadeInMs. */
+                float fadeGain;
+                int   elapsed = now - lp->fadeStartMs;
+                int   fiMs    = s_alLoopFadeInMs ? (int)s_alLoopFadeInMs->value
+                                                  : S_AL_LOOP_FADEIN_MS;
                 if (fiMs < 1) fiMs = 1;
                 if (elapsed >= fiMs) {
                     fadeGain        = 1.0f;
-                    lp->fadeStartMs = 0;   /* fade complete — stop updating gain */
+                    lp->fadeStartMs = 0;   /* fade complete */
                 } else {
                     fadeGain = (float)elapsed / (float)fiMs;
                 }
+                qalSourcef(src->source, AL_GAIN,
+                           (src->master_vol / 255.f) * catVol * fadeGain);
+            } else {
+                /* Settled level — write every frame so live cvar adjustments
+                 * (s_alVolEnv, s_alVolSelf, etc.) are immediately reflected.
+                 * Cost is negligible: one qalSourcef per active ambient loop. */
+                qalSourcef(src->source, AL_GAIN,
+                           (src->master_vol / 255.f) * catVol);
             }
-            qalSourcef(src->source, AL_GAIN,
-                       (src->master_vol / 255.f) * catVol * fadeGain);
         }
     }
 }
@@ -5303,11 +5333,11 @@ static void S_AL_Update( int msec )
             for (j = 0; j < s_al_numSrc; j++) {
                 float catGain;
                 if (!s_al_src[j].isPlaying) continue;
-                /* Skip ALL loop sources — S_AL_UpdateLoops runs after this
-                 * block and writes the correct gain (including fade-in/out
-                 * ramps) for every active loop source on every frame, so
-                 * there is no need to update them here, and doing so would
-                 * reset a loop that is mid-fade back to its full target gain. */
+                /* Skip ALL loop sources — S_AL_UpdateLoops Step 5 runs after
+                 * this block and is the authoritative gain writer for every
+                 * active loop source (both mid-fade and settled).  Touching
+                 * them here would overwrite a mid-fade ramp with the full
+                 * target gain, popping the volume instead of ramping. */
                 if (s_al_src[j].loopSound) continue;
                 catGain = S_AL_GetCategoryVol(s_al_src[j].category);
                 /* Re-apply per-sample normalisation for ambient sources */
