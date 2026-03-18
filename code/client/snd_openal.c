@@ -326,6 +326,9 @@ typedef struct {
     float           sampleVol;         /* per-sample linear scale from ":-N" dB suffix in the matching
                                          * s_alExtraVolEntryN slot; 1.0 for non-EXTRAVOL sources and
                                          * EXTRAVOL slots without a suffix */
+    qboolean        isBspSpeaker;      /* qtrue when this is a non-global BSP target_speaker loop —
+                                         * allows the occlusion pass to mute it through walls while
+                                         * keeping AL_POSITION / AL_GAIN owned by S_AL_UpdateLoops */
 } alSrc_t;
 
 static alSrc_t  s_al_src[S_AL_MAX_SRC];
@@ -1828,6 +1831,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->occlusionTick   = 0;
     VectorClear(src->acousticOffset);
     src->sampleVol       = 1.0f;
+    src->isBspSpeaker    = qfalse;  /* set by UpdateLoops for non-global BSP loops */
 
     /* Classify into volume category.
      * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
@@ -3788,6 +3792,25 @@ static void S_AL_UpdateLoops( void )
             }
             s_al_src[srcIdx].loopSound = qtrue;
             qalSourcei(s_al_src[srcIdx].source, AL_LOOPING, AL_TRUE);
+            /* Tag non-global BSP target_speaker loops so the occlusion
+             * pass can apply wall-muffling to them.  Global speakers
+             * (spawnflags & 1) are intentionally heard everywhere; they
+             * are excluded so they are never attenuated through walls. */
+            {
+                int bk;
+                const char *sfxName = (lp->sfx >= 0 && lp->sfx < s_al_numSfx)
+                                      ? s_al_sfx[lp->sfx].name : NULL;
+                if (sfxName) {
+                    for (bk = 0; bk < s_al_numBspSpeakers; bk++) {
+                        if (s_al_bspSpeakers[bk].spawnflags & 1) continue;
+                        if (Q_stristr(sfxName, s_al_bspSpeakers[bk].noise) ||
+                                Q_stristr(s_al_bspSpeakers[bk].noise, sfxName)) {
+                            s_al_src[srcIdx].isBspSpeaker = qtrue;
+                            break;
+                        }
+                    }
+                }
+            }
             /* Start gain: normally 0 (time-based fade-in prevents pop).
              * When s_alLoopFadeDist > 0, compute the distance-proportional
              * gain so a source that appears far from the listener starts
@@ -5363,9 +5386,17 @@ static void S_AL_Update( int msec )
     }
 
     /* Reap stopped sources — mark them free immediately so the next
-     * S_AL_GetFreeSource pass 1 finds them without growing or stealing. */
+     * S_AL_GetFreeSource pass 1 finds them without growing or stealing.
+     * Also runs occlusion for non-global BSP target_speaker loop sources —
+     * those are always-on AL_LOOPING sources at fixed world positions that
+     * should realistically be muffled through walls, just like one-shot
+     * world sounds.  Generic (non-BSP) loop sources are still skipped. */
     for (i = 0; i < s_al_numSrc; i++) {
-        if (!s_al_src[i].isPlaying || s_al_src[i].loopSound) continue;
+        if (!s_al_src[i].isPlaying) continue;
+        /* Non-BSP loop sources: skip entirely (reap doesn't apply; occlusion
+         * is not safe because AL_POSITION and AL_GAIN are owned by
+         * S_AL_UpdateLoops which runs after this loop). */
+        if (s_al_src[i].loopSound && !s_al_src[i].isBspSpeaker) continue;
 
         qalGetSourcei(s_al_src[i].source, AL_SOURCE_STATE, &state);
         if (state == AL_STOPPED) {
@@ -5474,8 +5505,14 @@ static void S_AL_Update( int msec )
                  * abruptly at every trace tick (every 4-8 frames for medium/far
                  * sources), which is audible as directional crackling with HRTF.
                  * Blending at step=0.35 matches the gain-opening speed so the
-                 * position and gain fade together without pops. */
-                {
+                 * position and gain fade together without pops.
+                 *
+                 * BSP speaker loop sources: skip the position redirect.
+                 * S_AL_UpdateLoops writes AL_POSITION each frame from the
+                 * entity origin; applying an acousticOffset here would race
+                 * with that write and produce no net benefit.  The filter
+                 * (gain + HF) is still applied — that is the primary cue. */
+                if (!s_al_src[i].loopSound) {
                     float off0 = pBlend * (acousticPos[0] - s_al_src[i].origin[0]);
                     float off1 = pBlend * (acousticPos[1] - s_al_src[i].origin[1]);
                     float off2 = pBlend * (acousticPos[2] - s_al_src[i].origin[2]);
@@ -5566,8 +5603,14 @@ static void S_AL_Update( int msec )
                     gainHF *= srcSuppressHF * s_al_grenadeHF * s_al_healthHF;
                 }
 
-                qalSource3f(s_al_src[i].source, AL_POSITION,
-                            pos[0], pos[1], pos[2]);
+                /* BSP speaker loop sources: skip the AL_POSITION write.
+                 * S_AL_UpdateLoops writes the authoritative world position
+                 * each frame (it runs after this loop); overwriting it here
+                 * with the gap-redirected pos would race and gain nothing —
+                 * acousticOffset is always kept zero for loop sources anyway. */
+                if (!s_al_src[i].loopSound)
+                    qalSource3f(s_al_src[i].source, AL_POSITION,
+                                pos[0], pos[1], pos[2]);
 
                 if (s_al_efx.available) {
                     if (occ > 0.98f && gainHF > 0.97f) {
@@ -5596,10 +5639,13 @@ static void S_AL_Update( int msec )
                         qalSourcei(s_al_src[i].source, AL_DIRECT_FILTER,
                                    (ALint)s_al_efx.occlusionFilter[i]);
                     }
-                } else {
+                } else if (!s_al_src[i].loopSound) {
                     /* No EFX: approximate occlusion by direct gain reduction.
                      * Do NOT multiply by masterGain here — the listener AL_GAIN
-                     * already applies s_volume; including it again would double it. */
+                     * already applies s_volume; including it again would double it.
+                     * BSP speaker loop sources are skipped: S_AL_UpdateLoops
+                     * owns AL_GAIN for all loop sources and runs after this loop,
+                     * so any gain write here would be immediately overwritten. */
                     qalSourcef(s_al_src[i].source, AL_GAIN,
                         (s_al_src[i].master_vol / 255.0f) *
                         S_AL_GetCategoryVol(s_al_src[i].category) *
