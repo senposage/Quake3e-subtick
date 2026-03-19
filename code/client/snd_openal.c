@@ -405,9 +405,11 @@ static qboolean s_al_hrtf     = qfalse; /* ALC_HRTF_SOFT active */
 static qboolean s_al_inwater  = qfalse;
 static ALint    s_al_bestResampler = -1; /* AL_SOFT_source_resampler index, -1 = use default */
 
-static vec3_t s_al_listener_origin;   /* updated in S_AL_Respatialize */
+static vec3_t s_al_listener_origin;      /* updated in S_AL_Respatialize */
 static int    s_al_listener_entnum = -1; /* entity number of the listener */
-static vec3_t s_al_listener_forward;  /* axis[0] — direction listener is facing; updated in S_AL_Respatialize */
+static vec3_t s_al_listener_forward;     /* axis[0] — direction listener is facing; updated in S_AL_Respatialize */
+static vec3_t s_al_listener_prevOrigin;  /* previous-frame position for listener velocity delta */
+static int    s_al_listener_prevMs = 0;  /* Com_Milliseconds() at previous S_AL_Respatialize call */
 
 /* Fire-direction impact reverb: set in S_AL_StartSound on CHAN_WEAPON from
  * the listener entity; consumed by S_AL_UpdateDynamicReverb. */
@@ -475,6 +477,12 @@ static int    s_al_tinnitusLastPlay    = 0;  /* timestamp — spam-guard        
  * entity-following sounds start at the right place instead of the world
  * origin.  Indexed by entity number. */
 static vec3_t s_al_entity_origins[MAX_GENTITIES];
+
+/* Per-entity velocity tracking for doppler on one-shot sources.
+ * Velocity is derived each frame from position delta in S_AL_UpdateEntityPosition. */
+static vec3_t s_al_entity_velocities[MAX_GENTITIES];
+static vec3_t s_al_entity_prevOrigins[MAX_GENTITIES];
+static int    s_al_entity_prevMs[MAX_GENTITIES];
 
 typedef struct {
     qboolean available;       /* ALC_EXT_EFX present and procs loaded */
@@ -704,7 +712,8 @@ static void S_AL_CheckALError( const char *where )
  * stereo output.  Without this, even a source at position (0,0,0) relative
  * goes through the HRTF "center" HRIR, which smears the initial transient of
  * weapon sounds (e.g. de.wav).  Only active when s_alHRTF 1 — with HRTF off
- * there is no convolution to bypass, so this has no effect. */
+ * (0) or UHJ mode (2) there is no HRTF convolution kernel to bypass, so
+ * direct-channels is a no-op and is left disabled. */
 static qboolean s_al_directChannelsExt = qfalse; /* AL_SOFT_direct_channels extension present */
 static qboolean s_al_directChannels    = qfalse; /* active: extension present, cvar on, AND s_alHRTF 1 */
 
@@ -2811,6 +2820,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     if (isLocal) {
         qalSourcei(sid, AL_SOURCE_RELATIVE, AL_TRUE);
         qalSource3f(sid, AL_POSITION, 0.0f, 0.0f, 0.0f);
+        qalSource3f(sid, AL_VELOCITY, 0.0f, 0.0f, 0.0f);
         qalSourcef(sid, AL_ROLLOFF_FACTOR, 0.0f);
         /* Explicitly clear any direct filter left from a previous 3-D use of
          * this source slot.  A stale low-pass (e.g. from a fully-occluded
@@ -6835,8 +6845,8 @@ static void S_AL_SoundInfo( void )
         if (!s_al_directChannels) {
             if (s_alDirectChannels && !s_alDirectChannels->integer)
                 reason = "  (disabled by s_alDirectChannels 0)";
-            else if (!s_alHRTF || !s_alHRTF->integer)
-                reason = "  (inactive — s_alHRTF 0)";
+            else if (!s_alHRTF || s_alHRTF->integer != 1)
+                reason = "  (inactive — s_alHRTF not 1)";
         }
         Com_Printf("    DirectChannels    %s  (s_alDirectChannels %d, s_alHRTF %d, LATCH)%s\n",
             s_al_directChannels ? S_COLOR_GREEN "ON " S_COLOR_WHITE
@@ -6942,9 +6952,16 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* Register cvars */
     s_alDevice  = Cvar_Get("s_alDevice",  "",    CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_SetDescription(s_alDevice, "OpenAL output device. Empty = system default. Type /s_devices for a numbered list of available devices. (LATCH — requires vid_restart to take effect)");
-    s_alHRTF    = Cvar_Get("s_alHRTF",   "0",   CVAR_ARCHIVE_ND | CVAR_LATCH);
-    Cvar_CheckRange(s_alHRTF, "0", "1", CV_INTEGER);
-    Cvar_SetDescription(s_alHRTF, "Enable HRTF (Head-Related Transfer Function) 3D audio via OpenAL Soft. Default 0 (off). Only enable when using headphones — on speakers HRTF smears weapon transients into a muffled pop via the centre-HRIR convolution. Requires vid_restart (LATCH).");
+    s_alHRTF    = Cvar_Get("s_alHRTF",   "2",   CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alHRTF, "0", "2", CV_INTEGER);
+    Cvar_SetDescription(s_alHRTF,
+        "Stereo spatialization mode via OpenAL Soft. Requires vid_restart (LATCH).\n"
+        " 0 = Off — plain stereo panning, no spatial processing (default).\n"
+        " 1 = HRTF — Head-Related Transfer Function binaural rendering. Best for headphones. "
+        "Warning: the HRIR convolution alters frequency response and can strip bass/body from audio. "
+        "On speakers it smears transients into a muffled pop.\n"
+        " 2 = UHJ — Ambisonics-based stereo encoding. Provides spatial positioning without HRTF "
+        "convolution, preserving full bass and body. Works well on both headphones and speakers.");
     s_alEFX = Cvar_Get("s_alEFX", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alEFX, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alEFX, "Enable ALC_EXT_EFX (occlusion filters, reverb slots). "
@@ -6953,11 +6970,11 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alDirectChannels = Cvar_Get("s_alDirectChannels", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alDirectChannels, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alDirectChannels,
-        "Enable AL_SOFT_direct_channels for own-player (local) sources when s_alHRTF 1. "
+        "Enable AL_SOFT_direct_channels for own-player (local) sources when s_alHRTF 1 (HRTF mode). "
         "When 1 (default), own-weapon and footstep sounds are routed directly to the "
         "stereo mix, bypassing the HRTF centre-HRIR convolution — preserving the "
         "transient punch of weapon sounds (e.g. de.wav) for headphone users. "
-        "Has no effect when s_alHRTF 0 (default — HRTF off). "
+        "Has no effect when s_alHRTF 0 (off) or s_alHRTF 2 (UHJ). "
         "Set to 0 to route local sources through the full HRTF pipeline. "
         "Requires vid_restart (LATCH).");
     /* s_alMaxDist: default matches the vanilla dma max-audible distance.
@@ -7574,10 +7591,15 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* -----------------------------------------------------------------------
      * HRTF / headphone stereo setup
      *
-     * s_alHRTF 1 (opt-in): request HRTF convolution for headphone users.
+     * s_alHRTF 1 (HRTF): request HRTF convolution for headphone users.
      *   Layer 1 — ALC_SOFT_output_mode: ALC_STEREO_HRTF_SOFT
      *   Layer 2 — ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_TRUE
      *   Layer 3 — alcResetDeviceSoft:   belt-and-suspenders if still disabled
+     *
+     * s_alHRTF 2 (UHJ): Ambisonics-based stereo — spatial positioning without
+     *   HRTF convolution.  Preserves full bass/body in the audio signal.
+     *   Layer 1 — ALC_SOFT_output_mode: ALC_STEREO_UHJ_SOFT
+     *   Layer 2 — ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_FALSE (UHJ != HRTF)
      *
      * s_alHRTF 0 (default): explicitly DISABLE HRTF so that alsoft.conf or
      *   driver defaults cannot silently re-enable it.  Without the explicit
@@ -7589,7 +7611,7 @@ qboolean S_AL_Init( soundInterface_t *si )
      *   no surround upmix — the correct output mode for a speaker game session.
      * ----------------------------------------------------------------------- */
     nAttribs = 0;
-    if (s_alHRTF->integer) {
+    if (s_alHRTF->integer == 1) {
         /* Layer 1: prefer ALC_SOFT_output_mode + ALC_STEREO_HRTF_SOFT */
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
             ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
@@ -7599,6 +7621,17 @@ qboolean S_AL_Init( soundInterface_t *si )
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
             ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
             ctxAttribs[nAttribs++] = ALC_TRUE;
+        }
+    } else if (s_alHRTF->integer == 2) {
+        /* UHJ mode: Ambisonics-based stereo — spatial without HRTF convolution.
+         * Explicitly disable HRTF so it cannot be forced on by alsoft.conf. */
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
+            ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
+            ctxAttribs[nAttribs++] = ALC_STEREO_UHJ_SOFT;
+        }
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
+            ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
+            ctxAttribs[nAttribs++] = ALC_FALSE;
         }
     } else {
         /* Explicitly disable HRTF and request plain stereo output.
@@ -7669,7 +7702,7 @@ qboolean S_AL_Init( soundInterface_t *si )
         /* Layer 3 enable: if HRTF wasn't granted at context creation
          * (e.g. OpenAL Soft auto-disabled it for a non-headphone device),
          * re-request it explicitly when the user wants HRTF on. */
-        if (!s_al_hrtf && s_alHRTF->integer && qalcResetDeviceSoft) {
+        if (!s_al_hrtf && s_alHRTF->integer == 1 && qalcResetDeviceSoft) {
             ALCint resetAttribs[] = {
                 ALC_HRTF_SOFT, ALC_TRUE,
                 0
@@ -7682,12 +7715,12 @@ qboolean S_AL_Init( soundInterface_t *si )
             }
         }
 
-        /* Layer 3 disable: if HRTF is still active despite s_alHRTF=0 and the
+        /* Layer 3 disable: if HRTF is still active despite s_alHRTF 0/2 and the
          * explicit ALC_HRTF_SOFT=ALC_FALSE context attr (e.g. a system-wide
          * alsoft.conf override), force it off via alcResetDeviceSoft.
          * Without this, the user has no way to guarantee HRTF is truly off
          * short of editing alsoft.conf manually. */
-        if (s_al_hrtf && !s_alHRTF->integer && qalcResetDeviceSoft) {
+        if (s_al_hrtf && s_alHRTF->integer != 1 && qalcResetDeviceSoft) {
             ALCint resetAttribs[] = {
                 ALC_HRTF_SOFT, ALC_FALSE,
                 0
@@ -7698,8 +7731,8 @@ qboolean S_AL_Init( soundInterface_t *si )
             }
             if (s_al_hrtf)
                 Com_Printf(S_COLOR_YELLOW
-                    "S_AL: WARNING: HRTF still active despite s_alHRTF 0 — "
-                    "check alsoft.conf or driver settings\n");
+                    "S_AL: WARNING: HRTF still active despite s_alHRTF %d — "
+                    "check alsoft.conf or driver settings\n", s_alHRTF->integer);
             else
                 Com_DPrintf("S_AL: HRTF forced off via alcResetDeviceSoft\n");
         }
@@ -7713,9 +7746,12 @@ qboolean S_AL_Init( soundInterface_t *si )
         Com_Printf("S_AL: HRTF enabled (%s)\n",
             (hrtfName && hrtfName[0]) ? hrtfName : "built-in dataset");
     } else {
-        Com_Printf(s_alHRTF->integer
-            ? "S_AL: HRTF requested but not supported by this device/driver\n"
-            : "S_AL: HRTF disabled (s_alHRTF 0)\n");
+        if (s_alHRTF->integer == 1)
+            Com_Printf("S_AL: HRTF requested but not supported by this device/driver\n");
+        else if (s_alHRTF->integer == 2)
+            Com_Printf("S_AL: UHJ stereo mode active (s_alHRTF 2)\n");
+        else
+            Com_Printf("S_AL: HRTF disabled (s_alHRTF 0)\n");
     }
 
     /* Distance model matching Q3 linear attenuation */
@@ -7731,20 +7767,20 @@ qboolean S_AL_Init( soundInterface_t *si )
     S_AL_InitEFX();
 
     /* Detect AL_SOFT_direct_channels.  Available in OpenAL Soft since v1.13.
-     * Only active when HRTF is on (s_alHRTF 1): routing PCM directly to the
-     * stereo output only makes sense when there is a convolution kernel to
-     * bypass.  With s_alHRTF 0 (default) HRTF is already off, so this is a
-     * no-op and we skip setting it to reflect the actual intent. */
+     * Only active when HRTF mode is on (s_alHRTF 1): routing PCM directly to
+     * the stereo output only makes sense when there is a convolution kernel to
+     * bypass.  In UHJ mode (s_alHRTF 2) or off (0) there is no HRTF kernel,
+     * so direct-channels is a no-op and we leave it off. */
     s_al_directChannelsExt = qalIsExtensionPresent("AL_SOFT_direct_channels");
     s_al_directChannels    = s_al_directChannelsExt &&
                              s_alDirectChannels && s_alDirectChannels->integer &&
-                             s_alHRTF && s_alHRTF->integer;
+                             s_alHRTF && s_alHRTF->integer == 1;
     Com_Printf("S_AL: AL_SOFT_direct_channels: %s%s\n",
                s_al_directChannelsExt ? "available" : "not available",
                (s_al_directChannelsExt && !s_al_directChannels)
                    ? (s_alDirectChannels && !s_alDirectChannels->integer)
                        ? " (disabled by s_alDirectChannels 0)"
-                       : " (inactive — s_alHRTF 0)"
+                       : " (inactive — s_alHRTF not 1)"
                    : "");
 
     /* -----------------------------------------------------------------------
