@@ -1,6 +1,6 @@
 /*
 ===========================================================================
-FTWGL: Urban Terror — OpenAL Soft sound backend.
+FTWGL: Urban Terror -- OpenAL Soft sound backend.
 ===========================================================================
 
 This module replaces the dmaHD / base-DMA sound path with a clean OpenAL
@@ -10,14 +10,14 @@ the dmaHD backend transparently when OpenAL Soft is not installed.
 
 Why OpenAL instead of continuing to patch dmaHD
 ================================================
-  • OpenAL guarantees seamless buffer transitions — the HP/LP warm-up
+  * OpenAL guarantees seamless buffer transitions -- the HP/LP warm-up
     contamination that caused the audio clicks (PRs #70 #73 #74 #75) is
     structurally impossible: there is no custom filter state to prime.
-  • HRTF is provided by OpenAL Soft from measured HRIR datasets (CIPIC /
+  * HRTF is provided by OpenAL Soft from measured HRIR datasets (CIPIC /
     MIT KEMAR) without any hand-rolled convolution or resampling code.
-  • Cross-platform: WASAPI on Windows, PipeWire/ALSA/PulseAudio on Linux,
-    CoreAudio on macOS — all via a single code path.
-  • s_doppler is handled natively (AL_VELOCITY + AL_DOPPLER_FACTOR).
+  * Cross-platform: WASAPI on Windows, PipeWire/ALSA/PulseAudio on Linux,
+    CoreAudio on macOS -- all via a single code path.
+  * s_doppler is handled natively (AL_VELOCITY + AL_DOPPLER_FACTOR).
 
 Build flag: compile with USE_OPENAL=1 (set in Makefile).
 ===========================================================================
@@ -31,7 +31,7 @@ Build flag: compile with USE_OPENAL=1 (set in Makefile).
 #include "snd_openal.h"
 
 /* =========================================================================
- * Section 1 — Official OpenAL Soft 1.25.1 headers
+ * Section 1 -- Official OpenAL Soft 1.25.1 headers
  *
  * AL_NO_PROTOTYPES / ALC_NO_PROTOTYPES suppress the inline function
  * declarations so we can load every entry point dynamically at runtime
@@ -48,7 +48,7 @@ Build flag: compile with USE_OPENAL=1 (set in Makefile).
 #include "../../libopenal/include/AL/alext.h"
 
 /* =========================================================================
- * Section 2 — Dynamic library loading
+ * Section 2 -- Dynamic library loading
  * =========================================================================
  */
 
@@ -85,7 +85,7 @@ static const char *al_libnames[] = {
 };
 
 /* =========================================================================
- * Section 3 — AL / ALC function pointers
+ * Section 3 -- AL / ALC function pointers
  * =========================================================================
  */
 
@@ -164,7 +164,7 @@ static LPALCGETSTRINGISOFT   qalcGetStringiSOFT   = NULL;  /* enumerate HRTF dat
 static LPALGETSTRINGISOFT    qalGetStringiSOFT    = NULL;  /* enumerate resamplers */
 
 /* =========================================================================
- * ALC_EXT_EFX function pointers (all optional — graceful no-op if absent)
+ * ALC_EXT_EFX function pointers (all optional -- graceful no-op if absent)
  * =========================================================================
  */
 static LPALGENEFFECTS                 qalGenEffects;
@@ -183,7 +183,7 @@ static LPALAUXILIARYEFFECTSLOTF       qalAuxiliaryEffectSlotf;
 static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
 
 /* =========================================================================
- * Section 4 — Internal data structures
+ * Section 4 -- Internal data structures
  * =========================================================================
  */
 
@@ -192,15 +192,15 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
 #define S_AL_MAX_SRC        512     /* upper bound for source creation; OpenAL Soft
                                      * caps actual sources to its mix-voice limit
                                      * (default 256, raise via alsoft.ini to serve
-                                     * 32-38 players × ~5 sounds + world headroom) */
+                                     * 32-38 players x ~5 sounds + world headroom) */
 #define S_AL_MUSIC_BUFFERS  4                   /* ping-pong music stream */
 #define S_AL_MUSIC_BUFSZ    (32 * 1024)         /* 32 KiB per streaming buf */
 #define S_AL_RAW_BUFFERS    8                   /* raw-samples stream queue */
 #define S_AL_RAW_BUFSZ      (16 * 1024)         /* 16 KiB per raw buf */
 
 /* Q3/dmaHD-derived distance constants (replicated from snd_dma.c / snd_dmahd.c):
- *   SOUND_FULLVOLUME = 80  — within this radius gain = 1.0
- *   SOUND_ATTENUATE  = 0.0008 — linear falloff rate beyond full-volume radius
+ *   SOUND_FULLVOLUME = 80  -- within this radius gain = 1.0
+ *   SOUND_ATTENUATE  = 0.0008 -- linear falloff rate beyond full-volume radius
  * Max audible distance = SOUND_FULLVOLUME + 1/SOUND_ATTENUATE = 1330 game units. */
 #define S_AL_SOUND_FULLVOLUME   80.0f
 #define S_AL_SOUND_MAXDIST      1330.0f   /* 80 + 1/0.0008 */
@@ -210,21 +210,21 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
  * drown weapon, footstep, or voice sounds on maps with loud ambient
  * loops (e.g. ut4_turnpike traffic).  Individual sounds are scaled so
  * their measured RMS matches this reference before s_alVolEnv is applied.
- * Only ambient/looping sources use this — one-shot world and local sounds
+ * Only ambient/looping sources use this -- one-shot world and local sounds
  * are deliberately left un-normalised so weapon impacts, footstep ticks,
  * etc. retain their designed levels. */
-#define S_AL_AMBIENT_TARGET_RMS  0.085f   /* ≈ -21 dBFS (was 0.125 / -18 dBFS) */
+#define S_AL_AMBIENT_TARGET_RMS  0.085f   /* ~ -21 dBFS (was 0.125 / -18 dBFS) */
 
 /* Looping-ambient fade timings.
- * FADEIN  — gain ramps 0→1 when a loop source first starts (prevents cold-start
+ * FADEIN  -- gain ramps 0->1 when a loop source first starts (prevents cold-start
  *           pop when you enter a fountain/ambient entity's range).
- * FADEOUT — gain ramps 1→0 before a loop source stops, triggered when the entity
+ * FADEOUT -- gain ramps 1->0 before a loop source stops, triggered when the entity
  *           leaves the client snapshot (PVS cull) or is explicitly removed, so the
  *           sound tapers off instead of cutting to silence mid-cycle. */
-#define S_AL_LOOP_FADEIN_MS   600   /* ms — ~36 frames at 60 fps (was 150) */
-#define S_AL_LOOP_FADEOUT_MS  500   /* ms — ~30 frames at 60 fps (was 120) */
+#define S_AL_LOOP_FADEIN_MS   600   /* ms -- ~36 frames at 60 fps (was 150) */
+#define S_AL_LOOP_FADEOUT_MS  500   /* ms -- ~30 frames at 60 fps (was 120) */
 /* Maximum dedup window applied to the duration-based extension for non-weapon
- * channels.  Caps the int64→int narrowing and prevents absurdly long tracks
+ * channels.  Caps the int64->int narrowing and prevents absurdly long tracks
  * (streamed music registered as loop sfx) from locking out re-triggers for
  * an impractical length of time. */
 #define S_AL_DEDUP_MAX_DUR_MS 600000  /* 10 minutes */
@@ -232,7 +232,7 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
 /* CHAN_WEAPON gun-muzzle proximity: sources on the weapon channel within this
  * distance of the listener are treated as "own gun barrel" and bypass occlusion
  * regardless of entity ownership.  This covers muzzle-flash origin offsets
- * (~50–100 u) with margin and prevents PLAYERCLIP slope geometry from muffling
+ * (~50-100 u) with margin and prevents PLAYERCLIP slope geometry from muffling
  * the player's own weapon fire even when the sound was emitted as a world sound. */
 #define S_AL_WEAPON_NOOCC_DIST  160.0f
 
@@ -240,7 +240,7 @@ static LPALGETAUXILIARYEFFECTSLOTF    qalGetAuxiliaryEffectSlotf;
  *
  * Two-tier dedup applied in S_AL_StartSound:
  *
- *   CHAN_WEAPON:       minimum window only (default 20 ms ≈ 1 frame).
+ *   CHAN_WEAPON:       minimum window only (default 20 ms ~ 1 frame).
  *                     Blocks same-frame double-starts (e.g. cgame submitting
  *                     the same fire event twice) but lets every intentional
  *                     shot through at any fire rate.
@@ -262,7 +262,7 @@ typedef struct alSfxRec_s {
     ALuint              buffer;                 /* AL buffer handle */
     char                name[MAX_QPATH];
     int                 soundLength;            /* submitted frame count (device-rate when pre-resampled, file-rate otherwise) */
-    int                 fileRate;               /* submitted sample rate (Hz) — device rate when pre-resampled, file rate otherwise */
+    int                 fileRate;               /* submitted sample rate (Hz) -- device rate when pre-resampled, file rate otherwise */
     qboolean            defaultSound;           /* buzz on load failure */
     qboolean            inMemory;
     int                 lastTimeUsed;           /* Com_Milliseconds() */
@@ -283,20 +283,20 @@ typedef enum {
                            * confirmations, menu beeps (entnum == 0 + isLocal).
                            * Separate from SRC_CAT_LOCAL so hit/kill sounds
                            * can be tuned independently of weapon volume. */
-    SRC_CAT_WEAPON  = 4,  /* own player CHAN_WEAPON fire — separated so weapon
+    SRC_CAT_WEAPON  = 4,  /* own player CHAN_WEAPON fire -- separated so weapon
                            * volume can be tuned without affecting footsteps. */
     SRC_CAT_IMPACT  = 5,  /* ENTITYNUM_WORLD one-shots: bullet impacts, brass,
-                           * explosions, debris — often disproportionately loud. */
+                           * explosions, debris -- often disproportionately loud. */
     SRC_CAT_WEAPON_SUPPRESSED = 6, /* own suppressed-attachment weapon fire
                                     * (e.g. M4/MP5 with silencer fitted).
                                     * Detected via gear-string 'U' flag or
                                     * sound file name pattern. */
     SRC_CAT_WORLD_SUPPRESSED  = 7, /* enemy/other-player suppressed weapon fire.
                                     * Suppressed fire is inherently quieter and
-                                    * harder to locate — tunable via
+                                    * harder to locate -- tunable via
                                     * s_alVolEnemySuppressedWeapon. */
     SRC_CAT_EXTRAVOL          = 8, /* user-defined per-slot pattern list
-                                    * (s_alExtraVolEntry1–s_alExtraVolEntry8):
+                                    * (s_alExtraVolEntry1-s_alExtraVolEntry8):
                                     * sounds matching any positive slot are
                                     * routed here so s_alExtraVol can scale
                                     * them independently.  A ":-N" dB suffix
@@ -320,14 +320,14 @@ typedef struct {
     alSrcCat_t      category;       /* volume group for s_alVolSelf/Other/Env */
     qboolean        isPlaying;
     qboolean        isLocal;        /* non-spatialized */
-    float           occlusionGain;      /* smoothed [0..1] — 1.0 = unoccluded, applied every frame */
-    float           occlusionTarget;    /* raw trace result [0..1] — occlusionGain blends towards this */
+    float           occlusionGain;      /* smoothed [0..1] -- 1.0 = unoccluded, applied every frame */
+    float           occlusionTarget;    /* raw trace result [0..1] -- occlusionGain blends towards this */
     int             occlusionTick;      /* s_al_loopFrame when last traced */
-    vec3_t          acousticOffset;     /* displacement from real origin towards gap (×posBlend) */
+    vec3_t          acousticOffset;     /* displacement from real origin towards gap (xposBlend) */
     float           sampleVol;         /* per-sample linear scale from ":-N" dB suffix in the matching
                                          * s_alExtraVolEntryN slot; 1.0 for non-EXTRAVOL sources and
                                          * EXTRAVOL slots without a suffix */
-    qboolean        isBspSpeaker;      /* qtrue when this is a non-global BSP target_speaker loop —
+    qboolean        isBspSpeaker;      /* qtrue when this is a non-global BSP target_speaker loop --
                                          * allows the occlusion pass to mute it through walls while
                                          * keeping AL_POSITION / AL_GAIN owned by S_AL_UpdateLoops */
 } alSrc_t;
@@ -349,7 +349,7 @@ typedef struct {
     int         fadeStartMs;        /* Com_Milliseconds() when fade-in began (0 = not fading in) */
     int         fadeOutStartMs;     /* Com_Milliseconds() when fade-out began (0 = not fading out) */
     float       fadeOutStartGain;   /* fade-in progress factor [0..1] at the moment fade-out was
-                                     * triggered — used so fade-out always ramps down from the
+                                     * triggered -- used so fade-out always ramps down from the
                                      * actual in-progress level rather than jumping to full gain
                                      * first (pop fix when fade-out interrupts a fade-in). */
 } alLoop_t;
@@ -358,9 +358,9 @@ static alLoop_t s_al_loops[MAX_GENTITIES];
 static int      s_al_loopFrame = 0;
 
 /* Per-frame multi-hop trace budget.
- * Each multi-hop run casts up to 16 CM_BoxTrace calls (8 directions × 2 legs).
+ * Each multi-hop run casts up to 16 CM_BoxTrace calls (8 directions x 2 legs).
  * With 32 players all firing simultaneously, every new weapon sound starts with
- * occlusionTick=0 and traces on the same frame — potentially hundreds of traces
+ * occlusionTick=0 and traces on the same frame -- potentially hundreds of traces
  * in one audio tick, starving the audio thread's buffer fill and causing
  * crackling that scales with the number of concurrent sound events.
  * Limiting multi-hop to S_AL_MULTIHOP_BUDGET sources per frame keeps the
@@ -407,7 +407,7 @@ static ALint    s_al_bestResampler = -1; /* AL_SOFT_source_resampler index, -1 =
 
 static vec3_t s_al_listener_origin;   /* updated in S_AL_Respatialize */
 static int    s_al_listener_entnum = -1; /* entity number of the listener */
-static vec3_t s_al_listener_forward;  /* axis[0] — direction listener is facing; updated in S_AL_Respatialize */
+static vec3_t s_al_listener_forward;  /* axis[0] -- direction listener is facing; updated in S_AL_Respatialize */
 
 /* Fire-direction impact reverb: set in S_AL_StartSound on CHAN_WEAPON from
  * the listener entity; consumed by S_AL_UpdateDynamicReverb. */
@@ -421,7 +421,7 @@ static float s_al_incoming_fire_dist  =  1.0f; /* normalised dist from listener 
 
 /* Grenade-concussion bloom state.
  * When an enemy grenade explodes near the listener, a brief EFX reverb boost
- * is applied — the reverb slot gain spikes then decays back over bloomMs.
+ * is applied -- the reverb slot gain spikes then decays back over bloomMs.
  * No listener-gain duck: competitive audio clarity is preserved at all times.
  * bloomExpiry: Com_Milliseconds() when the bloom expires (0 = idle).
  * bloomPeak:   reverb slot gain at the moment of trigger. */
@@ -444,10 +444,10 @@ static float    s_al_suppressHFPeak      = 1.0f;
 static vec3_t   s_al_suppress_dir        = {0.f, 0.f, 0.f};
 static qboolean s_al_suppress_directional = qfalse;
 /* Precomputed cosine of the half-cone angle; updated each frame. */
-static float    s_al_suppress_cone_halfcos = 0.f; /* cos(60°) = 0.5 at default 120° */
+static float    s_al_suppress_cone_halfcos = 0.f; /* cos(60deg) = 0.5 at default 120deg */
 
 /* Reverb boost during suppression: spikes the reverb slot gain on trigger
- * then decays back over the suppression duration — creates the "ring/splash"
+ * then decays back over the suppression duration -- creates the "ring/splash"
  * acoustic character of a nearby shot rather than just volume loss. */
 static int   s_al_suppressReverbExpiry = 0;
 static float s_al_suppressReverbPeak   = 0.f;
@@ -468,9 +468,9 @@ static float s_al_healthHF   = 1.0f;  /* near-death health fade               */
 static ALuint s_al_tinnitusBuf         = 0;
 static int    s_al_tinnitusLastBuiltHz = 0;  /* freq the buffer was built at   */
 static int    s_al_tinnitusLastBuiltMs = 0;  /* duration the buffer was built for */
-static int    s_al_tinnitusLastPlay    = 0;  /* timestamp — spam-guard         */
+static int    s_al_tinnitusLastPlay    = 0;  /* timestamp -- spam-guard         */
 
-/* Per-entity origin cache — updated by S_AL_UpdateEntityPosition and
+/* Per-entity origin cache -- updated by S_AL_UpdateEntityPosition and
  * S_AL_Respatialize.  Used by S_AL_StartSound when origin is NULL so that
  * entity-following sounds start at the right place instead of the world
  * origin.  Indexed by entity number. */
@@ -482,11 +482,11 @@ typedef struct {
     ALuint   reverbSlot;      /* auxiliary effect slot for reverb (aux send 0) */
     ALuint   underwaterSlot;  /* auxiliary slot for underwater effect (aux send 0 in water) */
     ALuint   underwaterEffect;/* AL_EFFECT_EAXREVERB for water acoustics */
-    ALuint   echoEffect;      /* AL_EFFECT_ECHO — geometry-driven discrete repeats (aux send 1) */
+    ALuint   echoEffect;      /* AL_EFFECT_ECHO -- geometry-driven discrete repeats (aux send 1) */
     ALuint   echoSlot;        /* auxiliary effect slot for the echo effect */
-    ALuint   chorusEffect;    /* AL_EFFECT_CHORUS — underwater modulation wobble (aux send 1) */
+    ALuint   chorusEffect;    /* AL_EFFECT_CHORUS -- underwater modulation wobble (aux send 1) */
     ALuint   chorusSlot;      /* auxiliary effect slot for the chorus effect */
-    ALuint   eqEffect;        /* AL_EFFECT_EQUALIZER — global tone shaping */
+    ALuint   eqEffect;        /* AL_EFFECT_EQUALIZER -- global tone shaping */
     ALuint   eqSlot;          /* auxiliary effect slot for the EQ */
     int      eqSend;          /* aux send index used for EQ (-1 = not wired) */
     ALuint   eqNormFilter;    /* lowpass filter at eqCompGain: applied to both the direct
@@ -502,7 +502,7 @@ typedef struct {
 static alEfx_t s_al_efx;
 
 /* =========================================================================
- * BSP map entity data — extracted from the entity lump once per map load.
+ * BSP map entity data -- extracted from the entity lump once per map load.
  *
  * alMapHints_t holds acoustic-relevant worldspawn keys used to bias the
  * dynamic reverb classifier (e.g. a map with a skybox is an outdoor/urban
@@ -521,7 +521,7 @@ static alEfx_t s_al_efx;
 #define S_AL_BSP_SPEAKER_ORIGIN_MATCH_SQ 16.0f
 
 typedef struct {
-    char   noise[MAX_QPATH]; /* "noise" key value — sound file path */
+    char   noise[MAX_QPATH]; /* "noise" key value -- sound file path */
     vec3_t origin;           /* "origin" key parsed into world coords */
     int    spawnflags;       /* bit 0 = GLOBAL (plays everywhere)    */
 } alBspSpeaker_t;
@@ -588,7 +588,7 @@ static cvar_t *s_alSuppressionConeAngle;  /* full cone angle (deg) for direction
 static cvar_t *s_alSuppressionRearGain;   /* partial HF suppression fraction behind the listener */
 static cvar_t *s_alSuppressionReverbBoost; /* reverb slot gain spike added on suppression trigger */
 static cvar_t *s_alNearMissPattern;    /* sound-name substrings that identify a near-miss bullet */
-/* Head-hit triggers (helmet and bare-head) — separate gate from s_alSuppression */
+/* Head-hit triggers (helmet and bare-head) -- separate gate from s_alSuppression */
 static cvar_t *s_alHeadHit;            /* 0=off, 1=head-hit disruption + tinnitus (standalone) */
 static cvar_t *s_alHelmetHitPattern;   /* sound-name substrings that identify a helmet hit */
 static cvar_t *s_alHelmetHitMs;        /* hearing-disruption duration after helmet hit (ms) */
@@ -605,7 +605,7 @@ static cvar_t *s_alTinnitusCooldown;   /* min ms between successive plays */
 static cvar_t *s_alHealthFade;           /* 0=off, 1=enable near-death HF fade */
 static cvar_t *s_alHealthFadeThreshold;  /* HP below which fade activates */
 static cvar_t *s_alHealthFadeFloor;      /* HF floor at 1 HP [0..1] */
-/* Grenade-concussion EFX bloom — reverb + HF filter, competitive-safe */
+/* Grenade-concussion EFX bloom -- reverb + HF filter, competitive-safe */
 static cvar_t *s_alGrenadeBloom;        /* 0=off, 1=EFX reverb bloom on nearby enemy grenade */
 static cvar_t *s_alGrenadeBloomRadius;  /* blast radius that triggers the bloom effect (units) */
 static cvar_t *s_alGrenadeBloomGain;    /* peak reverb slot gain boost [0..0.3] */
@@ -613,7 +613,7 @@ static cvar_t *s_alGrenadeBloomMs;      /* bloom decay duration in ms */
 static cvar_t *s_alGrenadeBloomHFFloor; /* min HF gain during grenade blast [0..1] */
 static cvar_t *s_alGrenadeBloomDuck;       /* 0=off, 1=also apply mild listener-gain duck with bloom */
 static cvar_t *s_alGrenadeBloomDuckFloor;  /* min listener gain during grenade duck [0.5..0.95] */
-/* Global EQ — compensate for occlusion processing making audio soft */
+/* Global EQ -- compensate for occlusion processing making audio soft */
 static cvar_t *s_alEqLow;         /* low shelf gain (linear, 1.0=flat, >1.0=boost) */
 static cvar_t *s_alEqMid;         /* mid band gain */
 static cvar_t *s_alEqHigh;        /* high shelf gain */
@@ -655,7 +655,7 @@ static cvar_t *s_alLoopFadeInMs;    /* fade-in duration in ms for new loop sourc
 static cvar_t *s_alLoopFadeOutMs;   /* fade-out duration in ms when loop source leaves PVS */
 static cvar_t *s_alLoopFadeDist;    /* distance from maxDist at which new sources start with
                                      * a proportional initial gain (0 = always start from 0) */
-/* Occlusion filter tuning — live-tunable, use /s_alReset to hear changes. */
+/* Occlusion filter tuning -- live-tunable, use /s_alReset to hear changes. */
 static cvar_t *s_alOccGainFloor;   /* floor of AL_LOWPASS_GAIN for fully-blocked sources */
 static cvar_t *s_alOccHFFloor;     /* floor of AL_LOWPASS_GAINHF (HF content) through walls */
 static cvar_t *s_alOccPosBlend;    /* fraction of HRTF redirect towards nearest gap [0-1] */
@@ -675,13 +675,13 @@ static qboolean s_al_reverbReset = qfalse;
 /* =========================================================================
  * Trace-level debug logging.
  *
- * S_AL_TRACE(level, fmt, ...) — prints when s_alTrace >= level.
+ * S_AL_TRACE(level, fmt, ...) -- prints when s_alTrace >= level.
  *   level 1 : key lifecycle events (source alloc/free, music open/close,
  *             AL errors at critical call sites, init sequence).
- *   level 2 : verbose — every source setup, buffer queue/unqueue, and
+ *   level 2 : verbose -- every source setup, buffer queue/unqueue, and
  *             intermediate state change.
  *
- * S_AL_CheckALError(where) — queries and logs any pending AL error then
+ * S_AL_CheckALError(where) -- queries and logs any pending AL error then
  *   clears the error state.  Only active when s_alTrace >= 1 so the
  *   extra qalGetError() calls are never visible in production builds.
  * =========================================================================
@@ -703,13 +703,13 @@ static void S_AL_CheckALError( const char *where )
  * sources bypass the HRTF convolution pipeline and route PCM straight to the
  * stereo output.  Without this, even a source at position (0,0,0) relative
  * goes through the HRTF "center" HRIR, which smears the initial transient of
- * weapon sounds (e.g. de.wav).  Only active when s_alHRTF 1 — with HRTF off
+ * weapon sounds (e.g. de.wav).  Only active when s_alHRTF 1 -- with HRTF off
  * there is no convolution to bypass, so this has no effect. */
 static qboolean s_al_directChannelsExt = qfalse; /* AL_SOFT_direct_channels extension present */
 static qboolean s_al_directChannels    = qfalse; /* active: extension present, cvar on, AND s_alHRTF 1 */
 
 /* =========================================================================
- * Section 5 — Library loading helpers
+ * Section 5 -- Library loading helpers
  * =========================================================================
  */
 
@@ -742,7 +742,7 @@ static qboolean S_AL_LoadLibrary( void )
         }
     }
     if (!al_handle) {
-        Com_Printf("S_AL: OpenAL library not found — falling back to dmaHD\n");
+        Com_Printf("S_AL: OpenAL library not found -- falling back to dmaHD\n");
         return qfalse;
     }
 
@@ -834,7 +834,7 @@ static void S_AL_UnloadLibrary( void )
 }
 
 /* =========================================================================
- * Section 6 — Helper utilities
+ * Section 6 -- Helper utilities
  * =========================================================================
  */
 
@@ -866,7 +866,7 @@ static ALenum S_AL_CheckError( const char *caller )
 }
 
 /* =========================================================================
- * Section 7 — Sound-file (sfx) management
+ * Section 7 -- Sound-file (sfx) management
  * =========================================================================
  */
 
@@ -916,7 +916,7 @@ static alSfxRec_t *S_AL_AllocSfx( void )
             }
         }
         if (used < 0)
-            return NULL;    /* completely full — should never happen */
+            return NULL;    /* completely full -- should never happen */
         r = &s_al_sfx[used];
         /* Remove from hash chain */
         {
@@ -941,7 +941,7 @@ static alSfxRec_t *S_AL_AllocSfx( void )
  * runs at a different rate (48 000 Hz on virtually all modern hardware)
  * OpenAL Soft must resample every source on every playback call.  Even the
  * best internal resampler (BSinc24) cannot repair crackling artefacts that
- * originate in the source — it can only preserve them — and older or less
+ * originate in the source -- it can only preserve them -- and older or less
  * capable resamplers (Zero-Order Hold, linear) actively amplify artefacts
  * through aliasing and interpolation overshoot.
  *
@@ -955,48 +955,48 @@ static alSfxRec_t *S_AL_AllocSfx( void )
  * ---------
  * For each output sample i at continuous input position  t = i*(inRate/outRate):
  *
- *     y[i] = Σ_k  x[k] · h(t − k)            (where k ranges over nearby input frames)
+ *     y[i] = sum__k  x[k] * h(t - k)            (where k ranges over nearby input frames)
  *
  * where the Kaiser-windowed sinc kernel h is
  *
- *     h(u) = 2·fc · sinc(2·fc·u) · Kaiser(|u|/W, β)
+ *     h(u) = 2*fc * sinc(2*fc*u) * Kaiser(|u|/W, beta)
  *
  * with
- *     fc  = min(inRate, outRate) / (2·inRate)   anti-aliasing cutoff
+ *     fc  = min(inRate, outRate) / (2*inRate)   anti-aliasing cutoff
  *     W   = S_AL_SINC_HALF_TAPS                  kernel half-width (input samples)
- *     β   = S_AL_KAISER_BETA                     window shape (~74 dB stopband)
+ *     beta   = S_AL_KAISER_BETA                     window shape (~74 dB stopband)
  *
- * · Upsampling (inRate < outRate): fc = 0.5 → full source bandwidth preserved.
- * · Downsampling (inRate > outRate): fc < 0.5 → anti-aliasing at output Nyquist.
- * · Zero-padding at boundaries (samples outside [0, inSamples) are treated as 0).
+ * * Upsampling (inRate < outRate): fc = 0.5 -> full source bandwidth preserved.
+ * * Downsampling (inRate > outRate): fc < 0.5 -> anti-aliasing at output Nyquist.
+ * * Zero-padding at boundaries (samples outside [0, inSamples) are treated as 0).
  *   This creates a natural sub-millisecond fade at each edge, which eliminates
  *   the click artefacts common in URT's abruptly-starting 22 kHz assets.
- * · The output is divided by wsum (sum of applied weights) so that DC gain is
+ * * The output is divided by wsum (sum of applied weights) so that DC gain is
  *   exactly 1.0 everywhere, including near the buffer edges.
  *
  * Polyphase fast-path
  * -------------------
  * The original per-sample sin() call caused 15-20 second map-load stalls.
  * S_AL_ResamplePCM now builds a polyphase filter table (S_AL_RESAMPLE_PHASES
- * rows × nTaps columns) once at the start of the call using sin().  The main
+ * rows x nTaps columns) once at the start of the call using sin().  The main
  * resampling loop then does only float multiply-adds against the pre-computed
- * table — no transcendental functions — giving ~180× less sin() work for a
+ * table -- no transcendental functions -- giving ~180x less sin() work for a
  * typical 2-second sound and reducing map-load resampling time from seconds
  * to milliseconds.
  * =========================================================================
  */
-#define S_AL_SINC_HALF_TAPS   24    /* kernel half-width (input samples); 24 → ~74 dB */
-#define S_AL_KAISER_BETA      6.0   /* Kaiser β for ~74 dB stopband attenuation       */
+#define S_AL_SINC_HALF_TAPS   24    /* kernel half-width (input samples); 24 -> ~74 dB */
+#define S_AL_KAISER_BETA      6.0   /* Kaiser beta for ~74 dB stopband attenuation       */
 #define S_AL_KAISER_LUT_N     512   /* Kaiser window LUT resolution                   */
-#define S_AL_RESAMPLE_PHASES  512   /* polyphase table phase count; 512 → <0.001-sample phase error */
+#define S_AL_RESAMPLE_PHASES  512   /* polyphase table phase count; 512 -> <0.001-sample phase error */
 
 /* Pre-computed Kaiser window lookup table.  Index 0 = centre (gain=1), index
- * S_AL_KAISER_LUT_N-1 = edge (gain≈0).  Populated once by S_AL_InitKaiserLUT. */
+ * S_AL_KAISER_LUT_N-1 = edge (gain~0).  Populated once by S_AL_InitKaiserLUT. */
 static float s_al_kaiserLUT[S_AL_KAISER_LUT_N];
 static qboolean s_al_kaiserReady = qfalse;
 
-/* Modified Bessel function of the first kind, order 0 (I₀).
- * Series expansion; converges in <30 iterations for β ≤ 12. */
+/* Modified Bessel function of the first kind, order 0 (I0).
+ * Series expansion; converges in <30 iterations for beta <= 12. */
 static double S_AL_BesselI0( double x )
 {
     double d = 0.0, ds = 1.0, s = 1.0;
@@ -1025,7 +1025,7 @@ static void S_AL_InitKaiserLUT( void )
     s_al_kaiserReady = qtrue;
 }
 
-/* Inline Kaiser window evaluation.  norm ∈ [0, 1): 0 = centre, 1 = edge. */
+/* Inline Kaiser window evaluation.  norm in [0, 1): 0 = centre, 1 = edge. */
 static float S_AL_KaiserWindow( double norm )
 {
     int idx = (int)(norm * (S_AL_KAISER_LUT_N - 1) + 0.5);
@@ -1041,7 +1041,7 @@ static float S_AL_KaiserWindow( double norm )
  * signed PCM from `inRate` to `outRate` Hz using the Kaiser-windowed sinc
  * algorithm described above.
  *
- * Returns a Z_Malloc'd array of (*outSamplesOut × inChannels) shorts.
+ * Returns a Z_Malloc'd array of (*outSamplesOut x inChannels) shorts.
  * The caller must Z_Free the returned pointer.
  * Returns NULL on invalid arguments or allocation failure.
  *
@@ -1051,12 +1051,12 @@ static float S_AL_KaiserWindow( double norm )
  * output sample, causing 15-20 second map-load stalls on modern hardware.
  *
  * This implementation pre-computes a polyphase filter table of
- * S_AL_RESAMPLE_PHASES × nTaps float coefficients at the start of the call.
+ * S_AL_RESAMPLE_PHASES x nTaps float coefficients at the start of the call.
  * The table is built with sin() (one call per cell), but that cost is
  * negligible compared to the saved per-sample-per-tap sin() calls.  The
- * main resampling loop then does only float multiply-adds — no transcendental
- * functions.  For a 2-second 22 050 Hz → 48 000 Hz sound this reduces the
- * per-file work from ~4.6 M sin() calls to ~25 K (a 180× reduction), cutting
+ * main resampling loop then does only float multiply-adds -- no transcendental
+ * functions.  For a 2-second 22 050 Hz -> 48 000 Hz sound this reduces the
+ * per-file work from ~4.6 M sin() calls to ~25 K (a 180x reduction), cutting
  * total map-load resampling time from seconds to milliseconds.
  */
 static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
@@ -1080,7 +1080,7 @@ static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
 
     /* Anti-aliasing cutoff in normalised-input-rate units.
      * Upsampling: fc = 0.5 (full source bandwidth preserved).
-     * Downsampling: fc = outRate/(2·inRate) (cut at output Nyquist). */
+     * Downsampling: fc = outRate/(2*inRate) (cut at output Nyquist). */
     fc = (step > 1.0) ? 0.5 / step : 0.5;
 
     /* Kernel half-width in input-sample units.
@@ -1093,10 +1093,10 @@ static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
      * ----------------------
      * For each output sample at input position t = i*step, let
      *   iFloor = (int)t,  frac = t - iFloor.
-     * Tap j (0 … nTaps-1) reads input sample iFloor + tapMin + j, where
+     * Tap j (0 ... nTaps-1) reads input sample iFloor + tapMin + j, where
      *   tapMin = -ceil(winHalf).
      * The phase index p = round(frac * S_AL_RESAMPLE_PHASES) selects the
-     * pre-computed row phaseCoeffs[p * nTaps … +nTaps-1].
+     * pre-computed row phaseCoeffs[p * nTaps ... +nTaps-1].
      * phaseWsum[p] = sum of that row (used for DC-gain normalisation).       */
     tapMin = -(int)ceil(winHalf);
     nTaps  = 2 * (int)ceil(winHalf) + 1;
@@ -1109,7 +1109,7 @@ static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
         return NULL;
     }
 
-    /* Build the polyphase table — sin() calls happen only here, once. */
+    /* Build the polyphase table -- sin() calls happen only here, once. */
     for (i = 0; i < S_AL_RESAMPLE_PHASES; i++) {
         double frac = (double)i / S_AL_RESAMPLE_PHASES;
         float  wsum = 0.0f;
@@ -1139,7 +1139,7 @@ static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
         return NULL;
     }
 
-    /* Fast resampling loop — float multiply-add only, no sin() calls. */
+    /* Fast resampling loop -- float multiply-add only, no sin() calls. */
     for (i = 0; i < outN; i++) {
         double        t      = (double)i * step;
         int           iFloor = (int)t;        /* floor(t); t is always >= 0 */
@@ -1156,7 +1156,7 @@ static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
         /* Clamp tap range to valid input indices (zero-padding outside). */
         jLo = (kBase < 0)          ? -kBase              : 0;
         jHi = (kBase + nTaps > inSamples) ? inSamples - kBase : nTaps;
-        if (jHi < jLo) jHi = jLo;   /* entirely outside buffer → silence */
+        if (jHi < jLo) jHi = jLo;   /* entirely outside buffer -> silence */
 
         /* DC-gain normalisation weight for this output sample.
          * Interior samples reuse the pre-summed value; edge samples
@@ -1190,7 +1190,7 @@ static short *S_AL_ResamplePCM( const short *in, int inSamples, int inChannels,
     return out;
 }
 
-/* Forward declaration — used by S_AL_LoadWorker before the full definition. */
+/* Forward declaration -- used by S_AL_LoadWorker before the full definition. */
 static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info );
 
 /* =========================================================================
@@ -1206,7 +1206,7 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info );
  *
  * Solution: a persistent worker thread pool (created at S_AL_Init, destroyed
  * at S_AL_Shutdown).  S_AL_RegisterSound now:
- *   1. Calls S_CodecLoad on the game thread (~0.5 ms — keeps FS access serial).
+ *   1. Calls S_CodecLoad on the game thread (~0.5 ms -- keeps FS access serial).
  *   2. Copies the decoded PCM to a malloc'd buffer, frees the Hunk block.
  *   3. Submits a load job to the pool and returns the sfxHandle immediately.
  *      (r->inMemory = qfalse, r->buffer = 0 until committed.)
@@ -1227,7 +1227,7 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info );
  */
 
 /* =========================================================================
- * Async load job — shared across all platforms.
+ * Async load job -- shared across all platforms.
  * =========================================================================
  */
 
@@ -1235,18 +1235,18 @@ typedef struct S_AL_LoadJob_s {
     struct S_AL_LoadJob_s *next;            /* intrusive queue link              */
     alSfxRec_t            *r;               /* sfx record (in hash, !inMemory)   */
     char                   path[MAX_QPATH]; /* for diagnostics                   */
-    /* Decode output — filled on the game thread by S_AL_RegisterSound. */
+    /* Decode output -- filled on the game thread by S_AL_RegisterSound. */
     void                  *pcm;             /* malloc'd decoded PCM              */
     snd_info_t             info;            /* sample width/channels/rate/size   */
     ALenum                 fmt;             /* AL_FORMAT_* matching pcm          */
-    float                  normCacheGain;   /* ≥ 0 → override; < 0 → none       */
-    /* Worker output — filled by S_AL_ProcessJob. */
+    float                  normCacheGain;   /* >= 0 -> override; < 0 -> none       */
+    /* Worker output -- filled by S_AL_ProcessJob. */
     void                  *submitPcm;       /* pcm or resampled (to submit)      */
     int                    submitSize;      /* byte count for qalBufferData      */
     ALenum                 submitFmt;       /* AL format for submission          */
     int                    submitRate;      /* rate for submission               */
     float                  normGain;        /* CalcNormGain result               */
-    qboolean               decodeOk;        /* qfalse → defaultSound             */
+    qboolean               decodeOk;        /* qfalse -> defaultSound             */
 } S_AL_LoadJob_t;
 
 #define S_AL_POOL_MAX_THREADS  8
@@ -1315,7 +1315,7 @@ static void S_AL_ProcessJob( S_AL_LoadJob_t *job )
 }
 
 /* =========================================================================
- * Platform thread pool — pthreads (Linux / macOS) or Win32 threads.
+ * Platform thread pool -- pthreads (Linux / macOS) or Win32 threads.
  * =========================================================================
  */
 
@@ -1375,7 +1375,7 @@ static void *S_AL_LoadWorker( void *unused )
     /* unreachable */
 }
 
-#else  /* _WIN32 — Win32 threads (CRITICAL_SECTION + CONDITION_VARIABLE) */
+#else  /* _WIN32 -- Win32 threads (CRITICAL_SECTION + CONDITION_VARIABLE) */
 
 static CRITICAL_SECTION   s_al_jobCS;
 static CONDITION_VARIABLE s_al_jobCV;
@@ -1434,7 +1434,7 @@ static DWORD WINAPI S_AL_LoadWorker( LPVOID unused )
 #endif  /* _WIN32 */
 
 /* =========================================================================
- * Thread-pool management — shared interface (platform abstracted above).
+ * Thread-pool management -- shared interface (platform abstracted above).
  * =========================================================================
  */
 
@@ -1493,7 +1493,7 @@ static void S_AL_CommitCompletedJobs( void )
         r = job->r;
 
         if (!job->decodeOk || !job->submitPcm) {
-            /* Decode failed — mark as default sound so playback skips it. */
+            /* Decode failed -- mark as default sound so playback skips it. */
             r->defaultSound = qtrue;
             r->inMemory     = qtrue;
             r->normGain     = 1.0f;
@@ -1528,11 +1528,11 @@ static void S_AL_CommitCompletedJobs( void )
         r->inMemory     = qtrue;
         r->lastTimeUsed = Com_Milliseconds();
 
-        Com_DPrintf("S_AL: committed %s (%d Hz→%d Hz, %d ch, normGain=%.3f)\n",
+        Com_DPrintf("S_AL: committed %s (%d Hz->%d Hz, %d ch, normGain=%.3f)\n",
             job->path, job->info.rate, job->submitRate,
             job->info.channels, ng);
 
-        /* Free buffers — submitPcm is either a separate resampled malloc or
+        /* Free buffers -- submitPcm is either a separate resampled malloc or
          * aliases pcm; only free each pointer once. */
         if (job->submitPcm && job->submitPcm != job->pcm)
             free(job->submitPcm);
@@ -1665,7 +1665,7 @@ static void S_AL_StopThreadPool( void )
  * Samples the decoded PCM file at a regular stride so that the ENTIRE loop
  * body is represented, not just the opening seconds.  The old approach (scan
  * only the first S_AL_NORM_SCAN_SAMPLES frames) produced incorrect results
- * for ambient tracks with a quiet intro followed by a loud main body — the
+ * for ambient tracks with a quiet intro followed by a loud main body -- the
  * quiet intro inflated normGain and the rest of the loop played too loud.
  *
  * The stride is chosen so that at most S_AL_NORM_SCAN_SAMPLES frames are
@@ -1675,23 +1675,23 @@ static void S_AL_StopThreadPool( void )
  *
  *   normGain = min( 1.0,  S_AL_NORM_CEILING / RMS )
  *
- *   • Sounds with RMS ≤ S_AL_NORM_CEILING  → normGain = 1.0  (natural level,
+ *   * Sounds with RMS <= S_AL_NORM_CEILING  -> normGain = 1.0  (natural level,
  *     no boost, no cut).  A quiet breeze stays quiet; a moderately loud
  *     waterfall stays at its intended loudness.
- *   • Sounds with RMS  > S_AL_NORM_CEILING  → normGain < 1.0  (proportional
+ *   * Sounds with RMS  > S_AL_NORM_CEILING  -> normGain < 1.0  (proportional
  *     cut that brings the sound DOWN to the ceiling level).  Only genuine
- *     outliers — heavily-compressed, broadcast-hot, or clipped ambient WAVs
- *     — receive any attenuation.
+ *     outliers -- heavily-compressed, broadcast-hot, or clipped ambient WAVs
+ *     -- receive any attenuation.
  *
  * This preserves the relative loudness relationship between different ambient
  * sounds on the same map (intended-to-be-louder sounds stay louder) while
  * preventing any single excessively-recorded loop from dominating the mix.
  *
  * Returns 1.0 (no adjustment) for:
- *   • empty or silent files
- *   • unsupported bit depths */
+ *   * empty or silent files
+ *   * unsupported bit depths */
 #define S_AL_NORM_SCAN_SAMPLES  (44100 * 4)   /* max sample frames to analyse */
-#define S_AL_NORM_CEILING       0.316f         /* ≈ −10 dBFS; sounds above cut to here */
+#define S_AL_NORM_CEILING       0.316f         /* ~ -10 dBFS; sounds above cut to here */
 
 static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
 {
@@ -1703,7 +1703,7 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     if (!pcm || info->samples <= 0 || info->size <= 0)
         return 1.0f;
 
-    /* Clamp totalFrames to what info->size actually allows — guards against
+    /* Clamp totalFrames to what info->size actually allows -- guards against
      * codec-reported sample counts that exceed the allocated buffer. */
     {
         long maxFromSize = (long)(info->size / ((long)info->width * info->channels));
@@ -1749,7 +1749,7 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
     if (count == 0) return 1.0f;
 
     rms = (float)sqrt(sumSq / (double)count);
-    if (rms < 1e-6f) return 1.0f;   /* silent — don't amplify noise floor */
+    if (rms < 1e-6f) return 1.0f;   /* silent -- don't amplify noise floor */
 
     /* One-sided ceiling: only cut sounds that exceed the ceiling.
      * Sounds at or below the ceiling play at their natural level (1.0).
@@ -1757,7 +1757,7 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info )
      * (e.g. fully-clipped square waves); it is never reached by normally
      * encoded audio since ceiling/1.0 = 0.316 > 0.05 at maximum RMS. */
     normGain = S_AL_NORM_CEILING / rms;
-    if (normGain > 1.0f)  normGain = 1.0f;   /* below ceiling — no change */
+    if (normGain > 1.0f)  normGain = 1.0f;   /* below ceiling -- no change */
     if (normGain < 0.05f) normGain = 0.05f;  /* safety floor */
 
     return normGain;
@@ -1780,7 +1780,7 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     ALenum       fmt;
     unsigned int h;
     int          idx;
-    /* submitted frame count and rate — updated if pre-resampling succeeds */
+    /* submitted frame count and rate -- updated if pre-resampling succeeds */
     int          submittedFrames;
     int          submittedRate;
 
@@ -1804,7 +1804,7 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
     r->next         = s_al_sfxHash[h];
     s_al_sfxHash[h] = r;
 
-    /* Decode via codec (always on the game thread — FS is not thread-safe). */
+    /* Decode via codec (always on the game thread -- FS is not thread-safe). */
     pcm = S_CodecLoad(sample, &info);
     if (!pcm) {
         Com_Printf(S_COLOR_YELLOW "S_AL: couldn't load %s\n", sample);
@@ -1885,8 +1885,8 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
 
     /* -----------------------------------------------------------------------
      * Synchronous path (pool not yet started).
-     * Identical to the pre-threading code: CalcNormGain → normcache override
-     * → qalGenBuffers → ResamplePCM → qalBufferData, all inline.
+     * Identical to the pre-threading code: CalcNormGain -> normcache override
+     * -> qalGenBuffers -> ResamplePCM -> qalBufferData, all inline.
      * ----------------------------------------------------------------------- */
 
     /* Analyse PCM while it is still in the temp allocation. */
@@ -1897,7 +1897,7 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
      * its sounds), prefer it over the freshly computed gain.  This lets the
      * cache drive normGain even when the sfx record is reused from a previous
      * map session (S_AL_FindSfx returned an existing record above and skipped
-     * this code path — those records are updated in S_AL_BeginRegistration
+     * this code path -- those records are updated in S_AL_BeginRegistration
      * directly, so this branch only fires for genuinely new registrations). */
     {
         int ci;
@@ -1973,8 +1973,8 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
                     submittedRate   = (int)s_al_deviceFreq;
 
                     if (s_alDebugPlayback && s_alDebugPlayback->integer >= 1) {
-                        Com_Printf("[alDbg] pre-resampled: %s  %d Hz → %d Hz"
-                                   "  (%d → %d smp)\n",
+                        Com_Printf("[alDbg] pre-resampled: %s  %d Hz -> %d Hz"
+                                   "  (%d -> %d smp)\n",
                                    sample, info.rate, rateToSubmit,
                                    info.samples, outSamples);
                     }
@@ -2039,7 +2039,7 @@ static void S_AL_FreeSfx( void )
 }
 
 /* =========================================================================
- * Section 8 — Source pool management
+ * Section 8 -- Source pool management
  * =========================================================================
  */
 
@@ -2051,35 +2051,35 @@ static void S_AL_FreeSfx( void )
 static float S_AL_GetMasterVol( void )
 {
     /* Return full-scale so that source gain = catVol (the listener AL_GAIN
-     * is set to s_volume every frame — applying it here too would double it). */
+     * is set to s_volume every frame -- applying it here too would double it). */
     return S_AL_MASTER_VOL_FULL;
 }
 
 /* Return the per-category volume scalar for a source.
  *
- * Scale: 0–10, reference unity at 1.0.
- *   cvar = 1.0  → same loudness as the old hardcoded defaults.
- *   cvar = 0.5  → ~0.25 × ref  (−12 dB via square curve, clearly quieter).
- *   cvar = 2.0  → 2.0 × ref   (+6 dB, noticeably louder).
- *   cvar = 0.0  → silence.
+ * Scale: 0-10, reference unity at 1.0.
+ *   cvar = 1.0  -> same loudness as the old hardcoded defaults.
+ *   cvar = 0.5  -> ~0.25 x ref  (-12 dB via square curve, clearly quieter).
+ *   cvar = 2.0  -> 2.0 x ref   (+6 dB, noticeably louder).
+ *   cvar = 0.0  -> silence.
  *
- * A power-2 curve (v²) is applied in the 0–1 attenuation region so that
+ * A power-2 curve (v^2) is applied in the 0-1 attenuation region so that
  * small reductions feel proportional to loudness perception.  Above 1.0
  * the value is used linearly (modest boost zone).
  *
  * Reference gains (baked in, not in the default cvar value):
- *   WORLD   0.70  · WEAPON  1.00  · IMPACT  0.55
- *   LOCAL   1.00  · AMBIENT 0.30  · UI      0.80
+ *   WORLD   0.70  * WEAPON  1.00  * IMPACT  0.55
+ *   LOCAL   1.00  * AMBIENT 0.30  * UI      0.80
  */
 
 /* Return qtrue when the sound should be treated as suppressed/silenced.
  *
  * Both checks always run independently and the result is OR'd together.
  * Both are cheap string operations (strchr + Q_stristr), so there is no
- * reason to short-circuit — running both catches edge cases where only
+ * reason to short-circuit -- running both catches edge cases where only
  * one signal is available.
  *
- * GEAR CHECK — g_gear configstring 'U' flag:
+ * GEAR CHECK -- g_gear configstring 'U' flag:
  *   The server writes each player's equipped gear into CS_PLAYERS under key
  *   "g". Character 'U' = suppressor attachment fitted.  Most reliable: directly
  *   reflects game state regardless of audio asset naming.  Valid for player
@@ -2087,11 +2087,11 @@ static float S_AL_GetMasterVol( void )
  *   rarely swapped mid-round, but checking both signals every call costs only
  *   a strchr and is the correct defensive approach.
  *
- * FILENAME CHECK — s_alSuppressedSoundPattern substring match:
+ * FILENAME CHECK -- s_alSuppressedSoundPattern substring match:
  *   URT suppressed file names from pk3 audit:
- *     *_sil.wav  — dominant (de_sil, m4_sil, ak103_sil, beretta_sil, …)
- *     *-sil.wav  — mac11 (mac11-sil.wav)
- *     *_silenced.wav — p90 (p90_silenced.wav)
+ *     *_sil.wav  -- dominant (de_sil, m4_sil, ak103_sil, beretta_sil, ...)
+ *     *-sil.wav  -- mac11 (mac11-sil.wav)
+ *     *_silenced.wav -- p90 (p90_silenced.wav)
  *   Covered by default tokens: _sil, -sil, silenced.
  *   Also catches non-player entities that play suppressed audio. */
 static qboolean S_AL_IsSoundSuppressed( sfxHandle_t sfx, int entnum )
@@ -2144,15 +2144,15 @@ static qboolean S_AL_IsSoundSuppressed( sfxHandle_t sfx, int entnum )
  * when the matched slot carries no ":-N" dB suffix).
  *
  * Each slot holds exactly one pattern string with the following syntax:
- *   token           — case-insensitive substring match against the sound path.
+ *   token           -- case-insensitive substring match against the sound path.
  *                     e.g. "sound/feedback" matches every file under that dir.
  *                     e.g. "sound/feedback/hit.wav" matches only that file.
- *   token:-N        — same match, but apply an N dB cut (N ≤ 0; floor −40 dB;
+ *   token:-N        -- same match, but apply an N dB cut (N <= 0; floor -40 dB;
  *                     fractional values accepted; values > 0 clamped to 0).
- *                     e.g. "sound/feedback/hit.wav:-2.5" applies −2.5 dB.
- *   !token          — exclusion: if the name contains this substring the sound
+ *                     e.g. "sound/feedback/hit.wav:-2.5" applies -2.5 dB.
+ *   !token          -- exclusion: if the name contains this substring the sound
  *                     is removed from the group even if a positive slot matched.
- *   !token:-N       — exclusion with ignored dB suffix (parsed but discarded).
+ *   !token:-N       -- exclusion with ignored dB suffix (parsed but discarded).
  *
  * A sound is routed to SRC_CAT_EXTRAVOL when at least one positive slot
  * matches AND no exclusion slot matches.  Empty slots are skipped. */
@@ -2279,18 +2279,18 @@ static float S_AL_GetCategoryVol( alSrcCat_t cat )
 }
 
 /* Find a free source slot.  Before stealing anything, tries to grow the pool
- * by asking OpenAL for a new source — slots are cheap on modern hardware.
+ * by asking OpenAL for a new source -- slots are cheap on modern hardware.
  *
  * When the pool is genuinely full, eviction priority is:
  *
- *   Tier 1 — ENTITYNUM_WORLD (impacts, brass, debris): farthest first.
+ *   Tier 1 -- ENTITYNUM_WORLD (impacts, brass, debris): farthest first.
  *            Missing a casing 2000 u away is fine; dropping a player shot
  *            never is.
- *   Tier 2 — Other-player / entity non-local 3D sources: farthest first.
+ *   Tier 2 -- Other-player / entity non-local 3D sources: farthest first.
  *            Distant sounds have already faded; nearby teammates stay alive.
- *   Tier 3 — Any non-local non-loop source: oldest first.
- *   Tier 4 — Any non-loop source (own-player included): oldest first.
- *            Last resort — own-player sounds are almost never here.
+ *   Tier 3 -- Any non-local non-loop source: oldest first.
+ *   Tier 4 -- Any non-loop source (own-player included): oldest first.
+ *            Last resort -- own-player sounds are almost never here.
  *
  * Loop (ambient) sources are never stolen; they have their own management.
  * Returns source index, or -1 only on a true hard AL failure. */
@@ -2318,7 +2318,7 @@ static int S_AL_GetFreeSource( void )
             i = s_al_numSrc;
             s_al_src[i].source  = newSource;
             s_al_src[i].sfx     = -1;
-            /* The EFX filter for this slot was pre-allocated at init —
+            /* The EFX filter for this slot was pre-allocated at init --
              * initialise it as pass-through for the first use. */
             if (s_al_efx.available && s_al_efx.occlusionFilter[i]) {
                 qalFilteri(s_al_efx.occlusionFilter[i],
@@ -2337,16 +2337,16 @@ static int S_AL_GetFreeSource( void )
     /* ---- Pass 3: steal by priority ------------------------------------- */
     {
         int   now          = Com_Milliseconds();
-        /* Tier 1 — world-entity, farthest */
+        /* Tier 1 -- world-entity, farthest */
         float worldFarthest = -1.f;
         int   worldIdx      = -1;
-        /* Tier 2 — other-entity non-local 3D, farthest */
+        /* Tier 2 -- other-entity non-local 3D, farthest */
         float otherFarthest = -1.f;
         int   otherIdx      = -1;
-        /* Tier 3 — any non-local, oldest */
+        /* Tier 3 -- any non-local, oldest */
         int   nonLocalOldest = now;
         int   nonLocalIdx    = -1;
-        /* Tier 4 — any non-loop, oldest (includes own-player as last resort) */
+        /* Tier 4 -- any non-loop, oldest (includes own-player as last resort) */
         int   anyOldest      = now;
         int   anyIdx         = -1;
 
@@ -2406,18 +2406,18 @@ static int S_AL_GetFreeSource( void )
     Com_DPrintf(S_COLOR_YELLOW
         "S_AL_GetFreeSource: pool exhausted (all %d sources are looping ambients)\n",
         s_al_numSrc);
-    return -1; /* all sources are looping ambients — should never happen */
+    return -1; /* all sources are looping ambients -- should never happen */
 }
 
 /* Compute occlusion gain and find the best apparent source position for HRTF
  * directional accuracy when the direct path is blocked.
  *
  * Algorithm (first-order diffraction approximation):
- *   1. Cast one direct ray (listener → srcOrigin).
- *      Clear LOS  → acousticPos = srcOrigin, return 1.0.
- *   2. Blocked → build an orthonormal tangent frame perpendicular to the
- *      listener→source axis and cast up to 8 probe rays displaced
- *      ±SEARCH_RADIUS in that plane (cardinal + diagonal directions).
+ *   1. Cast one direct ray (listener -> srcOrigin).
+ *      Clear LOS  -> acousticPos = srcOrigin, return 1.0.
+ *   2. Blocked -> build an orthonormal tangent frame perpendicular to the
+ *      listener->source axis and cast up to 8 probe rays displaced
+ *      +/-SEARCH_RADIUS in that plane (cardinal + diagonal directions).
  *      Pick the probe with the highest fraction (nearest audible gap).
  *      Use that probe position as acousticPos so HRTF places the sound
  *      from the gap direction rather than through the wall.
@@ -2445,18 +2445,18 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
 
     directFrac = tr.fraction;
     if (directFrac >= 1.0f)
-        return 1.0f;   /* clear LOS — use the real position as-is */
+        return 1.0f;   /* clear LOS -- use the real position as-is */
 
     bestFrac = directFrac;
 
     /* Occluded: search for the nearest gap in 8 tangent-plane directions. */
     {
-        /* (right-scale, up-scale) pairs — cardinal then diagonal */
+        /* (right-scale, up-scale) pairs -- cardinal then diagonal */
         static const float dirs[8][2] = {
             { 1.f,  0.f}, {-1.f,  0.f}, { 0.f,  1.f}, { 0.f, -1.f},
             { 1.f,  1.f}, { 1.f, -1.f}, {-1.f,  1.f}, {-1.f, -1.f}
         };
-        /* Doorway-scale search radius — default 120 u (≈ URT door half-width).
+        /* Doorway-scale search radius -- default 120 u (~ URT door half-width).
          * Tunable via s_alOccSearchRadius: increase to reach further around
          * thick walls or wide columns, decrease for tighter gap sensitivity. */
         float SEARCH_RADIUS = s_alOccSearchRadius
@@ -2467,7 +2467,7 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
         float  srcDist;
         int    k;
 
-        /* Orthonormal frame: fwd = listener→source, right/up = tangent plane */
+        /* Orthonormal frame: fwd = listener->source, right/up = tangent plane */
         VectorSubtract(srcOrigin, s_al_listener_origin, fwd);
         srcDist = VectorNormalize(fwd);
 
@@ -2497,20 +2497,20 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 bestFrac = pr.fraction;
                 VectorCopy(probe, acousticPos);
                 if (bestFrac >= 1.0f)
-                    break;   /* clear path found — stop searching */
+                    break;   /* clear path found -- stop searching */
             }
         }
 
         /* ---- Multi-hop corridor probing ----
          * When near-source probes can't find a gap (thick wall, corridor far
-         * from source), try two-hop paths: listener → waypoint → source.
+         * from source), try two-hop paths: listener -> waypoint -> source.
          * Casts rays from the listener in 8 world-space horizontal directions
          * to find corridor openings, then checks if those openings can reach
          * the source.  Approximates sound traveling through corridors without
          * a full pathfinding graph.
          *
-         * Each hop direction is skipped if it points within ~30° of the
-         * direct listener→source line (already covered by the direct trace).
+         * Each hop direction is skipped if it points within ~30deg of the
+         * direct listener->source line (already covered by the direct trace).
          * The hop score is penalised by the path-length ratio so longer
          * corridors attenuate more than short doorways. */
         /* Budget check: reset counter at the start of each new audio frame,
@@ -2540,13 +2540,13 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 vec3_t  waypoint, hopEnd;
                 float   leg1Dist, leg2Dist, pathLen, hopScore, dot;
 
-                /* Skip directions too close to the direct path —
+                /* Skip directions too close to the direct path --
                  * already covered by the direct trace + near-source probes. */
                 dot = fwd[0]*hopDirs[k][0] + fwd[1]*hopDirs[k][1]
                     + fwd[2]*hopDirs[k][2];
                 if (dot > 0.85f) continue;
 
-                /* Leg 1: listener → corridor direction */
+                /* Leg 1: listener -> corridor direction */
                 VectorMA(s_al_listener_origin, hopReach, hopDirs[k], hopEnd);
                 CM_BoxTrace(&hop1, s_al_listener_origin, hopEnd,
                             vec3_origin, vec3_origin,
@@ -2558,14 +2558,14 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
                 VectorMA(s_al_listener_origin, leg1Dist * 0.95f,
                          hopDirs[k], waypoint);
 
-                /* Leg 2: waypoint → source */
+                /* Leg 2: waypoint -> source */
                 CM_BoxTrace(&hop2, waypoint, srcOrigin,
                             vec3_origin, vec3_origin,
                             0, CONTENTS_SOLID, qfalse);
 
-                /* Score = clearness of both legs × distance penalty.
+                /* Score = clearness of both legs x distance penalty.
                  * Longer corridor paths get more attenuation than short
-                 * doorway paths (triangle inequality: pathLen ≥ srcDist).
+                 * doorway paths (triangle inequality: pathLen >= srcDist).
                  *
                  * Hard-cap: multi-hop corridor sound should never exceed
                  * ~40% of direct LOS.  Sound bending around corners loses
@@ -2600,16 +2600,16 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
     /* ---- BSP area connectivity floor (distance-scaled) ----
      * Even when all traces hit solid walls, BSP areas connected through
      * portal chains (corridors, tunnels, doorways) should still allow
-     * sound through — muffled but audible.  This catches long winding
+     * sound through -- muffled but audible.  This catches long winding
      * corridors that neither near-source nor multi-hop probes can span.
      *
      * The floor fades linearly with distance: full strength at refDist
      * (80 u), zero at maxDist (1330 u).  Close sources stay prominent;
      * distant ones fade naturally with the distance model.
      *
-     * Same area    → strong floor (0.50 × distScale)
-     * Connected    → tunable floor (s_alOccAreaFloor × distScale)
-     * Disconnected → no floor: sealed areas (closed doors) stay silent. */
+     * Same area    -> strong floor (0.50 x distScale)
+     * Connected    -> tunable floor (s_alOccAreaFloor x distScale)
+     * Disconnected -> no floor: sealed areas (closed doors) stay silent. */
     {
         int srcLeaf = CM_PointLeafnum( srcOrigin );
         int lstLeaf = CM_PointLeafnum( s_al_listener_origin );
@@ -2642,7 +2642,7 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
             if (bestFrac < floor) {
                 bestFrac = floor;
                 /* Floor wins: the BSP graph says areas are connected, so let
-                 * the sound through at the floor level — but there is no
+                 * the sound through at the floor level -- but there is no
                  * meaningful "gap position" to redirect toward.  Keep the
                  * acoustic position at the real source so the projection step
                  * below does not amplify a stale multi-hop waypoint (which is
@@ -2653,17 +2653,17 @@ static float S_AL_ComputeAcousticPosition( const vec3_t srcOrigin, vec3_t acoust
         }
     }
 
-    /* Project the best-gap position onto the listener→source distance.
+    /* Project the best-gap position onto the listener->source distance.
      *
      * Without projection acousticPos sits only SEARCH_RADIUS units from the
-     * real source.  The listener→acousticPos angle is nearly identical to
-     * listener→source, giving < 1° apparent HRTF shift even at high pBlend
-     * values (a 120 u gap offset on a 500 u source moves the angle ≈ 5°).
+     * real source.  The listener->acousticPos angle is nearly identical to
+     * listener->source, giving < 1deg apparent HRTF shift even at high pBlend
+     * values (a 120 u gap offset on a 500 u source moves the angle ~ 5deg).
      *
-     * With projection we normalise the listener→gap direction and rescale
-     * it to the source distance.  At pBlend=0.40 a doorway 45° to the right
-     * of the direct line now gives a clearly audible ~16° HRTF direction
-     * shift — the sound appears to come from around the corner. */
+     * With projection we normalise the listener->gap direction and rescale
+     * it to the source distance.  At pBlend=0.40 a doorway 45deg to the right
+     * of the direct line now gives a clearly audible ~16deg HRTF direction
+     * shift -- the sound appears to come from around the corner. */
     if (bestFrac > directFrac) {
         vec3_t gapVec;
         float  gapLen;
@@ -2718,14 +2718,14 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
 
     /* Classify into volume category.
      * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
-     * menu audio) — give these their own SRC_CAT_UI knob so they can be tuned
+     * menu audio) -- give these their own SRC_CAT_UI knob so they can be tuned
      * independently of own-weapon / breath sounds (SRC_CAT_LOCAL).
      * Own-entity sounds (entnum == s_al_listener_entnum) are SRC_CAT_LOCAL even
      * when s_alLocalSelf=0 (3D spatialized mode) so that s_alVolSelf always
      * controls own-player audio regardless of the spatialization setting.
      * Ambient (loop) sources are classified before the own-entity check so that
      * a loop entity that happens to share the listener's entity number is still
-     * correctly routed to SRC_CAT_AMBIENT → s_alVolEnv. */
+     * correctly routed to SRC_CAT_AMBIENT -> s_alVolEnv. */
     if (isLocal && entnum == 0)
         src->category = SRC_CAT_UI;
     else if (isLocal && entchannel == CHAN_WEAPON)
@@ -2736,7 +2736,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     else if (isAmbient)
         src->category = SRC_CAT_AMBIENT;
     else if (s_al_listener_entnum >= 0 && entnum == s_al_listener_entnum) {
-        /* Own entity in 3D mode — split weapon fire from movement */
+        /* Own entity in 3D mode -- split weapon fire from movement */
         if (entchannel == CHAN_WEAPON)
             src->category = S_AL_IsSoundSuppressed(sfx, entnum)
                             ? SRC_CAT_WEAPON_SUPPRESSED : SRC_CAT_WEAPON;
@@ -2756,7 +2756,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     /* Extra-vol override: if the sound file name matches one of the
      * s_alExtraVolEntryN slots, route it to SRC_CAT_EXTRAVOL regardless of
      * entity/channel classification.  Spatial properties (local, rolloff,
-     * origin) are unaffected — only the gain group changes so s_alExtraVol
+     * origin) are unaffected -- only the gain group changes so s_alExtraVol
      * controls the loudness independently.  A ":-N" dB suffix in the matching
      * slot is converted to a linear scale stored in src->sampleVol and
      * multiplied into the gain on top of the global s_alExtraVol scalar. */
@@ -2815,7 +2815,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         /* Explicitly clear any direct filter left from a previous 3-D use of
          * this source slot.  A stale low-pass (e.g. from a fully-occluded
          * world sound) would otherwise muffle own-player / weapon sounds for
-         * the first few frames until the occlusion update tick resets it —
+         * the first few frames until the occlusion update tick resets it --
          * the sporadic "suppressor" effect heard on weapons like the DE-50. */
         if (s_al_efx.available) {
             qalSourcei(sid, AL_DIRECT_FILTER, (ALint)AL_FILTER_NULL);
@@ -2828,7 +2828,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
             if (s_al_efx.maxSends >= 2)
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)AL_EFFECTSLOT_NULL, 1, (ALint)AL_FILTER_NULL);
-            /* EQ send — local sources (own weapons/footsteps) get the same
+            /* EQ send -- local sources (own weapons/footsteps) get the same
              * bass/mid boost as world sources for consistent tonal balance.
              * Use eqNormFilter on the send to compensate for the additive
              * wet path (prevents dry+wet from boosting above source level). */
@@ -2866,7 +2866,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         if (s_al_directChannels)
             qalSourcei(sid, AL_DIRECT_CHANNELS_SOFT, AL_FALSE);
         if (s_al_efx.available) {
-            /* Reverb send (auxiliary send 0) — skip when reverb is disabled */
+            /* Reverb send (auxiliary send 0) -- skip when reverb is disabled */
             if (s_alReverb && s_alReverb->integer) {
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
@@ -2888,7 +2888,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)send1, 1, (ALint)AL_FILTER_NULL);
             }
-            /* EQ send — always-on tone shaping for bass/mid presence.
+            /* EQ send -- always-on tone shaping for bass/mid presence.
              * Use eqNormFilter on the send to normalize the wet path so
              * dry+wet stays at the original source level without distortion. */
             if (s_al_efx.eqSend >= 0 && s_al_efx.eqSlot) {
@@ -2973,7 +2973,7 @@ static void S_AL_StopSource( int idx )
 }
 
 /* =========================================================================
- * Section 9 — Background-music streaming
+ * Section 9 -- Background-music streaming
  * =========================================================================
  */
 
@@ -3036,7 +3036,7 @@ static qboolean S_AL_MusicFillBuffer( ALuint buf )
     if (read <= 0) {
         S_AL_TRACE(1, "MusicFillBuffer: stream read=%d (EOF or error) looping=%d\n",
                    read, s_al_music.looping);
-        /* End of track — try to loop */
+        /* End of track -- try to loop */
         S_CodecCloseStream(s_al_music.stream);
         s_al_music.stream = NULL;
         if (s_al_music.looping && s_al_music.loopFile[0]) {
@@ -3074,7 +3074,7 @@ static void S_AL_MusicUpdate( void )
     for (i = 0; i < processed; i++) {
         qalSourceUnqueueBuffers(s_al_music.source, 1, &buf);
         if (!S_AL_MusicFillBuffer(buf)) {
-            S_AL_TRACE(1, "MusicUpdate: fill failed — stopping music\n");
+            S_AL_TRACE(1, "MusicUpdate: fill failed -- stopping music\n");
             s_al_music.active = qfalse;
             return;
         }
@@ -3086,14 +3086,14 @@ static void S_AL_MusicUpdate( void )
     qalGetSourcei(s_al_music.source, AL_BUFFERS_QUEUED, &queued);
     qalGetSourcei(s_al_music.source, AL_SOURCE_STATE, &state);
     if (queued > 0 && state != AL_PLAYING && !s_al_music.paused) {
-        S_AL_TRACE(1, "MusicUpdate: source stalled — restarting playback\n");
+        S_AL_TRACE(1, "MusicUpdate: source stalled -- restarting playback\n");
         qalSourcePlay(s_al_music.source);
         S_AL_CheckALError("MusicUpdate/qalSourcePlay");
     }
 }
 
 /* =========================================================================
- * Section 10 — soundInterface_t implementations
+ * Section 10 -- soundInterface_t implementations
  * =========================================================================
  */
 
@@ -3138,12 +3138,12 @@ static void S_AL_InitEFX( void )
 
     qalGetError();  /* clear */
 
-    /* Reverb effect — prefer EAX reverb, fall back to standard reverb */
+    /* Reverb effect -- prefer EAX reverb, fall back to standard reverb */
     qalGenEffects(1, &s_al_efx.reverbEffect);
     qalEffecti(s_al_efx.reverbEffect, AL_EFFECT_TYPE, AL_EFFECT_EAXREVERB);
     if (qalGetError() == AL_NO_ERROR) {
         s_al_efx.hasEAXReverb = qtrue;
-        /* Medium-sized indoor room — sensible default for URT maps. */
+        /* Medium-sized indoor room -- sensible default for URT maps. */
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DENSITY,           0.5f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_DIFFUSION,         0.85f);
         qalEffectf(s_al_efx.reverbEffect, AL_EAXREVERB_GAIN,              0.32f);
@@ -3223,9 +3223,9 @@ static void S_AL_InitEFX( void )
         qalGenEffects(1, &s_al_efx.echoEffect);
         qalEffecti(s_al_efx.echoEffect, AL_EFFECT_TYPE, AL_EFFECT_ECHO);
         if (qalGetError() == AL_NO_ERROR) {
-            /* Conservative defaults — will be driven dynamically by
+            /* Conservative defaults -- will be driven dynamically by
              * S_AL_UpdateDynamicReverb based on room geometry.
-             * Short delay + low feedback → a single subtle reflection,
+             * Short delay + low feedback -> a single subtle reflection,
              * not a long repeating trail. */
             qalEffectf(s_al_efx.echoEffect, AL_ECHO_DELAY,    0.04f);
             qalEffectf(s_al_efx.echoEffect, AL_ECHO_LRDELAY,  0.02f);
@@ -3237,7 +3237,7 @@ static void S_AL_InitEFX( void )
                                     (ALint)s_al_efx.echoEffect);
             qalAuxiliaryEffectSlotf(s_al_efx.echoSlot, AL_EFFECTSLOT_GAIN, 0.0f);
         } else {
-            /* AL_EFFECT_ECHO not supported — clear so wiring code skips it. */
+            /* AL_EFFECT_ECHO not supported -- clear so wiring code skips it. */
             qalDeleteEffects(1, &s_al_efx.echoEffect);
             s_al_efx.echoEffect = 0;
         }
@@ -3263,7 +3263,7 @@ static void S_AL_InitEFX( void )
         }
     }
 
-    /* Global EQ effect — tone shaping to compensate for occlusion softening.
+    /* Global EQ effect -- tone shaping to compensate for occlusion softening.
      * Uses its own aux send (2 if available, else shares send 1 with echo).
      * The EQ auxiliary send is inherently additive (wet adds to dry), which
      * would boost the signal and cause distortion.  A normalization filter
@@ -3348,7 +3348,7 @@ static void S_AL_Shutdown( void )
     }
     s_al_numSrc = 0;
 
-    /* Music — MusicStop already stops and unqueues all buffers.
+    /* Music -- MusicStop already stops and unqueues all buffers.
      * The redundant qalSourceStop that was here has been removed.
      * Guard the delete against source==0 (init failure when voice pool
      * was exhausted before the music source could be created). */
@@ -3402,7 +3402,7 @@ static void S_AL_Shutdown( void )
         s_al_tinnitusLastBuiltMs = 0;
     }
 
-    /* Sfx — drain the async loader pool first so no workers are accessing
+    /* Sfx -- drain the async loader pool first so no workers are accessing
      * sfx records when we wipe them. */
     S_AL_StopThreadPool();
     S_AL_FreeSfx();
@@ -3423,9 +3423,9 @@ static void S_AL_Shutdown( void )
  */
 
 /* Arm (or extend/deepen) the suppression event.
- * fireDir: direction TOWARD the incoming fire source (need not be normalised —
+ * fireDir: direction TOWARD the incoming fire source (need not be normalised --
  *   the function normalises it internally), or NULL for omnidirectional (head
- *   hits — attacker position unknown).  Directional events gate per-source HF
+ *   hits -- attacker position unknown).  Directional events gate per-source HF
  *   suppression to a cone; omnidirectional events apply the full cut globally.
  * Takes the later expiry and the lower (more muffling) HF floor so that
  * overlapping triggers always favour the worse outcome. */
@@ -3442,7 +3442,7 @@ static void S_AL_TriggerSuppression( int durationMs, float hfFloor,
         s_al_suppressExpiry = expiry;
         s_al_suppressHFPeak = hfFloor;
     } else if (hfFloor < s_al_suppressHFPeak) {
-        /* Shorter but deeper — keep existing expiry, deepen the cut */
+        /* Shorter but deeper -- keep existing expiry, deepen the cut */
         s_al_suppressHFPeak = hfFloor;
     }
 
@@ -3462,7 +3462,7 @@ static void S_AL_TriggerSuppression( int durationMs, float hfFloor,
         s_al_suppress_directional = qfalse;
     }
 
-    /* Reverb spike: makes the room acoustics "bloom" on impact — the
+    /* Reverb spike: makes the room acoustics "bloom" on impact -- the
      * wet reverb tail briefly dominates, then decays back, selling the
      * acoustic weight of nearby incoming fire. */
     reverbBoost = s_alSuppressionReverbBoost
@@ -3480,7 +3480,7 @@ static void S_AL_TriggerSuppression( int durationMs, float hfFloor,
 
 /* Build (or rebuild) the procedural tinnitus PCM buffer.
  * Generates a pure sine tone at s_alTinnitusFreq Hz with a short
- * linear attack and a quadratic decay envelope — no external asset needed.
+ * linear attack and a quadratic decay envelope -- no external asset needed.
  * Called lazily before the first play and whenever freq/duration change. */
 static void S_AL_BuildTinnitusBuf( void )
 {
@@ -3496,7 +3496,7 @@ static void S_AL_BuildTinnitusBuf( void )
     if (durationMs <   50) durationMs =   50;
     if (durationMs > 3000) durationMs = 3000;
 
-    /* Nothing changed — skip rebuild */
+    /* Nothing changed -- skip rebuild */
     if (s_al_tinnitusBuf
             && freqHz     == s_al_tinnitusLastBuiltHz
             && durationMs == s_al_tinnitusLastBuiltMs)
@@ -3508,7 +3508,7 @@ static void S_AL_BuildTinnitusBuf( void )
         s_al_tinnitusBuf = 0;
     }
 
-    /* 22050 Hz mono — plenty of bandwidth for up to 8 kHz */
+    /* 22050 Hz mono -- plenty of bandwidth for up to 8 kHz */
 #define TIN_RATE 22050
     nSamples = (TIN_RATE * durationMs) / 1000;
     if (nSamples < 1) return;
@@ -3530,7 +3530,7 @@ static void S_AL_BuildTinnitusBuf( void )
                 env = (float)i / (float)attackSmp;
             } else {
                 float d = (float)(i - attackSmp) / decayLen;
-                /* Quadratic decay: 1 → 0, sounds natural */
+                /* Quadratic decay: 1 -> 0, sounds natural */
                 float inv = 1.0f - d;
                 env = inv * inv;
             }
@@ -3575,7 +3575,7 @@ static void S_AL_TriggerTinnitus( void )
     if (tinVol < 0.0f) tinVol = 0.0f;
     if (tinVol > 1.0f) tinVol = 1.0f;
 
-    /* Wire up the source manually — no sfx record, no category vol,
+    /* Wire up the source manually -- no sfx record, no category vol,
      * just the raw buffer at the user-configured volume scaled by the
      * global listener gain (s_volume is applied via AL_GAIN on the
      * listener every frame, so we set source gain = tinVol directly). */
@@ -3624,7 +3624,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     /* Determine the sound's world origin as early as possible so we can
      * apply a distance-based rejection before allocating any slot.
      * Sounds beyond s_alMaxDist are already inaudible in the distance
-     * model — don't waste a slot on them. */
+     * model -- don't waste a slot on them. */
     if (entnum == s_al_listener_entnum &&
             (!s_alLocalSelf || s_alLocalSelf->integer)) {
         VectorClear(sndOrigin);
@@ -3633,7 +3633,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
         /* When the caller supplies an explicit world-space origin for the
          * listener entity, the cgame may have evaluated it from the network
          * trajectory (TR_LINEAR / TR_INTERPOLATE), which can lag behind the
-         * engine's client-side prediction — especially when sv_smoothClients
+         * engine's client-side prediction -- especially when sv_smoothClients
          * delays the snapshot trBase by sv_bufferMs ms.  At 300 u/s and
          * 50 ms buffer delay that is a ~15-unit positional error that scales
          * with velocity, causing own-player sounds (footsteps, weapon fire,
@@ -3647,7 +3647,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
          * always placed at the correct position.
          *
          * Scope: strictly limited to entnum == s_al_listener_entnum.
-         * All other entities — other players, world, bots — use the origin
+         * All other entities -- other players, world, bots -- use the origin
          * supplied by the cgame, which is correct for them. */
         if (entnum == s_al_listener_entnum && s_al_listener_entnum >= 0)
             VectorCopy(s_al_listener_origin, sndOrigin);
@@ -3667,8 +3667,8 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             VectorClear(sndOrigin);
 
         /* BSP cold-start fallback: if the entity origin cache is still at
-         * world-origin (0,0,0) — which happens on the very first frame before
-         * S_UpdateEntityPosition has been called for static map entities —
+         * world-origin (0,0,0) -- which happens on the very first frame before
+         * S_UpdateEntityPosition has been called for static map entities --
          * look for a target_speaker in the parsed BSP list whose noise file
          * matches this sound.  Only resolve when exactly ONE speaker uses this
          * file; if multiple speakers share the same noise we cannot know which
@@ -3702,10 +3702,10 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
         vec3_t d;
         VectorSubtract(sndOrigin, s_al_listener_origin, d);
         if (DotProduct(d, d) > maxDist * maxDist)
-            return;   /* beyond audible range — no slot needed */
+            return;   /* beyond audible range -- no slot needed */
     }
 
-    /* One-shot dedup — see comment block above S_AL_StartSound definition. */
+    /* One-shot dedup -- see comment block above S_AL_StartSound definition. */
     if (s_alDedupMs && s_alDedupMs->integer > 0) {
         int dedupMs = s_alDedupMs->integer;
         int nowMs   = Com_Milliseconds();
@@ -3727,7 +3727,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
 
             /* Non-weapon channels: extend the window to the full sound
              * duration so trigger-bound sounds cannot re-stack while the
-             * previous instance is still playing — regardless of how
+             * previous instance is still playing -- regardless of how
              * s_alDedupMs is configured.  Weapon channels keep the minimum
              * window so rapid fire is never suppressed.
              * ENTITYNUM_WORLD is excluded: it has its own hard 100 ms floor
@@ -3761,18 +3761,18 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
     srcIdx = S_AL_GetFreeSource();
     if (srcIdx < 0) return;
 
-    /* Feature D — Audio suppression: near-miss tracer detection.
+    /* Feature D -- Audio suppression: near-miss tracer detection.
      * When an ENEMY fires a CHAN_WEAPON sound very close to the listener,
      * briefly duck the listener gain to simulate the concussive disruption of
      * incoming fire ("suppression effect").
      *
      * Own sounds and TEAMMATE sounds are both excluded:
-     *   • Own sounds: entnum == s_al_listener_entnum (already caught by !isLocal
+     *   * Own sounds: entnum == s_al_listener_entnum (already caught by !isLocal
      *     but guarded explicitly for clarity).
-     *   • Teammates: determined by comparing the shooter's player configstring
+     *   * Teammates: determined by comparing the shooter's player configstring
      *     team field ("t") against the local player's persistant[PERS_TEAM].
      *     Both must be on a real team (TEAM_RED/TEAM_BLUE, not TEAM_FREE / FFA).
-     *     Configstrings are in cl.gameState which is always up-to-date — no
+     *     Configstrings are in cl.gameState which is always up-to-date -- no
      *     cgame access required. */
     if (s_alSuppression && s_alSuppression->integer && !isLocal
             && entchannel == CHAN_WEAPON
@@ -3797,16 +3797,16 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
             if (DotProduct(d, d) < radius * radius) {
                 int   durationMs = s_alSuppressionMs    ? (int)s_alSuppressionMs->value    : 220;
                 float hfFloor    = s_alSuppressionHFFloor ? s_alSuppressionHFFloor->value : 0.08f;
-                /* Direction toward shooter (unnormalised — function normalises internally) */
+                /* Direction toward shooter (unnormalised -- function normalises internally) */
                 S_AL_TriggerSuppression(durationMs, hfFloor, d);
             }
         }
     }
 
-    /* Feature D1 — Near-miss whiz trigger.
+    /* Feature D1 -- Near-miss whiz trigger.
      * URT plays sound/weapons/whiz1.wav and whiz2.wav when a bullet passes
      * close to the listener.  These are the definitive "near miss" audio cues
-     * and the most reliable suppression trigger — more precise than the
+     * and the most reliable suppression trigger -- more precise than the
      * CHAN_WEAPON radius fallback above.  The sound may arrive as a local
      * (head-locked) source OR as a positional world source, so we check on
      * any sound whose name matches s_alNearMissPattern regardless of isLocal.
@@ -3842,7 +3842,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
                         VectorSubtract(sndOrigin, s_al_listener_origin, whizDir);
                         S_AL_TriggerSuppression(durMs, hfFloor, whizDir);
                     } else {
-                        /* Local/head-locked whiz — direction unknown */
+                        /* Local/head-locked whiz -- direction unknown */
                         S_AL_TriggerSuppression(durMs, hfFloor, NULL);
                     }
                     break;
@@ -3851,7 +3851,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
         }
     }
 
-    /* Feature D2 — Head-hit triggers (helmet and bare head).
+    /* Feature D2 -- Head-hit triggers (helmet and bare head).
      * When the LOCAL player's entity plays a CHAN_BODY sound whose name
      * matches s_alHelmetHitPattern or s_alBareHeadHitPattern, fire a
      * hearing-disruption event with its configured HF floor and duration,
@@ -3892,7 +3892,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
         }
     }
 
-    /* Feature C — fire-direction impact reverb.
+    /* Feature C -- fire-direction impact reverb.
      * Record aim direction + frame number when the local player fires a weapon
      * so that S_AL_UpdateDynamicReverb can cast a short forward cone on its
      * next probe cycle and transiently boost early reflections. */
@@ -3905,7 +3905,7 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
 
     /* Incoming-enemy-fire reverb: when an enemy fires CHAN_WEAPON within range,
      * record the normalised distance so S_AL_UpdateDynamicReverb can apply a
-     * proportional early-reflection boost — giving their muzzle blast acoustic
+     * proportional early-reflection boost -- giving their muzzle blast acoustic
      * weight in the listener's local environment.
      * Suppressed weapons are excluded (they don't produce a significant blast). */
     if (s_alFireImpactReverb && s_alFireImpactReverb->integer
@@ -3991,12 +3991,12 @@ static void S_AL_StartBackgroundTrack( const char *intro, const char *loop )
     if (!intro || !*intro) return;
 
     /* If no valid music source was created at init (e.g. voice pool was
-     * exhausted by the game source pool — a PR #95 regression), warn and
+     * exhausted by the game source pool -- a PR #95 regression), warn and
      * bail out gracefully rather than sending AL_INVALID_NAME to every
      * subsequent qalSource* call, which causes OpenAL Soft's 64-bit GCC
      * runtime to throw 0x20474343 C++ exceptions and hard-crash. */
     if (!s_al_music.source) {
-        Com_Printf(S_COLOR_YELLOW "S_AL: StartBackgroundTrack: no music source — "
+        Com_Printf(S_COLOR_YELLOW "S_AL: StartBackgroundTrack: no music source -- "
                    "background music disabled (check s_alMaxSrc)\n");
         return;
     }
@@ -4063,7 +4063,7 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
      * the game source pool), silently drop cinematic/VoIP audio rather than
      * flooding AL with AL_INVALID_NAME errors that crash the 64-bit build. */
     if (!s_al_raw.source) {
-        S_AL_TRACE(2, "RawSamples: no raw source — dropping %d samples\n", samples);
+        S_AL_TRACE(2, "RawSamples: no raw source -- dropping %d samples\n", samples);
         return;
     }
 
@@ -4091,7 +4091,7 @@ static void S_AL_RawSamples( int samples, int rate, int width, int channels,
         ALint queued = 0;
         qalGetSourcei(s_al_raw.source, AL_BUFFERS_QUEUED, &queued);
         if ( queued >= S_AL_RAW_BUFFERS ) {
-            /* All buffers are attached — stop, drain everything, restart. */
+            /* All buffers are attached -- stop, drain everything, restart. */
             qalSourceStop(s_al_raw.source);
             queued = 0;
             qalGetSourcei(s_al_raw.source, AL_BUFFERS_PROCESSED, &queued);
@@ -4159,17 +4159,17 @@ static void S_AL_StopAllSounds( void )
  * =========================================================================
  *
  * Order of operations at map load:
- *   1. S_AL_StopAllSounds()     — clears mapHints, bspSpeakers, normCache
- *   2. S_AL_BeginRegistration() — loads existing normcache if present so
+ *   1. S_AL_StopAllSounds()     -- clears mapHints, bspSpeakers, normCache
+ *   2. S_AL_BeginRegistration() -- loads existing normcache if present so
  *                                  RegisterSound calls pick up overrides
- *   3. cgame registers sounds   — normcache override applied per-sound
+ *   3. cgame registers sounds   -- normcache override applied per-sound
  *   4. First UpdateDynamicReverb snap cycle:
- *        → S_AL_InitMapAudio()  — parses BSP, pre-registers remaining
+ *        -> S_AL_InitMapAudio()  -- parses BSP, pre-registers remaining
  *                                  sounds, writes cache if none existed
  */
 
 /* Extract the bare map name from cl.mapname.
- * "maps/ut4_turnpike.bsp" → "ut4_turnpike"                              */
+ * "maps/ut4_turnpike.bsp" -> "ut4_turnpike"                              */
 static void S_AL_MapBaseName( char *out, int outLen )
 {
     const char *p  = cl.mapname;
@@ -4308,7 +4308,7 @@ static void S_AL_WriteMapNormCache( const char *mapbase )
     written += Com_sprintf(buf + written, bufLen - written,
         "// Quake3e-urt per-map ambient normalisation cache\n"
         "// map: %s\n"
-        "// normGain 0.05–1.00  (1.0 = natural level; lower = quieter)\n"
+        "// normGain 0.05-1.00  (1.0 = natural level; lower = quieter)\n"
         "// Edit values to tune loudness. Delete file to regenerate.\n"
         "// Reload with: snd_normcache_rebuild\n",
         cl.mapname[0] ? cl.mapname : mapbase);
@@ -4366,7 +4366,7 @@ static qboolean S_AL_LoadMapNormCache( const char *mapbase )
         if (ng < 0.05f) ng = 0.05f;
         if (ng > 1.0f)  ng = 1.0f;
 
-        /* Store in pending table — RegisterSound checks this for new loads */
+        /* Store in pending table -- RegisterSound checks this for new loads */
         if (s_al_normCacheCount < S_AL_NORMCACHE_MAX) {
             Q_strncpyz(s_al_normCache[s_al_normCacheCount].path,
                        sfxPath, MAX_QPATH);
@@ -4417,7 +4417,7 @@ static void S_AL_RebuildNormCache_f( void )
     char mapbase[MAX_QPATH];
 
     if (!s_al_started || CM_NumInlineModels() <= 0) {
-        Com_Printf("S_AL: snd_normcache_rebuild — no map loaded\n");
+        Com_Printf("S_AL: snd_normcache_rebuild -- no map loaded\n");
         return;
     }
     s_al_normCacheCount   = 0;
@@ -4425,7 +4425,7 @@ static void S_AL_RebuildNormCache_f( void )
 
     S_AL_MapBaseName(mapbase, sizeof(mapbase));
     if (!mapbase[0]) {
-        Com_Printf("S_AL: snd_normcache_rebuild — cannot determine map name\n");
+        Com_Printf("S_AL: snd_normcache_rebuild -- cannot determine map name\n");
         return;
     }
     S_AL_PreRegisterMapSounds();
@@ -4484,9 +4484,9 @@ static void S_AL_StopLoopingSound( int entityNum )
  *   heard when walking out of a fountain or ambient-sound entity's range.
  *
  * State machine per alLoop_t:
- *   active=true,  fadeOutStartMs=0  → normal playing (or fade-in still running)
- *   active=false, fadeOutStartMs>0  → fading out; source still playing
- *   active=false, fadeOutStartMs=0  → fully stopped / idle
+ *   active=true,  fadeOutStartMs=0  -> normal playing (or fade-in still running)
+ *   active=false, fadeOutStartMs>0  -> fading out; source still playing
+ *   active=false, fadeOutStartMs=0  -> fully stopped / idle
  *
  * Re-activation during fade-out (entity pops back into snapshot mid-fade):
  *   fadeOutStartMs is cleared, a fresh fade-in begins from the current source
@@ -4527,7 +4527,7 @@ static void S_AL_UpdateLoops( void )
                     }
                 }
             } else {
-                /* Source not playing — nothing to fade, clean up immediately. */
+                /* Source not playing -- nothing to fade, clean up immediately. */
                 lp->srcIdx         = -1;
                 lp->fadeOutStartMs = 0;
                 lp->fadeStartMs    = 0;
@@ -4543,7 +4543,7 @@ static void S_AL_UpdateLoops( void )
                 int elapsed = now - lp->fadeOutStartMs;
                 if (foMs < 1) foMs = 1;
                 if (elapsed >= foMs) {
-                    /* Fade complete — hard-stop the source. */
+                    /* Fade complete -- hard-stop the source. */
                     S_AL_StopSource(lp->srcIdx);
                     s_al_src[lp->srcIdx].loopSound = qfalse;
                     lp->srcIdx         = -1;
@@ -4553,7 +4553,7 @@ static void S_AL_UpdateLoops( void )
                     float t;
                     alSrc_t *src    = &s_al_src[lp->srcIdx];
                     float    catVol = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
-                    /* foMs already computed above — reuse it. */
+                    /* foMs already computed above -- reuse it. */
                     t = lp->fadeOutStartGain *
                         (1.0f - (float)elapsed / (float)foMs);
                     if (lp->sfx >= 0 && lp->sfx < s_al_numSfx)
@@ -4579,7 +4579,7 @@ static void S_AL_UpdateLoops( void )
          * entity re-entered the snapshot before the fade finished.)
          *
          * We compute the current fade-out gain so the fade-in begins from
-         * exactly that level — preventing a gain jump (pop) at re-activation.
+         * exactly that level -- preventing a gain jump (pop) at re-activation.
          * fadeStartMs is offset into the past so that Step 5's (elapsed/fiMs)
          * equals the current gain on its very first application. */
         if (lp->fadeOutStartMs > 0) {
@@ -4607,7 +4607,7 @@ static void S_AL_UpdateLoops( void )
 
         /* ---- Step 4: Start a new source if needed ---- */
         /* S_AL_UpdateLoops runs from S_Update, which is called after the full
-         * cgame frame (SCR_UpdateScreen) — meaning S_Respatialize has already
+         * cgame frame (SCR_UpdateScreen) -- meaning S_Respatialize has already
          * refreshed s_al_listener_origin to the Pmove-predicted position this
          * frame.  For the listener entity, prefer that authoritative origin
          * over lp->origin (which is the cgame-supplied network position, lagging
@@ -4625,7 +4625,7 @@ static void S_AL_UpdateLoops( void )
          *       isPlaying (our software flag) is still qtrue; we detect
          *       staleness only when srcIdx >= 0 and !isPlaying.
          *   (b) The entity's desired sfx changed while the source was playing
-         *       (e.g. weapon swap — must restart immediately on the new buffer).
+         *       (e.g. weapon swap -- must restart immediately on the new buffer).
          *
          * In case (b) we hard-stop the old source.  The new source will begin
          * a normal fade-in via the freshly-cleared fadeStartMs below. */
@@ -4645,7 +4645,7 @@ static void S_AL_UpdateLoops( void )
         if (lp->srcIdx < 0) {
             /* Dedup: only ONE AL source per sfx may run at a time.
              *
-             * Scan ALL loop slots — active AND fading-out — for any slot
+             * Scan ALL loop slots -- active AND fading-out -- for any slot
              * that has a source still playing on the same sfx.  The old
              * guard `!other->active` was removed intentionally: a slot that
              * is fading out (active=false, srcIdx valid, isPlaying=true) is
@@ -4655,8 +4655,8 @@ static void S_AL_UpdateLoops( void )
              * heard as wavering distortion at the loop boundary.
              *
              * The newcomer waits until the fade-out fully stops the existing
-             * source (srcIdx → -1), then claims a source on the next frame.
-             * The brief holdoff (≤ fade-out duration) is inaudible; the
+             * source (srcIdx -> -1), then claims a source on the next frame.
+             * The brief holdoff (<= fade-out duration) is inaudible; the
              * phase-divergence distortion it prevents is very much audible. */
             {
                 int      k;
@@ -4713,8 +4713,8 @@ static void S_AL_UpdateLoops( void )
             /* Start gain: normally 0 (time-based fade-in prevents pop).
              * When s_alLoopFadeDist > 0, compute the distance-proportional
              * gain so a source that appears far from the listener starts
-             * proportionally quiet — matches what OpenAL distance rolloff
-             * gives at that point — preventing the "ramp-in from silence"
+             * proportionally quiet -- matches what OpenAL distance rolloff
+             * gives at that point -- preventing the "ramp-in from silence"
              * for sources that are audible but distant. */
             {
                 float startGain = 0.0f;
@@ -4729,11 +4729,11 @@ static void S_AL_UpdateLoops( void )
                     if (dist >= maxDist)
                         startGain = 0.0f;
                     else if (dist <= ref)
-                        startGain = 1.0f;   /* in full-volume zone — skip time fade */
+                        startGain = 1.0f;   /* in full-volume zone -- skip time fade */
                     else {
                         float zoneStart = maxDist - fadeDist;
                         if (dist <= zoneStart)
-                            startGain = 1.0f;  /* inside fade zone but above ref — full */
+                            startGain = 1.0f;  /* inside fade zone but above ref -- full */
                         else
                             startGain = (maxDist - dist) / fadeDist;
                     }
@@ -4762,7 +4762,7 @@ static void S_AL_UpdateLoops( void )
          * Runs every frame so that s_alVolEnv cvar changes take effect on
          * active ambient loops regardless of fade state.  The vol-update block
          * in S_AL_Update skips loop sources precisely because this step is the
-         * authoritative gain writer for all loop sources — both mid-fade and
+         * authoritative gain writer for all loop sources -- both mid-fade and
          * settled.
          *
          * For BSP speaker loops without EFX, the occlusion pass cannot write
@@ -4780,7 +4780,7 @@ static void S_AL_UpdateLoops( void )
                 catVol *= s_al_sfx[lp->sfx].normGain;
 
             if (lp->fadeStartMs > 0) {
-                /* Fade-in ramp: gain 0 → 1 over fadeInMs. */
+                /* Fade-in ramp: gain 0 -> 1 over fadeInMs. */
                 float fadeGain;
                 int   elapsed = now - lp->fadeStartMs;
                 int   fiMs    = s_alLoopFadeInMs ? (int)s_alLoopFadeInMs->value
@@ -4795,7 +4795,7 @@ static void S_AL_UpdateLoops( void )
                 qalSourcef(src->source, AL_GAIN,
                            (src->master_vol / 255.f) * catVol * fadeGain * occFactor);
             } else {
-                /* Settled level — write every frame so live cvar adjustments
+                /* Settled level -- write every frame so live cvar adjustments
                  * (s_alVolEnv, s_alVolSelf, etc.) are immediately reflected.
                  * Cost is negligible: one qalSourcef per active ambient loop. */
                 qalSourcef(src->source, AL_GAIN,
@@ -4852,16 +4852,16 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
      * player regardless of server configuration or QVM patch level.
      *
      * Two things this guards:
-     *   1. The entity-origin cache write — cgame calls UpdateEntityPosition
+     *   1. The entity-origin cache write -- cgame calls UpdateEntityPosition
      *      for all entities every frame, including the local player; without
      *      this guard the cache write could overwrite the correct value set
      *      by Respatialize earlier in the same frame.
-     *   2. Active-source position updates — any own-player sound started this
+     *   2. Active-source position updates -- any own-player sound started this
      *      frame (e.g. footsteps) should track the predicted position, not the
      *      stale network position.
      *
      * Scope: strictly limited to entityNum == s_al_listener_entnum.
-     * All other entities — other players, world, bots — use the cgame-supplied
+     * All other entities -- other players, world, bots -- use the cgame-supplied
      * origin, which is correct for them. */
     if (entityNum == s_al_listener_entnum && s_al_listener_entnum >= 0)
         effectiveOrigin = s_al_listener_origin;
@@ -4898,10 +4898,10 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
  * from the listener position to measure the surrounding space, then derives
  * EFX reverb parameters that match the environment:
  *
- *   Small room        — short decay, modest late-gain, modest reflections
- *   Corridor          — medium decay, stronger early reflections
- *   Large hall / cave — longer decay, moderate late-reverb tail
- *   Open outdoor      — very short decay, near-dry (slot gain → low)
+ *   Small room        -- short decay, modest late-gain, modest reflections
+ *   Corridor          -- medium decay, stronger early reflections
+ *   Large hall / cave -- longer decay, moderate late-reverb tail
+ *   Open outdoor      -- very short decay, near-dry (slot gain -> low)
  *
  * Only CONTENTS_SOLID is tested (not PLAYERCLIP) to avoid player-clip
  * brushes registering as acoustic surfaces.  Max ray length equals the
@@ -4909,17 +4909,17 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
  * audible range.
  *
  * Each ray group uses a calibrated maximum distance (see s_al_envDists[]):
- *   Horizontal 0–7  : S_AL_SOUND_MAXDIST (1330 u) — room-scale openness
- *   Diagonal-up 8–11: S_AL_ENV_VERT_DIST (400 u)  — ceiling up to ~283 u
- *   Straight up   12: S_AL_ENV_VERT_DIST (400 u)  — ceiling up to 400 u
- *   Straight down 13: S_AL_ENV_DOWN_DIST (160 u)  — floor / pit context
+ *   Horizontal 0-7  : S_AL_SOUND_MAXDIST (1330 u) -- room-scale openness
+ *   Diagonal-up 8-11: S_AL_ENV_VERT_DIST (400 u)  -- ceiling up to ~283 u
+ *   Straight up   12: S_AL_ENV_VERT_DIST (400 u)  -- ceiling up to 400 u
+ *   Straight down 13: S_AL_ENV_DOWN_DIST (160 u)  -- floor / pit context
  * Using a single global max for all rays made ceilings appear nearly open
- * (a 200-unit ceiling gave fr ≈ 0.15 at 1330-unit scale) and made overhangs
+ * (a 200-unit ceiling gave fr ~ 0.15 at 1330-unit scale) and made overhangs
  * invisible to the vertical openness metric.
  *
  * A rolling history buffer (S_AL_ENV_HISTORY slots) averages the last N probe
- * sets.  A single "confused" reading — caused by complex geometry, thin walls,
- * windows, or straddling a doorway threshold — only shifts the average by 1/N,
+ * sets.  A single "confused" reading -- caused by complex geometry, thin walls,
+ * windows, or straddling a doorway threshold -- only shifts the average by 1/N,
  * preventing transient wrong classifications from audibly changing the reverb.
  *
  * A movement cache skips re-tracing when the listener hasn't moved more than
@@ -4929,7 +4929,7 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
  * to give URT maps a clearly audible acoustic character while leaving the
  * direct signal intelligible.
  *
- * Performance: 14 traces / S_AL_ENV_RATE frames ≈ 0.9 traces/frame average
+ * Performance: 14 traces / S_AL_ENV_RATE frames ~ 0.9 traces/frame average
  *              (zero traces when movement cache is active).
  * ========================================================================= */
 
@@ -4940,7 +4940,7 @@ static void S_AL_UpdateEntityPosition( int entityNum, const vec3_t origin )
 #define S_AL_ENV_MOVE_THRESH  32.0f /* units; skip re-cast when barely moved */
 
 /* World-space probe directions (normalised).
- * 8 horizontal (every 45°), 4 diagonal-up, 1 up, 1 down. */
+ * 8 horizontal (every 45deg), 4 diagonal-up, 1 up, 1 down. */
 static const float s_al_envDirs[S_AL_ENV_RAYS][3] = {
     /* horizontal */
     { 1.000f,  0.000f,  0.000f},
@@ -4965,7 +4965,7 @@ static const float s_al_envDirs[S_AL_ENV_RAYS][3] = {
  *
  * Using a single global max-distance for all rays caused two problems:
  *   1. Vertical / diagonal-up rays at 1330 units made a normal 200-unit
- *      indoor ceiling appear nearly "open" (fr ≈ 0.15), so the classifier
+ *      indoor ceiling appear nearly "open" (fr ~ 0.15), so the classifier
  *      failed to distinguish low-ceiling corridors from open sky.
  *   2. An overhead overhang at, say, 120 units only pulled fr down to 0.09,
  *      barely affecting vertOpenFrac, so the 70/30 horizontal/vertical
@@ -4973,30 +4973,30 @@ static const float s_al_envDirs[S_AL_ENV_RAYS][3] = {
  *
  * Solution: calibrate each ray group to the geometry scale it is measuring.
  *
- *  Horizontal 0–7 : S_AL_SOUND_MAXDIST (1330 u)
- *      Full attenuation range — needed for room-scale openness and corridor
+ *  Horizontal 0-7 : S_AL_SOUND_MAXDIST (1330 u)
+ *      Full attenuation range -- needed for room-scale openness and corridor
  *      detection.  A wall 600 units away gives fr = 0.45 (clearly enclosed);
- *      an open street gives fr ≈ 1.0 (clearly open).
+ *      an open street gives fr ~ 1.0 (clearly open).
  *
- *  Diagonal-up 8–11 : S_AL_ENV_VERT_DIST (400 u)
- *      A 45° diagonal ray of 400 units detects ceilings up to
- *      400 × sin 45° ≈ 283 units high.  This covers the full range of URT
- *      indoor ceilings (typically 160–280 u) while treating anything taller
+ *  Diagonal-up 8-11 : S_AL_ENV_VERT_DIST (400 u)
+ *      A 45deg diagonal ray of 400 units detects ceilings up to
+ *      400 x sin 45deg ~ 283 units high.  This covers the full range of URT
+ *      indoor ceilings (typically 160-280 u) while treating anything taller
  *      (large atria, outdoor sky) as fully open (fr = 1.0).
  *
  *  Straight up 12 : S_AL_ENV_VERT_DIST (400 u)
  *      Direct ceiling height up to 400 units.  A 200-unit ceiling gives
- *      fr = 0.50 (half blocked — correctly "indoor").  Sky → fr = 1.0.
+ *      fr = 0.50 (half blocked -- correctly "indoor").  Sky -> fr = 1.0.
  *
  *  Straight down 13 : S_AL_ENV_DOWN_DIST (160 u)
  *      Floor / pit context within a normal drop height.  Normal standing
- *      gives fr ≈ 0.25 (floor close below — as expected).  A large pit or
+ *      gives fr ~ 0.25 (floor close below -- as expected).  A large pit or
  *      open void below gives fr = 1.0 (contributes some openness). */
 #define S_AL_ENV_VERT_DIST  400.0f   /* diagonal-up + straight-up max (units) */
 #define S_AL_ENV_DOWN_DIST  160.0f   /* straight-down max (units) */
 
 static const float s_al_envDists[S_AL_ENV_RAYS] = {
-    /* horizontal (0–7): full sound-attenuation range */
+    /* horizontal (0-7): full sound-attenuation range */
     S_AL_SOUND_MAXDIST,   /* 0: +X */
     S_AL_SOUND_MAXDIST,   /* 1: +X+Y diagonal */
     S_AL_SOUND_MAXDIST,   /* 2: +Y */
@@ -5005,7 +5005,7 @@ static const float s_al_envDists[S_AL_ENV_RAYS] = {
     S_AL_SOUND_MAXDIST,   /* 5: -X-Y diagonal */
     S_AL_SOUND_MAXDIST,   /* 6: -Y */
     S_AL_SOUND_MAXDIST,   /* 7: +X-Y diagonal */
-    /* diagonal-up (8–11): ceiling/overhang sensitivity */
+    /* diagonal-up (8-11): ceiling/overhang sensitivity */
     S_AL_ENV_VERT_DIST,   /* 8:  +X up */
     S_AL_ENV_VERT_DIST,   /* 9:  +Y up */
     S_AL_ENV_VERT_DIST,   /* 10: -X up */
@@ -5027,7 +5027,7 @@ static void S_AL_UpdateDynamicReverb( void )
     static float curLate     =  0.f;
     static float curRefl     =  0.f;
     static float curSlot     =  0.f;
-    static float curHFRatio  = -1.f;  /* decay HF ratio — surface hardness   */
+    static float curHFRatio  = -1.f;  /* decay HF ratio -- surface hardness   */
     static float curDensity  = -1.f;  /* echo density                         */
     static float curDiffusion = -1.f; /* wall diffusion (flutter vs scatter)  */
     static float curGainHF   = -1.f;  /* reverb tail treble level (EQ)        */
@@ -5036,7 +5036,7 @@ static void S_AL_UpdateDynamicReverb( void )
      * initialises them on the very first probe cycle, just like curDecay. */
     static int   lastFrame = -(S_AL_ENV_RATE);
 
-    /* Rolling environment history — averages the last S_AL_ENV_HISTORY probe
+    /* Rolling environment history -- averages the last S_AL_ENV_HISTORY probe
      * sets so that a single "confused" reading (thin wall, window, doorway
      * straddling) only moves the average by 1/N rather than flipping the
      * whole classification. */
@@ -5047,7 +5047,7 @@ static void S_AL_UpdateDynamicReverb( void )
     static int   histIdx   = 0;
     static int   histCount = 0;
 
-    /* Movement cache — skip expensive traces when the listener hasn't moved
+    /* Movement cache -- skip expensive traces when the listener hasn't moved
      * far enough for new geometry to produce meaningfully different results. */
     static vec3_t lastProbeOrigin;
     static float  cachedSize       = 0.f;
@@ -5078,12 +5078,12 @@ static void S_AL_UpdateDynamicReverb( void )
     if (!s_alReverb        || !s_alReverb->integer)           return;
     if (!s_alDynamicReverb || !s_alDynamicReverb->integer)    return;
     if (s_al_inwater)                                         return;
-    /* No map loaded yet (main menu, pre-game) — CM_BoxTrace with handle 0
+    /* No map loaded yet (main menu, pre-game) -- CM_BoxTrace with handle 0
      * would crash with "bad handle 0 < 0 < 256" when cm.numSubModels == 0. */
     if (CM_NumInlineModels() <= 0)                            return;
 
     /* Detect frame-counter reset (map load / StopAllSounds) or explicit reset
-     * command (s_alReset — lets the user re-probe after changing tuning cvars). */
+     * command (s_alReset -- lets the user re-probe after changing tuning cvars). */
     snap = (s_al_loopFrame < lastFrame || curDecay < 0.f || s_al_reverbReset);
     if (snap) {
         lastFrame       = s_al_loopFrame - S_AL_ENV_RATE;
@@ -5164,7 +5164,7 @@ static void S_AL_UpdateDynamicReverb( void )
              * gradient between enclosed (0) and fully open (1).
              *
              * sizeFactor: average of the LONGEST 4 (upper-half) horizontal
-             * distances.  This ignores nearby obstacles such as pillars —
+             * distances.  This ignores nearby obstacles such as pillars --
              * even if the player is surrounded by pillars wider than the
              * player model, the diagonal rays that slip through the gaps
              * still reach the actual acoustic boundary (cavern walls, open
@@ -5173,9 +5173,9 @@ static void S_AL_UpdateDynamicReverb( void )
              * drag the apparent room size down to "small room" level.
              *
              * corrFactor: axis-pair analysis on the 4 opposite-ray pairs
-             * (rays 0↔4, 1↔5, 2↔6, 3↔7).  A TRUE corridor has exactly ONE
+             * (rays 0<->4, 1<->5, 2<->6, 3<->7).  A TRUE corridor has exactly ONE
              * pair of opposite walls both close while all other pairs are
-             * open.  Pillars create MULTIPLE close axis-pairs — explicitly
+             * open.  Pillars create MULTIPLE close axis-pairs -- explicitly
              * excluded so they do not trigger false corridor reverb.
              * -------------------------------------------------------------- */
             {
@@ -5230,7 +5230,7 @@ static void S_AL_UpdateDynamicReverb( void )
                 }
             }
 
-            vertOpenFrac = vertTotalFrac / 6.f;  /* 14 − 8 = 6 vertical rays */
+            vertOpenFrac = vertTotalFrac / 6.f;  /* 14 - 8 = 6 vertical rays */
 
             /* ---- Horizontal/vertical openness combine ---------------------- */
             {
@@ -5272,7 +5272,7 @@ static void S_AL_UpdateDynamicReverb( void )
      * run toward an outdoor exit shifts the classifier earlier, preventing the
      * probe from stalling in the TRANSITION zone for several seconds.
      *
-     * Only active on cache misses (moveDist ≥ S_AL_ENV_MOVE_THRESH), when the
+     * Only active on cache misses (moveDist >= S_AL_ENV_MOVE_THRESH), when the
      * player is actually moving.  cachedVelSpeed is 0 on cache hits or when
      * standing still, so the block is a no-op in those cases. */
     {
@@ -5287,7 +5287,7 @@ static void S_AL_UpdateDynamicReverb( void )
             int   k;
 
             /* Ray 0: straight ahead in direction of travel.
-             * Ray 1: 45° left of travel — wider spatial preview. */
+             * Ray 1: 45deg left of travel -- wider spatial preview. */
             for (k = 0; k < 2; k++) {
                 trace_t vtr;
                 vec3_t  vend;
@@ -5374,7 +5374,7 @@ static void S_AL_UpdateDynamicReverb( void )
     }
 
     /* ---- BSP sky hint: dampen cave bonus for outdoor/urban maps -----------
-     * A map with a worldspawn "sky" key is an outdoor or urban layout —
+     * A map with a worldspawn "sky" key is an outdoor or urban layout --
      * it will never be a true underground cave regardless of what the local
      * geometry looks like.  If the probe fires inside a basement or narrow
      * stairwell the caveBonus would otherwise trigger stone-tunnel reverb,
@@ -5405,7 +5405,7 @@ static void S_AL_UpdateDynamicReverb( void )
     targetDecay -= openBoxFrac * 0.30f;
     if (targetDecay < 0.1f) targetDecay = 0.1f;
 
-    /* Late reverb tail: max 0.53 — clearly audible in enclosed spaces. */
+    /* Late reverb tail: max 0.53 -- clearly audible in enclosed spaces. */
     targetLate = 0.08f + sizeFactor * 0.45f;
     targetLate *= (1.f - openFrac * 0.85f);
     targetLate += caveBonus * 0.12f;
@@ -5414,7 +5414,7 @@ static void S_AL_UpdateDynamicReverb( void )
 
     /* Early reflections: corridor-boosted, urban semi-open boost, open-box boost.
      *
-     * Semi-open urban boost (0.20–0.55 openFrac, non-corridor): courtyards,
+     * Semi-open urban boost (0.20-0.55 openFrac, non-corridor): courtyards,
      * plazas, short hallways with doorways and walled alleys all reflect sound
      * off surrounding faces without forming a single dominant corridor axis.
      * A parabolic lift over that range gives them a characteristic early-
@@ -5424,7 +5424,7 @@ static void S_AL_UpdateDynamicReverb( void )
      * even though the absence of a ceiling means no long late-reverb tail. */
     targetRefl = 0.05f + corrFactor * 0.35f;
     if (openFrac > 0.20f && openFrac < 0.55f && corrFactor < 0.30f) {
-        float x = (openFrac - 0.20f) / 0.35f;          /* 0→1 over 0.20→0.55 */
+        float x = (openFrac - 0.20f) / 0.35f;          /* 0->1 over 0.20->0.55 */
         targetRefl += 4.f * x * (1.f - x) * 0.20f;    /* parabola, peak 0.20 */
     }
     targetRefl += openBoxFrac * 0.18f;
@@ -5432,7 +5432,7 @@ static void S_AL_UpdateDynamicReverb( void )
     if (targetRefl < 0.f) targetRefl = 0.f;
     if (targetRefl > 1.f) targetRefl = 1.f;
 
-    /* Slot gain: scales with enclosure; outdoor → near-dry.
+    /* Slot gain: scales with enclosure; outdoor -> near-dry.
      * Open-box gets a small bonus: wall reflections add wetness even without
      * a ceiling to trap the tail. */
     targetSlot = baseGain * (1.f - openFrac * 0.70f);
@@ -5441,10 +5441,10 @@ static void S_AL_UpdateDynamicReverb( void )
     if (targetSlot > 1.f) targetSlot = 1.f;
 
     /* Decay HF ratio: characterises surface hardness / material absorption.
-     *   Outdoor / forest  — ~0.55: air and foliage absorb HF quickly.
-     *   Concrete indoor   — ~0.83: default plaster/concrete.
-     *   Corridor          — ~1.05: flat parallel walls sustain HF (flutter).
-     *   Stone cave        — ~1.25: hard reflective surfaces; HF persists. */
+     *   Outdoor / forest  -- ~0.55: air and foliage absorb HF quickly.
+     *   Concrete indoor   -- ~0.83: default plaster/concrete.
+     *   Corridor          -- ~1.05: flat parallel walls sustain HF (flutter).
+     *   Stone cave        -- ~1.25: hard reflective surfaces; HF persists. */
     targetHFRatio = 0.55f + (1.f - openFrac) * 0.55f
                    + caveBonus  * 0.45f
                    + corrFactor * 0.20f;
@@ -5457,9 +5457,9 @@ static void S_AL_UpdateDynamicReverb( void )
     if (targetDensity > 1.0f) targetDensity = 1.0f;
 
     /* Diffusion: wall irregularity.
-     * Corridors are less diffuse — parallel flat walls create flutter echo,
+     * Corridors are less diffuse -- parallel flat walls create flutter echo,
      * which is itself an audible cue that the player is in a tight passage.
-     * Caves are highly diffuse — irregular rock surfaces scatter reflections.
+     * Caves are highly diffuse -- irregular rock surfaces scatter reflections.
      * Outdoors and open-box: low (few surfaces to scatter off). */
     targetDiffusion = 0.20f + (1.f - openFrac) * 0.55f
                      + caveBonus  * 0.25f
@@ -5501,7 +5501,7 @@ static void S_AL_UpdateDynamicReverb( void )
         curGainLF    = targetGainLF;
     } else {
         /* Base pole from s_alEnvSmoothPole (default 0.92).
-         * Reduced toward 0.85 when the player is moving — faster probe-to-probe
+         * Reduced toward 0.85 when the player is moving -- faster probe-to-probe
          * response during environment transitions.  At full walking speed the
          * half-transition time drops from ~3.5 s to ~2.2 s. */
         float basePole = s_alEnvSmoothPole ? s_alEnvSmoothPole->value : 0.92f;
@@ -5530,7 +5530,7 @@ static void S_AL_UpdateDynamicReverb( void )
      * 3 short rays in a narrow forward cone in the aim direction.  If any ray
      * hits solid geometry within 400 units, boost the smoothed cur* values
      * directly so the effect is immediate and independent of what environment
-     * the classifier is currently reporting — a weapon fired at a wall always
+     * the classifier is currently reporting -- a weapon fired at a wall always
      * produces a sharp early reflection regardless of whether the probe says
      * CORRIDOR, TRANSITION, or OUTDOOR.  The IIR smoother then naturally
      * decays the boost back toward the environment target over the next cycles. */
@@ -5550,7 +5550,7 @@ static void S_AL_UpdateDynamicReverb( void )
         int     fi;
         /* Build a rough right-vector from the forward direction */
         float fwdX = s_al_fire_dir[0], fwdY = s_al_fire_dir[1];
-        float rgtX = -fwdY, rgtY = fwdX; /* 90° CCW in XY plane */
+        float rgtX = -fwdY, rgtY = fwdX; /* 90deg CCW in XY plane */
         if (maxBoost < 0.f) maxBoost = 0.f;
         if (maxBoost > 0.5f) maxBoost = 0.5f;
 
@@ -5571,15 +5571,15 @@ static void S_AL_UpdateDynamicReverb( void )
         }
 
         if (bestHit < 1.0f) {
-            /* Closer hit → stronger reflection boost.  Applied directly to the
+            /* Closer hit -> stronger reflection boost.  Applied directly to the
              * smoothed output values so the spike is consistent across all
-             * environment types — classifier confusion cannot suppress it. */
+             * environment types -- classifier confusion cannot suppress it. */
             float proximity = 1.0f - bestHit;
             float boost     = maxBoost * proximity;
             curRefl += boost;
             if (curRefl > 1.f) curRefl = 1.f;
-            /* Short decay bump — muzzle blast echo decays fast.
-             * 3.0 s is the absolute ceiling for fire-boosted decay — it exceeds
+            /* Short decay bump -- muzzle blast echo decays fast.
+             * 3.0 s is the absolute ceiling for fire-boosted decay -- it exceeds
              * the typical environment-driven maximum (~2.5 s for large caves) to
              * ensure a perceptible spike even on top of an already-long tail. */
             curDecay += boost * 0.3f;
@@ -5642,13 +5642,13 @@ static void S_AL_UpdateDynamicReverb( void )
     /* --- Debug output ---------------------------------------------------- */
     if (s_alDebugReverb && s_alDebugReverb->integer >= 1) {
         /* Classify into a human-readable environment label.
-         * OPEN_BOX  — walls all around, open sky (rooftop / open-top courtyard)
-         * SEMI_OPEN — clearly transitional, leaning outdoor
-         * CAVE      — large space with solid overhead (tunnel / mine)
-         * CORRIDOR  — single tight axis, closed (pure passage or alley)
-         * HALLWAY   — corridor-like but with doorways / openings on sides
-         * LARGE_HALL — big enclosed space
-         * MEDIUM_ROOM / SMALL_ROOM — standard indoor fallbacks */
+         * OPEN_BOX  -- walls all around, open sky (rooftop / open-top courtyard)
+         * SEMI_OPEN -- clearly transitional, leaning outdoor
+         * CAVE      -- large space with solid overhead (tunnel / mine)
+         * CORRIDOR  -- single tight axis, closed (pure passage or alley)
+         * HALLWAY   -- corridor-like but with doorways / openings on sides
+         * LARGE_HALL -- big enclosed space
+         * MEDIUM_ROOM / SMALL_ROOM -- standard indoor fallbacks */
         const char *envLabel;
         if      (openFrac    > 0.60f)                       envLabel = "OUTDOOR";
         else if (openBoxFrac > 0.35f)                       envLabel = "OPEN_BOX";
@@ -5687,7 +5687,7 @@ static void S_AL_UpdateDynamicReverb( void )
     }
 }
 
-/* S_AL_UpdateStaticFireBoost — fire-impact reverb enhancement when
+/* S_AL_UpdateStaticFireBoost -- fire-impact reverb enhancement when
  * s_alDynamicReverb is OFF.  In static reverb mode the environment probe
  * never runs, so the fire-boost logic inside S_AL_UpdateDynamicReverb is
  * never reached.  This lightweight function provides the same muzzle-report
@@ -5739,7 +5739,7 @@ static void S_AL_UpdateStaticFireBoost( void )
 
     boost = 0.f;
 
-    /* Own-fire: 3-ray muzzle cone — only trigger once per fire event */
+    /* Own-fire: 3-ray muzzle cone -- only trigger once per fire event */
     if ((s_al_loopFrame - s_al_fire_frame) <= S_AL_ENV_RATE * 2
             && s_al_fire_frame != lastBoostFire) {
         float bestHit  = 1.0f;
@@ -5807,7 +5807,7 @@ static void S_AL_UpdateStaticFireBoost( void )
 /* Lightweight dynamic-reverb state reset, triggered by the s_alReset console
  * command.  Invalidates the history buffer, movement cache, velocity tracking,
  * and forces a "snap" on the next probe cycle so all s_alEnv* cvar changes
- * take effect immediately — no map reload or snd_restart needed. */
+ * take effect immediately -- no map reload or snd_restart needed. */
 static void S_AL_ReverbReset_f( void )
 {
     if (!s_al_started) {
@@ -5815,7 +5815,7 @@ static void S_AL_ReverbReset_f( void )
         return;
     }
     s_al_reverbReset = qtrue;
-    Com_Printf("S_AL: reverb state reset — will snap on next probe cycle.\n");
+    Com_Printf("S_AL: reverb state reset -- will snap on next probe cycle.\n");
 }
 
 static void S_AL_Update( int msec )
@@ -5841,10 +5841,10 @@ static void S_AL_Update( int msec )
     /* -----------------------------------------------------------------------
      * Grenade-blast concussion effect.
      * Two components that work together:
-     *   1. masterGain duck (s_alGrenadeBloomDuck, optional, very mild) —
+     *   1. masterGain duck (s_alGrenadeBloomDuck, optional, very mild) --
      *      kept as-is for the physical "pressure" jolt feel.
      *   2. Per-source HF lowpass (s_alGrenadeBloomHFFloor, always active
-     *      when s_alGrenadeBloom 1) — the dominant cue that transforms
+     *      when s_alGrenadeBloom 1) -- the dominant cue that transforms
      *      "volume went down" into "something just exploded near me".
      * ----------------------------------------------------------------------- */
     if (!s_al_muted && s_alGrenadeBloom && s_alGrenadeBloom->integer
@@ -5858,7 +5858,7 @@ static void S_AL_Update( int msec )
             float t      = (float)remain / (float)bMsGD;
             if (t > 1.f) t = 1.f;
 
-            /* HF filter: t=1 at trigger → deep cut; t=0 at expiry → flat */
+            /* HF filter: t=1 at trigger -> deep cut; t=0 at expiry -> flat */
             {
                 float hfFloor = s_alGrenadeBloomHFFloor
                                 ? s_alGrenadeBloomHFFloor->value : 0.05f;
@@ -5881,7 +5881,7 @@ static void S_AL_Update( int msec )
     /* -----------------------------------------------------------------------
      * Suppression: incoming-fire / head-hit hearing disruption.
      * masterGain duck is preserved as the "shock" component.
-     * The per-source HF filter (s_al_suppressHF) is now the primary cue —
+     * The per-source HF filter (s_al_suppressHF) is now the primary cue --
      * it replaces the "general duck" feel with convincing muffled hearing.
      * ----------------------------------------------------------------------- */
 
@@ -5910,7 +5910,7 @@ static void S_AL_Update( int msec )
             if (t > 1.f) t = 1.f;
         }
 
-        /* Volume duck (secondary — kept for the physical "jolt" sensation) */
+        /* Volume duck (secondary -- kept for the physical "jolt" sensation) */
         if (!s_al_muted) {
             float volFloor = s_alSuppressionFloor
                              ? s_alSuppressionFloor->value : 0.45f;
@@ -5919,7 +5919,7 @@ static void S_AL_Update( int msec )
             masterGain *= (volFloor + (1.0f - volFloor) * (1.0f - t));
         }
 
-        /* HF filter (primary — creates the muffled/disrupted hearing feel) */
+        /* HF filter (primary -- creates the muffled/disrupted hearing feel) */
         {
             float hfFloor = s_al_suppressHFPeak; /* set by the trigger */
             if (hfFloor < 0.0f) hfFloor = 0.0f;
@@ -5930,7 +5930,7 @@ static void S_AL_Update( int msec )
 
     /* -----------------------------------------------------------------------
      * Health-based HF fade (opt-in, s_alHealthFade 1).
-     * Below s_alHealthFadeThreshold HP the world gradually grows muffled —
+     * Below s_alHealthFadeThreshold HP the world gradually grows muffled --
      * a subtle "fading away" effect that scales linearly with how close the
      * player is to death.  Never affects health above the threshold so it
      * has zero impact during normal gameplay.
@@ -5967,7 +5967,7 @@ static void S_AL_Update( int msec )
         static qboolean lastInwater = qfalse;
         static float    lastReverbGain = -1.0f;
 
-        /* s_alReverbGain can be changed at any time — push to AL slot.
+        /* s_alReverbGain can be changed at any time -- push to AL slot.
          * Skip when dynamic reverb is active; it manages the slot gain. */
         if (s_alReverbGain && !(s_alDynamicReverb && s_alDynamicReverb->integer)) {
             float rg = s_alReverbGain->value;
@@ -6008,7 +6008,7 @@ static void S_AL_Update( int msec )
 
         /* Grenade-concussion EFX bloom: scan snapshot entities once per frame.
          *
-         * Design goal — competitive-safe:
+         * Design goal -- competitive-safe:
          *   The effect boosts the reverb slot gain briefly (making the room sound
          *   momentarily "bigger/boomer") then decays.  It does NOT reduce listener
          *   gain, so weapon fire, footsteps and callouts remain at full clarity.
@@ -6019,8 +6019,8 @@ static void S_AL_Update( int msec )
          *   carrying an explosion event (EV_MISSILE_HIT or EV_MISSILE_MISS*) within
          *   s_alGrenadeBloomRadius units of the listener.  Team attribution uses the
          *   same configstring path as the near-miss suppression: the entity's
-         *   clientNum maps to CS_PLAYERS + clientNum → "t" field.  Only enemy
-         *   grenades trigger the bloom — teammate grenades are silently ignored. */
+         *   clientNum maps to CS_PLAYERS + clientNum -> "t" field.  Only enemy
+         *   grenades trigger the bloom -- teammate grenades are silently ignored. */
         if (s_alGrenadeBloom && s_alGrenadeBloom->integer
                 && s_al_efx.reverbSlot
                 && s_alReverb && s_alReverb->integer) {
@@ -6063,13 +6063,13 @@ static void S_AL_Update( int msec )
                     const char *csStr = cl.gameState.stringData
                         + cl.gameState.stringOffsets[CS_PLAYERS + es->clientNum];
                     int throwerTeam = atoi(Info_ValueForKey(csStr, "t"));
-                    if (throwerTeam == ourTeam) continue;   /* teammate — skip */
+                    if (throwerTeam == ourTeam) continue;   /* teammate -- skip */
                 }
 
                 /* Trigger bloom: record current slot gain as the base to spike from */
                 if (s_al_bloomExpiry == 0) {
                     /* Read current slot gain so we spike ABOVE it, not to an
-                     * absolute value — prevents fighting with dynamic reverb. */
+                     * absolute value -- prevents fighting with dynamic reverb. */
                     float curGain = s_alReverbGain ? s_alReverbGain->value : 0.35f;
                     s_al_bloomPeak   = curGain + bGain;
                     if (s_al_bloomPeak > 1.0f) s_al_bloomPeak = 1.0f;
@@ -6097,7 +6097,7 @@ static void S_AL_Update( int msec )
                     /* Reuse bMs already computed above for the trigger check */
                     float t = (bMs > 0) ? (float)remain / (float)bMs : 0.f;
                     if (t > 1.f) t = 1.f;
-                    /* t=1 at trigger → peak gain; t=0 at expiry → base gain */
+                    /* t=1 at trigger -> peak gain; t=0 at expiry -> base gain */
                     slotGain = baseGain + (s_al_bloomPeak - baseGain) * t;
                 }
                 qalAuxiliaryEffectSlotf(s_al_efx.reverbSlot,
@@ -6134,7 +6134,7 @@ static void S_AL_Update( int msec )
         /* Echo is audible only in enclosed spaces (low openFrac).
          * In open/outdoor environments the slot gain is held near-zero.
          * We don't have openFrac directly here, so approximate from the
-         * current reverb decay: longer decay → more enclosed → more echo. */
+         * current reverb decay: longer decay -> more enclosed -> more echo. */
         if (s_alEcho && s_alEcho->integer && s_al_efx.echoSlot) {
             static float lastEchoGain = -1.f;
             float echoGainTarget = 0.f;
@@ -6152,7 +6152,7 @@ static void S_AL_Update( int msec )
                                                AL_EFFECTSLOT_GAIN, &slotGain);
                     echoGainTarget = echoGainMax * slotGain / reverbGainRef;
                 } else if (reverbGainRef > 0.001f) {
-                    /* Fallback: no getter available — use a modest static fraction */
+                    /* Fallback: no getter available -- use a modest static fraction */
                     echoGainTarget = echoGainMax * 0.3f;
                 }
                 if (echoGainTarget > echoGainMax) echoGainTarget = echoGainMax;
@@ -6215,7 +6215,7 @@ static void S_AL_Update( int msec )
                 /* Recompute the normalization filter gain so it tracks the
                  * updated band gains and slot gain.  Per-source direct filters
                  * and EQ send filters are updated by the per-frame occlusion
-                 * loop — only the global filter object gain changes here. */
+                 * loop -- only the global filter object gain changes here. */
                 if (s_al_efx.eqNormFilter) {
                     s_al_efx.eqCompGain = 1.0f
                         / (1.0f + MAX(MAX(curLow, curMid), curHigh) * curGain);
@@ -6235,7 +6235,7 @@ static void S_AL_Update( int msec )
      * gains respond to vol cvar changes even when s_alEFX=0.  When EFX is
      * off, Phase 3 of the occlusion block already writes gain every frame for
      * non-local sources, but local sources (isLocal=true) skip Phase 3 and
-     * only get their gain set once in SrcSetup — without this block, changing
+     * only get their gain set once in SrcSetup -- without this block, changing
      * s_alVolSelf at runtime would have no effect on local sources.
      * NOTE: loop sources in the middle of a fade-in are NOT touched here;
      * S_AL_UpdateLoops always writes their gain last. */
@@ -6268,7 +6268,7 @@ static void S_AL_Update( int msec )
             for (j = 0; j < s_al_numSrc; j++) {
                 float catGain;
                 if (!s_al_src[j].isPlaying) continue;
-                /* Skip ALL loop sources — S_AL_UpdateLoops Step 5 runs after
+                /* Skip ALL loop sources -- S_AL_UpdateLoops Step 5 runs after
                  * this block and is the authoritative gain writer for every
                  * active loop source (both mid-fade and settled).  Touching
                  * them here would overwrite a mid-fade ramp with the full
@@ -6297,9 +6297,9 @@ static void S_AL_Update( int msec )
         }
     }
 
-    /* Reap stopped sources — mark them free immediately so the next
+    /* Reap stopped sources -- mark them free immediately so the next
      * S_AL_GetFreeSource pass 1 finds them without growing or stealing.
-     * Also runs occlusion for non-global BSP target_speaker loop sources —
+     * Also runs occlusion for non-global BSP target_speaker loop sources --
      * those are always-on AL_LOOPING sources at fixed world positions that
      * should realistically be muffled through walls, just like one-shot
      * world sounds.  Generic (non-BSP) loop sources are still skipped. */
@@ -6337,16 +6337,16 @@ static void S_AL_Update( int msec )
             s_al_src[i].isPlaying = qfalse;
             continue;
         }
-        /* Occlusion: three-phase update for smooth wall↔clear transitions.
+        /* Occlusion: three-phase update for smooth wall<->clear transitions.
          *
          * Phase 1 (trace, on interval): measure occlusion and set target.
-         *   Full-vol zone / weapon-muzzle zone / occlusion off → snap target=1.0.
+         *   Full-vol zone / weapon-muzzle zone / occlusion off -> snap target=1.0.
          *   Otherwise: run CM_BoxTrace every interval frames (1/4/8 by distance),
          *   update occlusionTarget and acousticOffset (partial gap redirect).
          *
-         * Phase 2 (smooth, every frame): IIR blend occlusionGain → occlusionTarget.
-         *   Opening (gain rising): step=0.30 — fast snap on line-of-sight regain.
-         *   Closing (gain falling): step=0.18 — gradual muffle, no abrupt pop.
+         * Phase 2 (smooth, every frame): IIR blend occlusionGain -> occlusionTarget.
+         *   Opening (gain rising): step=0.30 -- fast snap on line-of-sight regain.
+         *   Closing (gain falling): step=0.18 -- gradual muffle, no abrupt pop.
          *
          * Phase 3 (apply, every frame): push position + filter using smoothed values.
          *   Position = origin + acousticOffset (tracks the entity; gap hint is
@@ -6357,8 +6357,8 @@ static void S_AL_Update( int msec )
          *
          * Trace intervals (same thresholds as before):
          *   < 80 u or CHAN_WEAPON < weapDist : interval=0 (full-vol / muzzle zone)
-         *   80 – 300 u : every frame
-         *   300 – 600 u: every 4 frames
+         *   80 - 300 u : every frame
+         *   300 - 600 u: every 4 frames
          *   > 600 u    : every 8 frames
          */
         if (!s_al_src[i].isLocal) {
@@ -6383,13 +6383,13 @@ static void S_AL_Update( int msec )
                  * attenuation from nearby slope/clip geometry. */
                 interval = 0;
             } else if (distSq < (300.f * 300.f)) {
-                /* Close range — trace every frame for nearby player accuracy. */
+                /* Close range -- trace every frame for nearby player accuracy. */
                 interval = 1;
             } else if (distSq < (600.f * 600.f)) {
-                /* Medium range — trace every 4 frames. */
+                /* Medium range -- trace every 4 frames. */
                 interval = 4;
             } else {
-                /* Far range — distance model dominates; trace every 8 frames. */
+                /* Far range -- distance model dominates; trace every 8 frames. */
                 interval = 8;
             }
 
@@ -6407,7 +6407,7 @@ static void S_AL_Update( int msec )
                                     s_al_src[i].origin, acousticPos);
                 /* Scale position blend by how much the path is blocked.
                  * s_alOccPosBlend=0.25: max 25% redirect when fully blocked,
-                 * near-zero when nearly clear — preserves directional accuracy. */
+                 * near-zero when nearly clear -- preserves directional accuracy. */
                 float  pBlend = (s_alOccPosBlend ? s_alOccPosBlend->value : 0.25f)
                                 * (1.0f - occ);
                 s_al_src[i].occlusionTick     = s_al_loopFrame;
@@ -6423,7 +6423,7 @@ static void S_AL_Update( int msec )
                  * S_AL_UpdateLoops writes AL_POSITION each frame from the
                  * entity origin; applying an acousticOffset here would race
                  * with that write and produce no net benefit.  The filter
-                 * (gain + HF) is still applied — that is the primary cue. */
+                 * (gain + HF) is still applied -- that is the primary cue. */
                 if (!s_al_src[i].loopSound) {
                     float off0 = pBlend * (acousticPos[0] - s_al_src[i].origin[0]);
                     float off1 = pBlend * (acousticPos[1] - s_al_src[i].origin[1]);
@@ -6453,7 +6453,7 @@ static void S_AL_Update( int msec )
                 float occ       = s_al_src[i].occlusionGain;
                 float gainFloor = s_alOccGainFloor ? s_alOccGainFloor->value : 0.55f;
                 float hfFloor   = s_alOccHFFloor   ? s_alOccHFFloor->value   : 0.50f;
-                /* Linear floor→1.0 curves.  gainFloor controls how much overall
+                /* Linear floor->1.0 curves.  gainFloor controls how much overall
                  * volume remains when fully blocked; hfFloor controls how much
                  * high-frequency content survives (higher = less "muffled").
                  * Old hardcoded: GAIN=0.25+0.75*occ, GAINHF=occ*occ.
@@ -6482,7 +6482,7 @@ static void S_AL_Update( int msec )
                         float dy   = pos[1] - s_al_listener_origin[1];
                         float dz   = pos[2] - s_al_listener_origin[2];
                         float dSq  = dx*dx + dy*dy + dz*dz;
-                        /* Skip sources within 1 unit of the listener — at that
+                        /* Skip sources within 1 unit of the listener -- at that
                          * distance the direction vector is numerically unreliable
                          * (almost always own-entity sounds that shouldn't be here). */
                         if (dSq > 1.f) {
@@ -6518,7 +6518,7 @@ static void S_AL_Update( int msec )
                 /* BSP speaker loop sources: skip the AL_POSITION write.
                  * S_AL_UpdateLoops writes the authoritative world position
                  * each frame (it runs after this loop); overwriting it here
-                 * with the gap-redirected pos would race and gain nothing —
+                 * with the gap-redirected pos would race and gain nothing --
                  * acousticOffset is always kept zero for loop sources anyway. */
                 if (!s_al_src[i].loopSound)
                     qalSource3f(s_al_src[i].source, AL_POSITION,
@@ -6553,7 +6553,7 @@ static void S_AL_Update( int msec )
                     }
                 } else if (!s_al_src[i].loopSound) {
                     /* No EFX: approximate occlusion by direct gain reduction.
-                     * Do NOT multiply by masterGain here — the listener AL_GAIN
+                     * Do NOT multiply by masterGain here -- the listener AL_GAIN
                      * already applies s_volume; including it again would double it.
                      * Loop sources (including BSP speaker loops) are skipped: the
                      * occlusion factor is folded into the gain by S_AL_UpdateLoops
@@ -6578,10 +6578,10 @@ static void S_AL_Update( int msec )
         } else if (s_al_efx.available) {
             /* Local (own-player) source: no occlusion, but apply the
              * hearing-disruption HF filter when active.  SRC_CAT_UI sources
-             * (tinnitus ring, kill/hit markers) are intentionally excluded —
+             * (tinnitus ring, kill/hit markers) are intentionally excluded --
              * they are "mental" feedback that should stay crisp.
              * During directional suppression, own-player sounds get the rear
-             * fraction of the effect — they have no world direction but the
+             * fraction of the effect -- they have no world direction but the
              * concussion still partially affects the shooter's own hearing. */
             if (s_al_src[i].category != SRC_CAT_UI) {
                 float localSuppressHF = s_al_suppressHF;
@@ -6649,14 +6649,14 @@ static void S_AL_BeginRegistration( void )
     S_AL_FlushAllJobs();
 
     /* Slot 0 must be reserved as the default/failure placeholder on every
-     * registration cycle — cold start, map→menu, map→map.  The QVM checks
+     * registration cycle -- cold start, map->menu, map->map.  The QVM checks
      * (handle > 0) to detect a successful S_RegisterSound; if slot 0 is not
      * pre-occupied the first real sound lands there, the QVM discards it as
      * a failure, and the menu music / intro never starts, causing a hard lock.
      *
      * When s_al_numSfx == 0 (cold start) this registers the sound fresh.
      * When s_al_numSfx > 0 (returning from a map) S_AL_FindSfx finds the
-     * existing record immediately and returns handle 0 — no reload, no cost. */
+     * existing record immediately and returns handle 0 -- no reload, no cost. */
     S_AL_RegisterSound( "sound/feedback/hit.wav", qfalse );
 
     Com_DPrintf("S_AL: BeginRegistration -- slot 0 reserved\n");
@@ -6665,7 +6665,7 @@ static void S_AL_BeginRegistration( void )
      * sounds, so every subsequent RegisterSound call picks up the override
      * values immediately.  Also applies to sfx records still in memory from
      * a previous map session (FindSfx returns them early, bypassing the
-     * CalcNormGain path — we fix those normGain values here instead). */
+     * CalcNormGain path -- we fix those normGain values here instead). */
     s_al_normCacheCount   = 0;
     s_al_normCacheWritten = qfalse;
     S_AL_MapBaseName(mapbase, sizeof(mapbase));
@@ -6742,7 +6742,7 @@ static void S_AL_PrintDevices( void )
     Com_Printf("         (empty string restores the system default)\n");
 }
 
-/* Console command: /s_devices — prints the device list without any other
+/* Console command: /s_devices -- prints the device list without any other
  * sndinfo output, making it easy to find the right s_alDevice value. */
 static void S_AL_ListDevicesCmd( void )
 {
@@ -6776,14 +6776,14 @@ static void S_AL_SoundInfo( void )
     Com_Printf("\n");
 
     /* -----------------------------------------------------------------------
-     * Processing feature status — use this to isolate which feature is
+     * Processing feature status -- use this to isolate which feature is
      * causing audio issues.  Each line shows whether the feature is truly
      * active or bypassed at this moment.  Restart (vid_restart) is required
      * after changing any LATCH cvar before re-testing.
      * ----------------------------------------------------------------------- */
     Com_Printf("  Processing features (ON = active, OFF = bypassed):\n");
 
-    /* HRTF — reports actual hardware/driver state, not just the cvar */
+    /* HRTF -- reports actual hardware/driver state, not just the cvar */
     if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
         qboolean hrtfOn = (hrtfStatus == ALC_HRTF_ENABLED_SOFT);
         Com_Printf("    HRTF              %s  (s_alHRTF %d, LATCH)%s\n",
@@ -6797,14 +6797,14 @@ static void S_AL_SoundInfo( void )
                    "  (ALC_SOFT_HRTF not available)\n");
     }
 
-    /* EFX — reports whether filter objects / reverb slots were created */
-    Com_Printf("    EFX subsystem     %s  (s_alEFX %d, LATCH  — %s reverb)\n",
+    /* EFX -- reports whether filter objects / reverb slots were created */
+    Com_Printf("    EFX subsystem     %s  (s_alEFX %d, LATCH  -- %s reverb)\n",
         s_al_efx.available ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
                            : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
         s_alEFX ? s_alEFX->integer : 1,
         s_al_efx.hasEAXReverb ? "EAX" : "standard");
 
-    /* Reverb — only meaningful when EFX is on */
+    /* Reverb -- only meaningful when EFX is on */
     Com_Printf("    EFX reverb        %s  (s_alReverb %d)\n",
         (s_al_efx.available && s_alReverb && s_alReverb->integer)
             ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
@@ -6819,14 +6819,14 @@ static void S_AL_SoundInfo( void )
             : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
         s_alDynamicReverb ? s_alDynamicReverb->integer : 0);
 
-    /* Occlusion — traces + lowpass filter or gain reduction per source */
+    /* Occlusion -- traces + lowpass filter or gain reduction per source */
     Com_Printf("    Occlusion         %s  (s_alOcclusion %d)\n",
         (s_alOcclusion && s_alOcclusion->integer)
             ? S_COLOR_YELLOW "ON " S_COLOR_WHITE
             : S_COLOR_GREEN "OFF" S_COLOR_WHITE,
         s_alOcclusion ? s_alOcclusion->integer : 0);
 
-    /* AL_DIRECT_CHANNELS_SOFT — bypasses HRTF on local sources (active only when s_alHRTF 1) */
+    /* AL_DIRECT_CHANNELS_SOFT -- bypasses HRTF on local sources (active only when s_alHRTF 1) */
     if (!s_al_directChannelsExt) {
         Com_Printf("    DirectChannels    " S_COLOR_YELLOW "OFF" S_COLOR_WHITE
                    "  (AL_SOFT_direct_channels not available)\n");
@@ -6836,7 +6836,7 @@ static void S_AL_SoundInfo( void )
             if (s_alDirectChannels && !s_alDirectChannels->integer)
                 reason = "  (disabled by s_alDirectChannels 0)";
             else if (!s_alHRTF || !s_alHRTF->integer)
-                reason = "  (inactive — s_alHRTF 0)";
+                reason = "  (inactive -- s_alHRTF 0)";
         }
         Com_Printf("    DirectChannels    %s  (s_alDirectChannels %d, s_alHRTF %d, LATCH)%s\n",
             s_al_directChannels ? S_COLOR_GREEN "ON " S_COLOR_WHITE
@@ -6857,14 +6857,14 @@ static void S_AL_SoundInfo( void )
             !(s_alOcclusion && s_alOcclusion->integer);
         if (passthrough) {
             Com_Printf("  Passthrough check: %s\n",
-                S_COLOR_GREEN "PASS — HRTF off, EFX off, occlusion off.  "
-                "Signal path is: PCM → distance model → stereo pan → output." S_COLOR_WHITE);
+                S_COLOR_GREEN "PASS -- HRTF off, EFX off, occlusion off.  "
+                "Signal path is: PCM -> distance model -> stereo pan -> output." S_COLOR_WHITE);
             if (s_al_directChannels)
                 Com_Printf("    (DirectChannels ON: own-player sources skip distance model too"
-                           " — PCM → stereo output directly.)\n");
+                           " -- PCM -> stereo output directly.)\n");
         } else {
             Com_Printf("  Passthrough check: %s\n",
-                S_COLOR_YELLOW "PARTIAL — one or more features still active (see above)" S_COLOR_WHITE);
+                S_COLOR_YELLOW "PARTIAL -- one or more features still active (see above)" S_COLOR_WHITE);
         }
     }
 
@@ -6899,7 +6899,7 @@ static void S_AL_SoundInfo( void )
             Com_Printf("  Ambisonics: max order %d supported (not used)\n", ambiOrder);
     }
 
-    /* Device list — shows valid values for s_alDevice */
+    /* Device list -- shows valid values for s_alDevice */
     S_AL_PrintDevices();
 }
 
@@ -6917,7 +6917,7 @@ static void S_AL_SoundList( void )
 }
 
 /* =========================================================================
- * Section 11 — Initialisation entry point
+ * Section 11 -- Initialisation entry point
  * =========================================================================
  */
 
@@ -6941,10 +6941,10 @@ qboolean S_AL_Init( soundInterface_t *si )
 
     /* Register cvars */
     s_alDevice  = Cvar_Get("s_alDevice",  "",    CVAR_ARCHIVE_ND | CVAR_LATCH);
-    Cvar_SetDescription(s_alDevice, "OpenAL output device. Empty = system default. Type /s_devices for a numbered list of available devices. (LATCH — requires vid_restart to take effect)");
+    Cvar_SetDescription(s_alDevice, "OpenAL output device. Empty = system default. Type /s_devices for a numbered list of available devices. (LATCH -- requires vid_restart to take effect)");
     s_alHRTF    = Cvar_Get("s_alHRTF",   "0",   CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alHRTF, "0", "1", CV_INTEGER);
-    Cvar_SetDescription(s_alHRTF, "Enable HRTF (Head-Related Transfer Function) 3D audio via OpenAL Soft. Default 0 (off). Only enable when using headphones — on speakers HRTF smears weapon transients into a muffled pop via the centre-HRIR convolution. Requires vid_restart (LATCH).");
+    Cvar_SetDescription(s_alHRTF, "Enable HRTF (Head-Related Transfer Function) 3D audio via OpenAL Soft. Default 0 (off). Only enable when using headphones -- on speakers HRTF smears weapon transients into a muffled pop via the centre-HRIR convolution. Requires vid_restart (LATCH).");
     s_alEFX = Cvar_Get("s_alEFX", "1", CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alEFX, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alEFX, "Enable ALC_EXT_EFX (occlusion filters, reverb slots). "
@@ -6955,9 +6955,9 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alDirectChannels,
         "Enable AL_SOFT_direct_channels for own-player (local) sources when s_alHRTF 1. "
         "When 1 (default), own-weapon and footstep sounds are routed directly to the "
-        "stereo mix, bypassing the HRTF centre-HRIR convolution — preserving the "
+        "stereo mix, bypassing the HRTF centre-HRIR convolution -- preserving the "
         "transient punch of weapon sounds (e.g. de.wav) for headphone users. "
-        "Has no effect when s_alHRTF 0 (default — HRTF off). "
+        "Has no effect when s_alHRTF 0 (default -- HRTF off). "
         "Set to 0 to route local sources through the full HRTF pipeline. "
         "Requires vid_restart (LATCH).");
     /* s_alMaxDist: default matches the vanilla dma max-audible distance.
@@ -6965,7 +6965,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alMaxDist = Cvar_Get("s_alMaxDist", "1330", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alMaxDist, "1330", "4096", CV_FLOAT);
     Cvar_SetDescription(s_alMaxDist, "Maximum attenuation distance for OpenAL sound sources (game units). Matches vanilla dma range of 1330 at default.");
-    /* Reverb is ON by default — gives URT maps clear acoustic character. */
+    /* Reverb is ON by default -- gives URT maps clear acoustic character. */
     s_alReverb = Cvar_Get("s_alReverb", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alReverb, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alReverb, "Enable EFX environmental reverb (requires ALC_EXT_EFX). Default 1.");
@@ -6992,7 +6992,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alEchoGain = Cvar_Get("s_alEchoGain", "0.10", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alEchoGain, "0", "0.3", CV_FLOAT);
     Cvar_SetDescription(s_alEchoGain,
-        "Maximum wet gain for the echo aux slot [0–0.3]. "
+        "Maximum wet gain for the echo aux slot [0-0.3]. "
         "Only applies when s_alEcho 1. Actual gain is scaled by room enclosure. "
         "Default 0.10.");
     s_alFireImpactReverb = Cvar_Get("s_alFireImpactReverb", "1", CVAR_ARCHIVE_ND);
@@ -7000,13 +7000,13 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alFireImpactReverb,
         "Fire-direction impact reverb boost. When the local player fires a weapon, "
         "3 short rays are cast in the aim direction. A nearby wall within 400 units "
-        "transiently boosts early reflections and decay in the EFX reverb — simulating "
+        "transiently boosts early reflections and decay in the EFX reverb -- simulating "
         "the sharp acoustic echo of a muzzle blast off a hard surface. Requires "
         "s_alDynamicReverb 1. Default 1 (on).");
     s_alFireImpactMaxBoost = Cvar_Get("s_alFireImpactMaxBoost", "0.25", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alFireImpactMaxBoost, "0", "0.5", CV_FLOAT);
     Cvar_SetDescription(s_alFireImpactMaxBoost,
-        "Maximum reflections gain added by the fire-direction impact boost [0–0.5]. "
+        "Maximum reflections gain added by the fire-direction impact boost [0-0.5]. "
         "Only applies when s_alFireImpactReverb 1. Default 0.25.");
     s_alSuppression = Cvar_Get("s_alSuppression", "0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppression, "0", "1", CV_INTEGER);
@@ -7025,59 +7025,59 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Fallback suppression trigger: radius (game units) within which an enemy "
         "CHAN_WEAPON sound triggers the disruption effect. The primary trigger is "
         "the whiz-sound name match (s_alNearMissPattern), which fires reliably for "
-        "any bullet that actually passes close by. Default 180 ≈ one room width.");
+        "any bullet that actually passes close by. Default 180 ~ one room width.");
     s_alSuppressionFloor = Cvar_Get("s_alSuppressionFloor", "0.45", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionFloor, "0", "0.95", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionFloor,
-        "Minimum listener gain (volume) during suppression [0–0.95]. "
-        "Secondary to the HF filter — this provides the physical 'jolt' while "
+        "Minimum listener gain (volume) during suppression [0-0.95]. "
+        "Secondary to the HF filter -- this provides the physical 'jolt' while "
         "s_alSuppressionHFFloor provides the muffled-hearing character. "
-        "Default 0.45 (≈ −7 dB).");
+        "Default 0.45 (~ -7 dB).");
     s_alSuppressionMs = Cvar_Get("s_alSuppressionMs", "220", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionMs, "50", "800", CV_INTEGER);
     Cvar_SetDescription(s_alSuppressionMs,
         "Duration of the near-miss / incoming-fire hearing disruption in ms. "
         "Both the volume duck and the HF muffling recover linearly over this time. "
-        "Default 220 ms — snappy enough to not impede situational awareness.");
+        "Default 220 ms -- snappy enough to not impede situational awareness.");
     s_alSuppressionHFFloor = Cvar_Get("s_alSuppressionHFFloor", "0.08", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionHFFloor, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionHFFloor,
-        "Minimum AL_LOWPASS_GAINHF during near-miss / incoming-fire suppression [0–1]. "
-        "Primary cue: 0.08 ≈ −22 dB HF at peak — sounds in the fire direction go "
+        "Minimum AL_LOWPASS_GAINHF during near-miss / incoming-fire suppression [0-1]. "
+        "Primary cue: 0.08 ~ -22 dB HF at peak -- sounds in the fire direction go "
         "noticeably bassy/distorted. Applies only within the directional cone "
         "(s_alSuppressionConeAngle) plus a rear partial effect (s_alSuppressionRearGain). "
         "0 = fully muffled; 1 = flat. Default 0.08.");
     s_alSuppressionConeAngle = Cvar_Get("s_alSuppressionConeAngle", "120", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionConeAngle, "10", "360", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionConeAngle,
-        "Full cone angle (degrees) of the directional HF suppression effect [10–360]. "
+        "Full cone angle (degrees) of the directional HF suppression effect [10-360]. "
         "Sources within this cone around the incoming fire direction receive the full "
         "HF cut; sources outside the cone are unaffected (except the rear partial). "
-        "120 = ±60° half-angle — covers a generous forward wedge. "
+        "120 = +/-60deg half-angle -- covers a generous forward wedge. "
         "360 = omnidirectional (equivalent to old behaviour). Default 120.");
     s_alSuppressionRearGain = Cvar_Get("s_alSuppressionRearGain", "0.35", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionRearGain, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionRearGain,
         "Fraction of the HF suppression applied to sources directly behind the listener "
-        "(opposite the incoming fire) [0–1]. Creates a secondary disruption cue that "
+        "(opposite the incoming fire) [0-1]. Creates a secondary disruption cue that "
         "reinforces the fire direction without muffling side-facing sounds. "
         "0 = no rear effect (strict cone only). Default 0.35.");
     s_alSuppressionReverbBoost = Cvar_Get("s_alSuppressionReverbBoost", "0.18", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alSuppressionReverbBoost, "0", "0.5", CV_FLOAT);
     Cvar_SetDescription(s_alSuppressionReverbBoost,
-        "Reverb slot gain spike added when suppression triggers [0–0.5]. "
+        "Reverb slot gain spike added when suppression triggers [0-0.5]. "
         "Briefly boosts the wet reverb tail so the acoustic character of the "
         "environment 'splashes' with the concussion, then decays back over "
-        "s_alSuppressionMs. Stacks with dynamic reverb — actual peak is "
+        "s_alSuppressionMs. Stacks with dynamic reverb -- actual peak is "
         "current slot gain + this value, capped at 1.0. Default 0.18.");
     s_alNearMissPattern = Cvar_Get("s_alNearMissPattern", "whiz1,whiz2", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alNearMissPattern,
         "Comma-separated substrings matched case-insensitively against the sound "
         "file name to identify near-miss bullet whiz sounds. When a matching sound "
-        "plays, the hearing-disruption effect fires immediately — this is the precise "
+        "plays, the hearing-disruption effect fires immediately -- this is the precise "
         "trigger path (vs the radius fallback). URT uses sound/weapons/whiz1.wav and "
         "whiz2.wav. Default 'whiz1,whiz2'. Empty = disable name-based trigger.");
-    /* Head-hit triggers — standalone toggle, independent of s_alSuppression */
+    /* Head-hit triggers -- standalone toggle, independent of s_alSuppression */
     s_alHeadHit = Cvar_Get("s_alHeadHit", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alHeadHit, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alHeadHit,
@@ -7101,9 +7101,9 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alHelmetHFFloor = Cvar_Get("s_alHelmetHFFloor", "0.10", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alHelmetHFFloor, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alHelmetHFFloor,
-        "Minimum HF gain for the helmet-hit disruption [0–1]. "
-        "Deeper cut than incoming fire (0.10 vs 0.15) — you were actually hit. "
-        "Default 0.10 (≈ −20 dB HF at peak).");
+        "Minimum HF gain for the helmet-hit disruption [0-1]. "
+        "Deeper cut than incoming fire (0.10 vs 0.15) -- you were actually hit. "
+        "Default 0.10 (~ -20 dB HF at peak).");
     s_alBareHeadHitPattern = Cvar_Get("s_alBareHeadHitPattern", "headshot", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alBareHeadHitPattern,
         "Comma-separated sound-name substrings for bare-head (no helmet) hit detection. "
@@ -7114,33 +7114,33 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_CheckRange(s_alBareHeadHitMs, "50", "1500", CV_INTEGER);
     Cvar_SetDescription(s_alBareHeadHitMs,
         "Duration of hearing disruption after a bare-head hit (ms). "
-        "Longest disruption tier — in URT a bare headshot is usually fatal, "
+        "Longest disruption tier -- in URT a bare headshot is usually fatal, "
         "so 500 ms represents the last moments of awareness. Default 500.");
     s_alBareHeadHFFloor = Cvar_Get("s_alBareHeadHFFloor", "0.03", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alBareHeadHFFloor, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alBareHeadHFFloor,
-        "Minimum HF gain for the bare-head hit disruption [0–1]. "
-        "Most severe cut: 0.03 ≈ −30 dB HF, nearly bass-only at peak. "
+        "Minimum HF gain for the bare-head hit disruption [0-1]. "
+        "Most severe cut: 0.03 ~ -30 dB HF, nearly bass-only at peak. "
         "Default 0.03.");
     /* Tinnitus */
     s_alTinnitusFreq = Cvar_Get("s_alTinnitusFreq", "3500", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alTinnitusFreq, "200", "8000", CV_INTEGER);
     Cvar_SetDescription(s_alTinnitusFreq,
-        "Frequency of the synthesised tinnitus tone in Hz [200–8000]. "
-        "3500 Hz sits in the most sensitive region of human hearing — clearly "
+        "Frequency of the synthesised tinnitus tone in Hz [200-8000]. "
+        "3500 Hz sits in the most sensitive region of human hearing -- clearly "
         "audible without being ear-piercing. Change takes effect on next "
         "snd_restart or first play after change. Default 3500.");
     s_alTinnitusDuration = Cvar_Get("s_alTinnitusDuration", "700", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alTinnitusDuration, "50", "3000", CV_INTEGER);
     Cvar_SetDescription(s_alTinnitusDuration,
-        "Duration of the synthesised tinnitus ring in ms [50–3000]. "
+        "Duration of the synthesised tinnitus ring in ms [50-3000]. "
         "The tone has a 20 ms linear attack then a quadratic decay to silence. "
         "Change takes effect on next snd_restart or first play after change. "
         "Default 700 ms.");
     s_alTinnitusVol = Cvar_Get("s_alTinnitusVol", "0.45", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alTinnitusVol, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alTinnitusVol,
-        "Volume of the synthesised tinnitus ring [0–1]. Applied directly as "
+        "Volume of the synthesised tinnitus ring [0-1]. Applied directly as "
         "the OpenAL source AL_GAIN so it is independent of s_alVolUI and other "
         "category knobs. 0 = silent (disables tinnitus without changing other "
         "disruption effects). Default 0.45.");
@@ -7154,20 +7154,20 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_CheckRange(s_alHealthFade, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alHealthFade,
         "Health-based HF audio fade (opt-in). When enabled, the per-source "
-        "HF filter gradually reduces below s_alHealthFadeThreshold HP — "
+        "HF filter gradually reduces below s_alHealthFadeThreshold HP -- "
         "the world grows muffled as the player nears death. Zero effect at "
         "or above the threshold so normal gameplay is unaffected. Default 0.");
     s_alHealthFadeThreshold = Cvar_Get("s_alHealthFadeThreshold", "10", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alHealthFadeThreshold, "5", "100", CV_INTEGER);
     Cvar_SetDescription(s_alHealthFadeThreshold,
-        "HP level below which the health-based HF fade activates [5–100]. "
+        "HP level below which the health-based HF fade activates [5-100]. "
         "At exactly this HP the filter is flat; at 1 HP it reaches "
         "s_alHealthFadeFloor. Default 30.");
     s_alHealthFadeFloor = Cvar_Get("s_alHealthFadeFloor", "0.35", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alHealthFadeFloor, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alHealthFadeFloor,
-        "Minimum HF gain at 1 HP when health-fade is active [0–1]. "
-        "0.35 ≈ −9 dB HF at death's door — noticeably muffled but footsteps "
+        "Minimum HF gain at 1 HP when health-fade is active [0-1]. "
+        "0.35 ~ -9 dB HF at death's door -- noticeably muffled but footsteps "
         "and shots remain identifiable. Default 0.35.");
     s_alGrenadeBloom = Cvar_Get("s_alGrenadeBloom", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloom, "0", "1", CV_INTEGER);
@@ -7177,18 +7177,18 @@ qboolean S_AL_Init( soundInterface_t *si )
         "sound momentarily bigger/boomer; "
         "(2) per-source HF lowpass cut (s_alGrenadeBloomHFFloor) that turns "
         "'volume went down' into 'something just exploded 15 feet from me'. "
-        "Enemy grenades only — teammate grenades excluded via configstring check. "
+        "Enemy grenades only -- teammate grenades excluded via configstring check. "
         "Requires s_alReverb 1 for the reverb component. Default 0 (opt-in).");
     s_alGrenadeBloomRadius = Cvar_Get("s_alGrenadeBloomRadius", "400", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomRadius, "50", "1200", CV_FLOAT);
     Cvar_SetDescription(s_alGrenadeBloomRadius,
         "Blast radius (game units) within which a grenade explosion triggers the "
-        "bloom + HF effect. Default 400 ≈ medium room width.");
+        "bloom + HF effect. Default 400 ~ medium room width.");
     s_alGrenadeBloomGain = Cvar_Get("s_alGrenadeBloomGain", "0.12", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomGain, "0", "0.3", CV_FLOAT);
     Cvar_SetDescription(s_alGrenadeBloomGain,
-        "Peak reverb slot gain boost added by the grenade bloom [0–0.3]. "
-        "Stacks on top of the current slot gain — actual peak = base + this value. "
+        "Peak reverb slot gain boost added by the grenade bloom [0-0.3]. "
+        "Stacks on top of the current slot gain -- actual peak = base + this value. "
         "Default 0.12 (subtle but audible reverb surge).");
     s_alGrenadeBloomMs = Cvar_Get("s_alGrenadeBloomMs", "350", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomMs, "50", "1000", CV_INTEGER);
@@ -7199,8 +7199,8 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alGrenadeBloomHFFloor = Cvar_Get("s_alGrenadeBloomHFFloor", "0.05", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomHFFloor, "0", "1", CV_FLOAT);
     Cvar_SetDescription(s_alGrenadeBloomHFFloor,
-        "Minimum HF gain at the peak of a grenade-blast concussion [0–1]. "
-        "0.05 ≈ −26 dB HF — an explosion 15 feet away strips nearly all high "
+        "Minimum HF gain at the peak of a grenade-blast concussion [0-1]. "
+        "0.05 ~ -26 dB HF -- an explosion 15 feet away strips nearly all high "
         "frequencies momentarily. Applies per-source (own weapon, footsteps, "
         "enemy fire all go bassy). Recovers linearly over s_alGrenadeBloomMs. "
         "Default 0.05. Requires s_alGrenadeBloom 1.");
@@ -7209,21 +7209,21 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alGrenadeBloomDuck,
         "Add a mild listener-gain duck alongside the grenade reverb bloom. "
         "URT grenades are already loud enough that they produce natural perceptual "
-        "ducking — this is a very subtle optional supplement. Hard-floored at 0.5 "
+        "ducking -- this is a very subtle optional supplement. Hard-floored at 0.5 "
         "so gameplay-critical audio (footsteps, shots) is never silenced. "
         "Requires s_alGrenadeBloom 1. Default 0 (opt-in).");
     s_alGrenadeBloomDuckFloor = Cvar_Get("s_alGrenadeBloomDuckFloor", "0.82", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alGrenadeBloomDuckFloor, "0.5", "0.95", CV_FLOAT);
     Cvar_SetDescription(s_alGrenadeBloomDuckFloor,
-        "Minimum listener gain during the optional grenade duck [0.5–0.95]. "
-        "0.82 ≈ −1.7 dB — barely perceptible but adds physical impact. "
+        "Minimum listener gain during the optional grenade duck [0.5-0.95]. "
+        "0.82 ~ -1.7 dB -- barely perceptible but adds physical impact. "
         "Hard minimum 0.5 for competitive safety. Default 0.82.");
     s_alSuppressedSoundPattern = Cvar_Get("s_alSuppressedSoundPattern",
                                           "silenced,-sil,_sil,_sd_,_sd.,suppressed,suppressor",
                                           CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alSuppressedSoundPattern,
         "Comma-separated substrings matched (case-insensitive) against the sound "
-        "file name — used as FALLBACK when the gear-string check is unavailable. "
+        "file name -- used as FALLBACK when the gear-string check is unavailable. "
         "Primary detection reads the 'g' key from the player's CS_PLAYERS configstring; "
         "if the gear string contains 'U', the suppressor is equipped regardless of filename. "
         "URT suppressed file names from pk3 audit: de_sil, m4_sil, ak103_sil, beretta_sil, "
@@ -7236,15 +7236,15 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alVolSuppressedWeapon = Cvar_Get("s_alVolSuppressedWeapon", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolSuppressedWeapon, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolSuppressedWeapon,
-        "Own suppressed weapon fire volume [0–10, ref 0.55]. "
+        "Own suppressed weapon fire volume [0-10, ref 0.55]. "
         "Reference gain 0.55 reflects that suppressed weapons are inherently quieter. "
         "Below 1.0 uses power-2 curve for perceptual linearity. Default 1.0.");
     s_alVolEnemySuppressedWeapon = Cvar_Get("s_alVolEnemySuppressedWeapon", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolEnemySuppressedWeapon, "0", "2.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolEnemySuppressedWeapon,
-        "Enemy / other-player suppressed weapon fire volume [0–2, ref 0.45]. "
-        "Suppressed fire is by design harder to locate — the 0.45 reference gain "
-        "reflects that inherent quietness. Capped at 2× (anti-cheat). "
+        "Enemy / other-player suppressed weapon fire volume [0-2, ref 0.45]. "
+        "Suppressed fire is by design harder to locate -- the 0.45 reference gain "
+        "reflects that inherent quietness. Capped at 2x (anti-cheat). "
         "Default 1.0 (reference level). Reduce to make suppressed enemies even "
         "harder to detect; raise to compensate if suppressors feel inaudible.");
     s_alSuppressedEnemyRangeMax = Cvar_Get("s_alSuppressedEnemyRangeMax", "400", CVAR_ARCHIVE_ND);
@@ -7255,20 +7255,20 @@ qboolean S_AL_Init( soundInterface_t *si )
         "enemy reference (ref 0.70); at this distance and beyond it stays at the "
         "suppressed floor (ref 0.45). Set to 0 to disable range scaling entirely. "
         "Default 400.");
-    /* Extra-vol slots — one cvar per entry, always written to config (CVAR_ARCHIVE,
+    /* Extra-vol slots -- one cvar per entry, always written to config (CVAR_ARCHIVE,
      * no CVAR_NODEFAULT) so every slot appears in the config file for easy editing.
      * Each slot holds one pattern: optional "!" prefix to exclude, optional ":-N"
-     * dB suffix for a per-sample cut (N ≤ 0, floor −40 dB, fractional OK).
+     * dB suffix for a per-sample cut (N <= 0, floor -40 dB, fractional OK).
      * Empty slots are silently skipped during matching.
      * Slot 1 and 2 default to the two disproportionately loud URT feedback sounds
-     * with a −0.4 dB cut each. */
+     * with a -0.4 dB cut each. */
     {
         static const char * const slotDesc =
             "One sound path pattern for the s_alExtraVol volume group "
             "(case-insensitive substring match against the sound file path). "
             "Syntax: \"path/pattern\" to include, \"!path/pattern\" to exclude, "
-            "\"path/pattern:-N\" to include with an extra N dB cut (N ≤ 0; "
-            "fractional values accepted; floor −40 dB). "
+            "\"path/pattern:-N\" to include with an extra N dB cut (N <= 0; "
+            "fractional values accepted; floor -40 dB). "
             "Empty = slot unused. "
             "All eight slots are evaluated together: a sound is matched when "
             "at least one positive slot matches and no exclusion slot matches.";
@@ -7289,54 +7289,54 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_CheckRange(s_alExtraVol, "0.25", "1.0", CV_FLOAT);
     Cvar_SetDescription(s_alExtraVol,
         "Global volume scalar for all sounds matched by the s_alExtraVolEntryN slots "
-        "[0.25–1.0]. "
+        "[0.25-1.0]. "
         "cvar=1.0 (default) applies no additional reduction beyond the per-slot "
         "\":-N\" dB cuts. "
         "Reduce below 1.0 to cut all matched sounds further (power-2 curve; "
-        "0.5 ≈ −12 dB). "
+        "0.5 ~ -12 dB). "
         "Floored at 0.25 so matched sounds are never completely silenced. "
         "Default 1.0.");
     s_alOcclusion = Cvar_Get("s_alOcclusion", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOcclusion, "0", "1", CV_INTEGER);
     Cvar_SetDescription(s_alOcclusion, "Per-source occlusion tracing. Sounds behind walls are gain-attenuated and their apparent HRTF direction is corrected to the nearest audible gap. Close sources (<300 u) update every frame; distant sources update less often. Default 1.");
-    /* Volume group controls — 0–10 scale, reference unity at 1.0.
+    /* Volume group controls -- 0-10 scale, reference unity at 1.0.
      * WORLD and IMPACT are capped at 2.0 (anti-cheat: cannot amplify other
-     * players or world impacts beyond 2× reference).
+     * players or world impacts beyond 2x reference).
      * Reference gains are baked into S_AL_GetCategoryVol so that cvar=1.0
      * reproduces the same loudness as the old hardcoded defaults. */
     s_alVolSelf = Cvar_Get("s_alVolSelf", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolSelf, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolSelf,
-        "Own player movement / breath / general volume [0–10, ref 1.0]. "
-        "Below 1.0 uses a power-2 curve (0.5 ≈ −12 dB). Default 1.0.");
+        "Own player movement / breath / general volume [0-10, ref 1.0]. "
+        "Below 1.0 uses a power-2 curve (0.5 ~ -12 dB). Default 1.0.");
     s_alVolOther = Cvar_Get("s_alVolOther", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolOther, "0", "2.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolOther,
-        "Other player / entity one-shot volume [0–2, ref 1.0 = applied gain 0.70]. "
+        "Other player / entity one-shot volume [0-2, ref 1.0 = applied gain 0.70]. "
         "Capped at 2.0 (anti-cheat). Below 1.0 uses power-2 curve. Default 1.0.");
     s_alVolEnv = Cvar_Get("s_alVolEnv", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolEnv, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolEnv,
-        "Looping ambient / environmental sound volume [0–10, ref 1.0]. "
+        "Looping ambient / environmental sound volume [0-10, ref 1.0]. "
         "Per-sample RMS normalisation is applied automatically. "
         "Below 1.0 uses power-2 curve. Default 1.0.");
     s_alVolUI = Cvar_Get("s_alVolUI", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolUI, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolUI,
-        "Hit-marker / kill-confirmation / UI sound volume [0–10, ref 1.0]. "
+        "Hit-marker / kill-confirmation / UI sound volume [0-10, ref 1.0]. "
         "Controls non-positional local sounds independently of weapon volume. "
         "Below 1.0 uses power-2 curve. Default 1.0.");
     s_alVolWeapon = Cvar_Get("s_alVolWeapon", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolWeapon, "0", "10.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolWeapon,
-        "Own weapon fire volume [0–10, ref 1.0]. "
+        "Own weapon fire volume [0-10, ref 1.0]. "
         "Separated from s_alVolSelf so weapon loudness can be tuned without "
         "affecting footstep / breath / movement volume. "
-        "Below 1.0 uses a power-2 curve (0.5 ≈ −12 dB). Default 1.0.");
+        "Below 1.0 uses a power-2 curve (0.5 ~ -12 dB). Default 1.0.");
     s_alVolImpact = Cvar_Get("s_alVolImpact", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolImpact, "0", "2.0", CV_FLOAT);
     Cvar_SetDescription(s_alVolImpact,
-        "World-entity impact sound volume (bullet hits, shell brass, explosions) [0–2, ref 1.0]. "
+        "World-entity impact sound volume (bullet hits, shell brass, explosions) [0-2, ref 1.0]. "
         "Capped at 2.0 (anti-cheat). Below 1.0 uses power-2 curve. Default 1.0.");
     s_alLocalSelf = Cvar_Get("s_alLocalSelf", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alLocalSelf, "0", "1", CV_INTEGER);
@@ -7346,10 +7346,10 @@ qboolean S_AL_Init( soundInterface_t *si )
         "supplied by the game. "
         "Note: position-staleness artefacts caused by TR_LINEAR trajectory lag or "
         "sv_bufferMs position delay are now corrected automatically in the engine. "
-        "Default 1 — own-player sounds are head-locked by default. "
+        "Default 1 -- own-player sounds are head-locked by default. "
         "Set to 0 to use full 3D spatialization for own-player sounds.");
 
-    /* Acoustic-environment tuning — all live-tunable; type /s_alReset after
+    /* Acoustic-environment tuning -- all live-tunable; type /s_alReset after
      * changing to hear the effect without a map reload. */
     s_alEnvHorizDist = Cvar_Get("s_alEnvHorizDist", "1330", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alEnvHorizDist, "200", "4096", CV_FLOAT);
@@ -7362,7 +7362,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alEnvDownDist, "Dynamic reverb: max distance for the straight-down probe ray (game units). Detects pits and voids below the player. Default 160.");
     s_alEnvHorizWeight = Cvar_Get("s_alEnvHorizWeight", "0.70", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alEnvHorizWeight, "0", "1", CV_FLOAT);
-    Cvar_SetDescription(s_alEnvHorizWeight, "Dynamic reverb: fraction of openFrac contributed by the 8 horizontal rays. Remaining (1-value) comes from vertical rays. Default 0.70 — overhead obstructions are less acoustically dominant than surrounding walls.");
+    Cvar_SetDescription(s_alEnvHorizWeight, "Dynamic reverb: fraction of openFrac contributed by the 8 horizontal rays. Remaining (1-value) comes from vertical rays. Default 0.70 -- overhead obstructions are less acoustically dominant than surrounding walls.");
     s_alEnvSmoothPole = Cvar_Get("s_alEnvSmoothPole", "0.92", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alEnvSmoothPole, "0.5", "0.99", CV_FLOAT);
     Cvar_SetDescription(s_alEnvSmoothPole, "Dynamic reverb: IIR smoothing pole for EFX parameter blending [0.5-0.99]. Higher = slower, smoother transitions; lower = snappier. 0.92 ~= 3.5 s half-life at 60 fps. Automatically reduced up to 0.07 below this when the player is moving fast.");
@@ -7390,7 +7390,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alLoopFadeOutMs,
         "Loop-sound fade-out duration in milliseconds when an ambient source leaves "
         "range (entity leaves PVS). 0 = instant cut. Default 800. "
-        "The fade-out always starts from the source's current gain level — if the "
+        "The fade-out always starts from the source's current gain level -- if the "
         "source was still fading in when it was removed, the fade-out begins from "
         "that partial level, never jumping to full volume first.");
     s_alLoopFadeDist = Cvar_Get("s_alLoopFadeDist", "400", CVAR_ARCHIVE_ND);
@@ -7403,7 +7403,7 @@ qboolean S_AL_Init( soundInterface_t *si )
         "immediately. 0 = always start from silence (old behaviour). Default 400.");
 
     /* Occlusion filter tuning CVars.
-     * All live-tunable — type /s_alReset after changing to hear the effect.
+     * All live-tunable -- type /s_alReset after changing to hear the effect.
      * Use s_alDebugOcc 1 to print per-source state each frame while testing. */
     s_alOccGainFloor = Cvar_Get("s_alOccGainFloor", "0.55", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOccGainFloor, "0", "1", CV_FLOAT);
@@ -7418,7 +7418,7 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Occlusion: floor of AL_LOWPASS_GAINHF (high-frequency content) for fully-blocked sources [0-1]. "
         "0 = strip all HF (bass-only thump through walls); 1 = no HF filtering (only volume changes). "
         "Default 0.50 preserves enough weapon-fire crack to remain recognisable. "
-        "Old formula was occ\xc2\xb2 which reached near-zero HF even at moderate occlusion — "
+        "Old formula was occ\xc2\xb2 which reached near-zero HF even at moderate occlusion -- "
         "this caused the 'tinny then boom' corner-pop effect.");
     s_alOccPosBlend = Cvar_Get("s_alOccPosBlend", "0.40", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alOccPosBlend, "0", "1", CV_FLOAT);
@@ -7426,8 +7426,8 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Occlusion: how far to redirect the HRTF apparent-source position towards the nearest "
         "acoustic gap when a source is blocked [0-1]. "
         "The gap direction is projected to the source's actual distance so even a modest "
-        "value produces a clear angular shift: at 0.40 a doorway 45° off the direct line "
-        "gives ~16° apparent HRTF direction change. "
+        "value produces a clear angular shift: at 0.40 a doorway 45deg off the direct line "
+        "gives ~16deg apparent HRTF direction change. "
         "0 = always use true source position (no gap hint); "
         "1 = full redirect to gap direction. "
         "Default 0.40.");
@@ -7484,11 +7484,11 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alMaxSrc = Cvar_Get("s_alMaxSrc", "512", CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alMaxSrc, "16", va("%d", S_AL_MAX_SRC), CV_INTEGER);
     Cvar_SetDescription(s_alMaxSrc,
-        "Maximum OpenAL source slots.  Default 512 — slots are cheap on modern "
+        "Maximum OpenAL source slots.  Default 512 -- slots are cheap on modern "
         "hardware; reduce only if the audio driver reports resource errors.  "
         "Requires vid_restart (LATCH).");
 
-    /* Dedup window — default 20 ms to match DMA's hardcoded per-entity window.
+    /* Dedup window -- default 20 ms to match DMA's hardcoded per-entity window.
      * ENTITYNUM_WORLD always uses max(this, 100 ms) to match DMA's world throttle.
      * Non-weapon channels additionally extend the window to the sound duration
      * so trigger sounds cannot re-stack while the previous instance plays. */
@@ -7498,7 +7498,7 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Same-entity same-sfx dedup window in milliseconds (default 20, matching the DMA backend). "
         "0 = disabled. "
         "Blocks a second S_StartSound for the same (entity, sfx) pair within this window. "
-        "CHAN_WEAPON uses only this fixed window — rapid fire is never suppressed. "
+        "CHAN_WEAPON uses only this fixed window -- rapid fire is never suppressed. "
         "All other channels additionally extend the window to the full sound duration so "
         "trigger-bound sounds (birds, ambient cues, map music) cannot re-stack while the "
         "previous instance is still playing, regardless of how quickly the trigger is re-tripped. "
@@ -7518,7 +7518,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alEqLow = Cvar_Get("s_alEqLow", "1.26", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqLow,
         "EQ low-shelf gain (linear). 1.0 = flat, 1.26 = +2 dB (default). "
-        "Range 0.126 – 7.943 (±18 dB). The EQ uses level normalization: both "
+        "Range 0.126 - 7.943 (+/-18 dB). The EQ uses level normalization: both "
         "the direct path and the EQ send are attenuated by 1/(1+max_band*slot_gain) "
         "so dry+wet stays at source level regardless of the band boost applied.");
     s_alEqMid = Cvar_Get("s_alEqMid", "1.26", CVAR_ARCHIVE_ND);
@@ -7529,7 +7529,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_alEqHigh = Cvar_Get("s_alEqHigh", "1.0", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqHigh,
         "EQ high-shelf gain (linear). 1.0 = flat (default). "
-        "Boost above 6 kHz — leave at 1.0 unless you want extra brightness. "
+        "Boost above 6 kHz -- leave at 1.0 unless you want extra brightness. "
         "See s_alEqLow for normalization details.");
     s_alEqGain = Cvar_Get("s_alEqGain", "1.0", CVAR_ARCHIVE_ND);
     Cvar_SetDescription(s_alEqGain,
@@ -7541,7 +7541,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     if (!S_AL_LoadLibrary())
         return qfalse;
 
-    /* Now the library is loaded — query the real default device name and
+    /* Now the library is loaded -- query the real default device name and
      * embed it in the s_alDevice cvar description so players see it when
      * they tab-complete or type the cvar name in the console. */
     {
@@ -7555,7 +7555,7 @@ qboolean S_AL_Init( soundInterface_t *si )
 
         Com_sprintf(desc, sizeof(desc),
             "OpenAL output device. Empty = system default (\"%s\"). "
-            "Type /s_devices for a numbered list. (LATCH — requires vid_restart)",
+            "Type /s_devices for a numbered list. (LATCH -- requires vid_restart)",
             (defDev && defDev[0]) ? defDev : "unknown");
         Cvar_SetDescription(s_alDevice, desc);
     }
@@ -7575,9 +7575,9 @@ qboolean S_AL_Init( soundInterface_t *si )
      * HRTF / headphone stereo setup
      *
      * s_alHRTF 1 (opt-in): request HRTF convolution for headphone users.
-     *   Layer 1 — ALC_SOFT_output_mode: ALC_STEREO_HRTF_SOFT
-     *   Layer 2 — ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_TRUE
-     *   Layer 3 — alcResetDeviceSoft:   belt-and-suspenders if still disabled
+     *   Layer 1 -- ALC_SOFT_output_mode: ALC_STEREO_HRTF_SOFT
+     *   Layer 2 -- ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_TRUE
+     *   Layer 3 -- alcResetDeviceSoft:   belt-and-suspenders if still disabled
      *
      * s_alHRTF 0 (default): explicitly DISABLE HRTF so that alsoft.conf or
      *   driver defaults cannot silently re-enable it.  Without the explicit
@@ -7586,7 +7586,7 @@ qboolean S_AL_Init( soundInterface_t *si )
      *   own-player weapon sources even when the user sets s_alHRTF 0.  That
      *   convolution is what produces the "muffled pop" on speaker setups.
      *   ALC_STEREO_BASIC_SOFT requests plain stereo panning with no HRTF and
-     *   no surround upmix — the correct output mode for a speaker game session.
+     *   no surround upmix -- the correct output mode for a speaker game session.
      * ----------------------------------------------------------------------- */
     nAttribs = 0;
     if (s_alHRTF->integer) {
@@ -7595,7 +7595,7 @@ qboolean S_AL_Init( soundInterface_t *si )
             ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
             ctxAttribs[nAttribs++] = ALC_STEREO_HRTF_SOFT;
         }
-        /* Layer 2: ALC_SOFT_HRTF — always include when extension present */
+        /* Layer 2: ALC_SOFT_HRTF -- always include when extension present */
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
             ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
             ctxAttribs[nAttribs++] = ALC_TRUE;
@@ -7698,7 +7698,7 @@ qboolean S_AL_Init( soundInterface_t *si )
             }
             if (s_al_hrtf)
                 Com_Printf(S_COLOR_YELLOW
-                    "S_AL: WARNING: HRTF still active despite s_alHRTF 0 — "
+                    "S_AL: WARNING: HRTF still active despite s_alHRTF 0 -- "
                     "check alsoft.conf or driver settings\n");
             else
                 Com_DPrintf("S_AL: HRTF forced off via alcResetDeviceSoft\n");
@@ -7721,7 +7721,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* Distance model matching Q3 linear attenuation */
     qalDistanceModel(AL_LINEAR_DISTANCE_CLAMPED);
 
-    /* Doppler — OpenAL Soft models this natively when AL_VELOCITY is set */
+    /* Doppler -- OpenAL Soft models this natively when AL_VELOCITY is set */
     if (s_doppler && s_doppler->integer)
         qalDopplerFactor(1.0f);
     else
@@ -7744,11 +7744,11 @@ qboolean S_AL_Init( soundInterface_t *si )
                (s_al_directChannelsExt && !s_al_directChannels)
                    ? (s_alDirectChannels && !s_alDirectChannels->integer)
                        ? " (disabled by s_alDirectChannels 0)"
-                       : " (inactive — s_alHRTF 0)"
+                       : " (inactive -- s_alHRTF 0)"
                    : "");
 
     /* -----------------------------------------------------------------------
-     * Streaming sources — allocated BEFORE the game source pool so they are
+     * Streaming sources -- allocated BEFORE the game source pool so they are
      * guaranteed a valid OpenAL voice regardless of the driver's voice limit.
      *
      * PR #95 raised s_alMaxSrc to 512.  OpenAL Soft's default mix-voice cap
@@ -7756,7 +7756,7 @@ qboolean S_AL_Init( soundInterface_t *si )
      * voices, leaving s_al_music.source = 0 and s_al_raw.source = 0.
      * Every subsequent qalSource* call on source 0 generates AL_INVALID_NAME,
      * which causes OpenAL Soft's 64-bit GCC runtime to throw 0x20474343 C++
-     * exceptions — the hard crash reported after the intro video finishes and
+     * exceptions -- the hard crash reported after the intro video finishes and
      * the menu music tries to start.  On 32-bit the same root cause silently
      * drops all video audio and menu music without crashing.
      * ----------------------------------------------------------------------- */
@@ -7772,7 +7772,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     qalGenSources(1, &s_al_music.source);
     if (qalGetError() != AL_NO_ERROR) {
         Com_Printf(S_COLOR_YELLOW
-            "S_AL: WARNING: failed to create music streaming source — "
+            "S_AL: WARNING: failed to create music streaming source -- "
             "background music will be silent\n");
         s_al_music.source = 0;
     } else {
@@ -7808,7 +7808,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     qalGenSources(1, &s_al_raw.source);
     if (qalGetError() != AL_NO_ERROR) {
         Com_Printf(S_COLOR_YELLOW
-            "S_AL: WARNING: failed to create raw streaming source — "
+            "S_AL: WARNING: failed to create raw streaming source -- "
             "cinematic and VoIP audio will be silent\n");
         s_al_raw.source = 0;
     } else {
@@ -7820,7 +7820,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     }
     qalGenBuffers(S_AL_RAW_BUFFERS, s_al_raw.buffers);
 
-    /* Game source pool — up to s_alMaxSrc sources (capped at S_AL_MAX_SRC).
+    /* Game source pool -- up to s_alMaxSrc sources (capped at S_AL_MAX_SRC).
      * OpenAL Soft will stop early if it hits its own mix-voice limit; the
      * streaming sources above are already allocated so they are unaffected. */
     {
@@ -7860,7 +7860,7 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* Async loader thread pool.
      * Start workers now, before cgame registers any sounds, so the pool is
      * ready from the very first S_AL_RegisterSound call.
-     * Default 4 threads — enough to parallelize all weapons+radio calls on a
+     * Default 4 threads -- enough to parallelize all weapons+radio calls on a
      * quad-core.  Clamped to [1, 8] internally by S_AL_StartThreadPool. */
     s_alLoadThreads = Cvar_Get("s_alLoadThreads", "4", CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alLoadThreads, "1", "8", CV_INTEGER);
@@ -7868,7 +7868,7 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Number of background worker threads for async sound loading. "
         "Each worker runs CalcNormGain + ResamplePCM in parallel so the game "
         "thread is only stalled for the ~0.5 ms file-decode step per sound. "
-        "Default 4. Range 1–8. Requires vid_restart (LATCH). "
+        "Default 4. Range 1-8. Requires vid_restart (LATCH). "
         "Not supported on Windows (sync loading used instead).");
     S_AL_StartThreadPool(s_alLoadThreads->integer);
 
