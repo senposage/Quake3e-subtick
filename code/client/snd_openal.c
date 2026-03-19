@@ -1226,9 +1226,11 @@ static float S_AL_CalcNormGain( const void *pcm, const snd_info_t *info );
  * =========================================================================
  */
 
-#ifndef _WIN32   /* pthreads — Linux / macOS / MinGW */
+/* =========================================================================
+ * Async load job — shared across all platforms.
+ * =========================================================================
+ */
 
-/* One async load job. */
 typedef struct S_AL_LoadJob_s {
     struct S_AL_LoadJob_s *next;            /* intrusive queue link              */
     alSfxRec_t            *r;               /* sfx record (in hash, !inMemory)   */
@@ -1238,7 +1240,7 @@ typedef struct S_AL_LoadJob_s {
     snd_info_t             info;            /* sample width/channels/rate/size   */
     ALenum                 fmt;             /* AL_FORMAT_* matching pcm          */
     float                  normCacheGain;   /* ≥ 0 → override; < 0 → none       */
-    /* Worker output — filled by S_AL_LoadWorker. */
+    /* Worker output — filled by S_AL_ProcessJob. */
     void                  *submitPcm;       /* pcm or resampled (to submit)      */
     int                    submitSize;      /* byte count for qalBufferData      */
     ALenum                 submitFmt;       /* AL format for submission          */
@@ -1249,116 +1251,114 @@ typedef struct S_AL_LoadJob_s {
 
 #define S_AL_POOL_MAX_THREADS  8
 
-/* Shared state — all protected by s_al_jobMutex except s_al_done{Head,Tail}
- * which have their own mutex. */
+/* Shared CPU work: CalcNormGain + optional resample.
+ * Called with NO locks held from any worker thread. */
+static void S_AL_ProcessJob( S_AL_LoadJob_t *job )
+{
+    short *src16 = NULL;
+    short *tmp16 = NULL;
+
+    if (!job->decodeOk)
+        return;
+
+    job->normGain = S_AL_CalcNormGain(job->pcm, &job->info);
+
+    if (s_al_deviceFreq > 0
+            && job->info.rate != (int)s_al_deviceFreq
+            && job->info.channels <= 2) {
+
+        if (job->info.width == 2) {
+            src16 = (short *)job->pcm;
+        } else if (job->info.width == 1) {
+            int  n  = job->info.samples * job->info.channels;
+            int  ii;
+            tmp16 = (short *)malloc((size_t)n * sizeof(short));
+            if (tmp16) {
+                const byte *p = (const byte *)job->pcm;
+                for (ii = 0; ii < n; ii++)
+                    tmp16[ii] = (short)(((int)p[ii] - 128) << 8);
+                src16 = tmp16;
+            }
+        }
+
+        if (src16) {
+            int    outSamples = 0;
+            short *resampled  = S_AL_ResamplePCM(
+                                    src16,
+                                    job->info.samples,
+                                    job->info.channels,
+                                    job->info.rate,
+                                    (int)s_al_deviceFreq,
+                                    &outSamples);
+            if (tmp16) { free(tmp16); tmp16 = NULL; }
+
+            if (resampled) {
+                job->submitPcm  = resampled;
+                job->submitFmt  = (job->info.channels == 1)
+                                  ? AL_FORMAT_MONO16
+                                  : AL_FORMAT_STEREO16;
+                job->submitRate = (int)s_al_deviceFreq;
+                job->submitSize = outSamples * job->info.channels
+                                  * (int)sizeof(short);
+                free(job->pcm);
+                job->pcm = NULL;
+            }
+        }
+    }
+
+    if (!job->submitPcm) {
+        job->submitPcm  = job->pcm;
+        job->submitFmt  = job->fmt;
+        job->submitRate = job->info.rate;
+        job->submitSize = job->info.size;
+    }
+}
+
+/* =========================================================================
+ * Platform thread pool — pthreads (Linux / macOS) or Win32 threads.
+ * =========================================================================
+ */
+
+#ifndef _WIN32   /* pthreads */
+
 static pthread_mutex_t   s_al_jobMutex   = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t    s_al_jobCond    = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t    s_al_allDone    = PTHREAD_COND_INITIALIZER;
-static S_AL_LoadJob_t   *s_al_jobHead    = NULL; /* pending queue head          */
-static S_AL_LoadJob_t   *s_al_jobTail    = NULL; /* pending queue tail          */
-static int               s_al_jobsTotal  = 0;    /* pending + in-progress count */
-static int               s_al_poolRunning = 0;   /* 1 while threads are alive   */
+static S_AL_LoadJob_t   *s_al_jobHead    = NULL;
+static S_AL_LoadJob_t   *s_al_jobTail    = NULL;
+static int               s_al_jobsTotal  = 0;
+static int               s_al_poolRunning = 0;
 static pthread_t         s_al_workers[S_AL_POOL_MAX_THREADS];
 static int               s_al_numWorkers = 0;
 
 static pthread_mutex_t   s_al_doneMutex  = PTHREAD_MUTEX_INITIALIZER;
-static S_AL_LoadJob_t   *s_al_doneHead   = NULL; /* completed queue head        */
-static S_AL_LoadJob_t   *s_al_doneTail   = NULL; /* completed queue tail        */
+static S_AL_LoadJob_t   *s_al_doneHead   = NULL;
+static S_AL_LoadJob_t   *s_al_doneTail   = NULL;
 
-/* Worker thread: dequeue → CalcNormGain → ResamplePCM → push to done queue. */
 static void *S_AL_LoadWorker( void *unused )
 {
     (void)unused;
-
     pthread_mutex_lock(&s_al_jobMutex);
 
     for (;;) {
         S_AL_LoadJob_t *job;
-        short          *src16;
-        short          *tmp16;
 
-        /* Wait until there is work or the pool is shutting down. */
         while (s_al_poolRunning && !s_al_jobHead)
             pthread_cond_wait(&s_al_jobCond, &s_al_jobMutex);
 
         if (!s_al_jobHead) {
-            /* Pool stopping with no remaining jobs — exit. */
             pthread_mutex_unlock(&s_al_jobMutex);
             return NULL;
         }
 
-        /* Dequeue one job. */
         job          = s_al_jobHead;
         s_al_jobHead = job->next;
         if (!s_al_jobHead) s_al_jobTail = NULL;
         job->next    = NULL;
         pthread_mutex_unlock(&s_al_jobMutex);
 
-        /* ---- CPU work (no locks held) ------------------------------------ */
-        src16 = NULL;
-        tmp16 = NULL;
+        S_AL_ProcessJob(job);
 
-        if (job->decodeOk) {
-            /* Normalisation gain scan. */
-            job->normGain = S_AL_CalcNormGain(job->pcm, &job->info);
-
-            /* Prepare 16-bit source pointer for the resampler. */
-            if (s_al_deviceFreq > 0
-                    && job->info.rate != (int)s_al_deviceFreq
-                    && job->info.channels <= 2) {
-
-                if (job->info.width == 2) {
-                    src16 = (short *)job->pcm;
-                } else if (job->info.width == 1) {
-                    /* Expand 8-bit unsigned → 16-bit signed (malloc; no Q3 zone). */
-                    int  n  = job->info.samples * job->info.channels;
-                    int  ii;
-                    tmp16 = (short *)malloc((size_t)n * sizeof(short));
-                    if (tmp16) {
-                        const byte *p = (const byte *)job->pcm;
-                        for (ii = 0; ii < n; ii++)
-                            tmp16[ii] = (short)(((int)p[ii] - 128) << 8);
-                        src16 = tmp16;
-                    }
-                }
-
-                if (src16) {
-                    int    outSamples = 0;
-                    short *resampled  = S_AL_ResamplePCM(
-                                            src16,
-                                            job->info.samples,
-                                            job->info.channels,
-                                            job->info.rate,
-                                            (int)s_al_deviceFreq,
-                                            &outSamples);
-                    if (tmp16) { free(tmp16); tmp16 = NULL; }
-
-                    if (resampled) {
-                        /* Resampled buffer becomes the submission target. */
-                        job->submitPcm  = resampled;
-                        job->submitFmt  = (job->info.channels == 1)
-                                          ? AL_FORMAT_MONO16
-                                          : AL_FORMAT_STEREO16;
-                        job->submitRate = (int)s_al_deviceFreq;
-                        job->submitSize = outSamples * job->info.channels
-                                          * (int)sizeof(short);
-                        /* Original PCM is no longer needed. */
-                        free(job->pcm);
-                        job->pcm = NULL;
-                    }
-                }
-            }
-
-            /* If no resampling was done, submit the original PCM as-is. */
-            if (!job->submitPcm) {
-                job->submitPcm  = job->pcm;
-                job->submitFmt  = job->fmt;
-                job->submitRate = job->info.rate;
-                job->submitSize = job->info.size;
-            }
-        }
-
-        /* ---- Push to done queue (done mutex) ----------------------------- */
         pthread_mutex_lock(&s_al_doneMutex);
         if (s_al_doneTail)
             s_al_doneTail->next = job;
@@ -1367,7 +1367,6 @@ static void *S_AL_LoadWorker( void *unused )
         s_al_doneTail = job;
         pthread_mutex_unlock(&s_al_doneMutex);
 
-        /* Decrement total counter under job mutex; signal "all done" if 0. */
         pthread_mutex_lock(&s_al_jobMutex);
         s_al_jobsTotal--;
         if (s_al_jobsTotal == 0)
@@ -1376,10 +1375,77 @@ static void *S_AL_LoadWorker( void *unused )
     /* unreachable */
 }
 
+#else  /* _WIN32 — Win32 threads (CRITICAL_SECTION + CONDITION_VARIABLE) */
+
+static CRITICAL_SECTION   s_al_jobCS;
+static CONDITION_VARIABLE s_al_jobCV;
+static CONDITION_VARIABLE s_al_allDoneCV;
+static S_AL_LoadJob_t    *s_al_jobHead    = NULL;
+static S_AL_LoadJob_t    *s_al_jobTail    = NULL;
+static int                s_al_jobsTotal  = 0;
+static int                s_al_poolRunning = 0;
+static HANDLE             s_al_workers[S_AL_POOL_MAX_THREADS];
+static int                s_al_numWorkers = 0;
+
+static CRITICAL_SECTION   s_al_doneCS;
+static S_AL_LoadJob_t    *s_al_doneHead   = NULL;
+static S_AL_LoadJob_t    *s_al_doneTail   = NULL;
+
+static DWORD WINAPI S_AL_LoadWorker( LPVOID unused )
+{
+    (void)unused;
+    EnterCriticalSection(&s_al_jobCS);
+
+    for (;;) {
+        S_AL_LoadJob_t *job;
+
+        while (s_al_poolRunning && !s_al_jobHead)
+            SleepConditionVariableCS(&s_al_jobCV, &s_al_jobCS, INFINITE);
+
+        if (!s_al_jobHead) {
+            LeaveCriticalSection(&s_al_jobCS);
+            return 0;
+        }
+
+        job          = s_al_jobHead;
+        s_al_jobHead = job->next;
+        if (!s_al_jobHead) s_al_jobTail = NULL;
+        job->next    = NULL;
+        LeaveCriticalSection(&s_al_jobCS);
+
+        S_AL_ProcessJob(job);
+
+        EnterCriticalSection(&s_al_doneCS);
+        if (s_al_doneTail)
+            s_al_doneTail->next = job;
+        else
+            s_al_doneHead = job;
+        s_al_doneTail = job;
+        LeaveCriticalSection(&s_al_doneCS);
+
+        EnterCriticalSection(&s_al_jobCS);
+        s_al_jobsTotal--;
+        if (s_al_jobsTotal == 0)
+            WakeAllConditionVariable(&s_al_allDoneCV);
+    }
+    /* unreachable */
+}
+
+#endif  /* _WIN32 */
+
+/* =========================================================================
+ * Thread-pool management — shared interface (platform abstracted above).
+ * =========================================================================
+ */
+
 /* Submit a job to the pending queue.  Called on the game thread. */
 static void S_AL_SubmitLoadJob( S_AL_LoadJob_t *job )
 {
+#ifdef _WIN32
+    EnterCriticalSection(&s_al_jobCS);
+#else
     pthread_mutex_lock(&s_al_jobMutex);
+#endif
     job->next = NULL;
     if (s_al_jobTail)
         s_al_jobTail->next = job;
@@ -1387,22 +1453,35 @@ static void S_AL_SubmitLoadJob( S_AL_LoadJob_t *job )
         s_al_jobHead = job;
     s_al_jobTail = job;
     s_al_jobsTotal++;
+#ifdef _WIN32
+    WakeConditionVariable(&s_al_jobCV);
+    LeaveCriticalSection(&s_al_jobCS);
+#else
     pthread_cond_signal(&s_al_jobCond);
     pthread_mutex_unlock(&s_al_jobMutex);
+#endif
 }
 
-/* Drain the completed-jobs queue and call qalBufferData for each.
+/* Drain the completed-jobs queue and upload pending sounds to OpenAL.
  * Must be called on the game/OpenAL thread (typically from S_AL_Update). */
 static void S_AL_CommitCompletedJobs( void )
 {
     S_AL_LoadJob_t *list, *job;
 
     /* Atomically detach the entire done list. */
+#ifdef _WIN32
+    EnterCriticalSection(&s_al_doneCS);
+#else
     pthread_mutex_lock(&s_al_doneMutex);
+#endif
     list          = s_al_doneHead;
     s_al_doneHead = NULL;
     s_al_doneTail = NULL;
+#ifdef _WIN32
+    LeaveCriticalSection(&s_al_doneCS);
+#else
     pthread_mutex_unlock(&s_al_doneMutex);
+#endif
 
     while (list) {
         alSfxRec_t *r;
@@ -1437,7 +1516,7 @@ static void S_AL_CommitCompletedJobs( void )
                           job->submitPcm, job->submitSize, job->submitRate);
             if (S_AL_CheckError("alBufferData(async)")) {
                 qalDeleteBuffers(1, &r->buffer);
-                r->buffer      = 0;
+                r->buffer       = 0;
                 r->defaultSound = qtrue;
             }
         } else {
@@ -1453,8 +1532,8 @@ static void S_AL_CommitCompletedJobs( void )
             job->path, job->info.rate, job->submitRate,
             job->info.channels, ng);
 
-        /* Free buffers. submitPcm is either the resampled buffer (malloc'd)
-         * or points into pcm.  Only free each pointer once. */
+        /* Free buffers — submitPcm is either a separate resampled malloc or
+         * aliases pcm; only free each pointer once. */
         if (job->submitPcm && job->submitPcm != job->pcm)
             free(job->submitPcm);
         if (job->pcm)
@@ -1464,19 +1543,23 @@ static void S_AL_CommitCompletedJobs( void )
 }
 
 /* Block until all submitted jobs have been processed and committed.
- * Must be called before invalidating sfx records (FreeSfx, BeginRegistration,
- * Shutdown).  Also drains the done queue so OpenAL buffers are created. */
+ * Call before invalidating sfx records (FreeSfx, BeginRegistration, Shutdown). */
 static void S_AL_FlushAllJobs( void )
 {
     if (!s_al_numWorkers) return;
 
-    /* Wait until every in-flight job has been processed by a worker. */
+#ifdef _WIN32
+    EnterCriticalSection(&s_al_jobCS);
+    while (s_al_jobsTotal > 0)
+        SleepConditionVariableCS(&s_al_allDoneCV, &s_al_jobCS, INFINITE);
+    LeaveCriticalSection(&s_al_jobCS);
+#else
     pthread_mutex_lock(&s_al_jobMutex);
     while (s_al_jobsTotal > 0)
         pthread_cond_wait(&s_al_allDone, &s_al_jobMutex);
     pthread_mutex_unlock(&s_al_jobMutex);
+#endif
 
-    /* Commit all completed jobs now (caller is on game thread). */
     S_AL_CommitCompletedJobs();
 }
 
@@ -1490,6 +1573,22 @@ static void S_AL_StartThreadPool( int n )
     s_al_poolRunning = 1;
     s_al_numWorkers  = 0;
 
+#ifdef _WIN32
+    InitializeCriticalSection(&s_al_jobCS);
+    InitializeConditionVariable(&s_al_jobCV);
+    InitializeConditionVariable(&s_al_allDoneCV);
+    InitializeCriticalSection(&s_al_doneCS);
+
+    for (i = 0; i < n; i++) {
+        HANDLE h = CreateThread(NULL, 0, S_AL_LoadWorker, NULL, 0, NULL);
+        if (!h) {
+            Com_Printf(S_COLOR_YELLOW "S_AL: failed to create load worker %d\n", i);
+            break;
+        }
+        s_al_workers[i] = h;
+        s_al_numWorkers++;
+    }
+#else
     for (i = 0; i < n; i++) {
         if (pthread_create(&s_al_workers[i], NULL, S_AL_LoadWorker, NULL) != 0) {
             Com_Printf(S_COLOR_YELLOW "S_AL: failed to create load worker %d\n", i);
@@ -1497,6 +1596,7 @@ static void S_AL_StartThreadPool( int n )
         }
         s_al_numWorkers++;
     }
+#endif
 
     Com_Printf("S_AL: async load pool: %d worker thread(s)\n", s_al_numWorkers);
 }
@@ -1508,6 +1608,18 @@ static void S_AL_StopThreadPool( void )
     if (!s_al_numWorkers) return;
 
     /* Signal workers to exit after draining remaining work. */
+#ifdef _WIN32
+    EnterCriticalSection(&s_al_jobCS);
+    s_al_poolRunning = 0;
+    WakeAllConditionVariable(&s_al_jobCV);
+    LeaveCriticalSection(&s_al_jobCS);
+
+    for (i = 0; i < s_al_numWorkers; i++) {
+        WaitForSingleObject(s_al_workers[i], INFINITE);
+        CloseHandle(s_al_workers[i]);
+        s_al_workers[i] = NULL;
+    }
+#else
     pthread_mutex_lock(&s_al_jobMutex);
     s_al_poolRunning = 0;
     pthread_cond_broadcast(&s_al_jobCond);
@@ -1515,6 +1627,7 @@ static void S_AL_StopThreadPool( void )
 
     for (i = 0; i < s_al_numWorkers; i++)
         pthread_join(s_al_workers[i], NULL);
+#endif
 
     s_al_numWorkers = 0;
 
@@ -1523,7 +1636,11 @@ static void S_AL_StopThreadPool( void )
 
     /* Discard any jobs still on the pending queue (shouldn't happen after
      * flush, but be defensive). */
+#ifdef _WIN32
+    EnterCriticalSection(&s_al_jobCS);
+#else
     pthread_mutex_lock(&s_al_jobMutex);
+#endif
     while (s_al_jobHead) {
         S_AL_LoadJob_t *j = s_al_jobHead;
         s_al_jobHead = j->next;
@@ -1533,20 +1650,14 @@ static void S_AL_StopThreadPool( void )
     }
     s_al_jobTail   = NULL;
     s_al_jobsTotal = 0;
+#ifdef _WIN32
+    LeaveCriticalSection(&s_al_jobCS);
+    DeleteCriticalSection(&s_al_jobCS);
+    DeleteCriticalSection(&s_al_doneCS);
+#else
     pthread_mutex_unlock(&s_al_jobMutex);
+#endif
 }
-
-#else  /* _WIN32 — no pthreads; async loading disabled, sync fallback used */
-
-typedef struct S_AL_LoadJob_s { int unused; } S_AL_LoadJob_t;
-static void S_AL_SubmitLoadJob(S_AL_LoadJob_t *j)   { (void)j; }
-static void S_AL_CommitCompletedJobs( void )         {}
-static void S_AL_FlushAllJobs( void )                {}
-static void S_AL_StartThreadPool( int n )            { (void)n; }
-static void S_AL_StopThreadPool( void )              {}
-static int  s_al_numWorkers = 0;
-
-#endif  /* _WIN32 */
 
 
 /* Compute a per-sample RMS ceiling limiter gain for ambient sources.
@@ -1711,7 +1822,6 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
         fmt = (info.width == 2) ? AL_FORMAT_BFORMAT3D_16 : AL_FORMAT_BFORMAT3D_8;
     }
 
-#ifndef _WIN32
     /* -----------------------------------------------------------------------
      * Async path: hand CPU work off to the thread pool.
      * The game thread is only blocked for the S_CodecLoad above (~0.5 ms).
@@ -1772,10 +1882,9 @@ static sfxHandle_t S_AL_RegisterSound( const char *sample, qboolean compressed )
         /* r->inMemory = qfalse, r->buffer = 0 until CommitCompletedJobs. */
         return (sfxHandle_t)(r - s_al_sfx);
     }
-#endif /* !_WIN32 */
 
     /* -----------------------------------------------------------------------
-     * Synchronous path (Windows, or pool not yet started).
+     * Synchronous path (pool not yet started).
      * Identical to the pre-threading code: CalcNormGain → normcache override
      * → qalGenBuffers → ResamplePCM → qalBufferData, all inline.
      * ----------------------------------------------------------------------- */
