@@ -1442,8 +1442,15 @@ void CL_SetCGameTime( void ) {
 		// The floor uses commandTime from the latest snapshot as the
 		// minimum.  If cl.serverTime falls below it, snap both
 		// cl.serverTime AND serverTimeDelta so recovery is instant
-		// instead of seconds-long.  Applied to all servers.
-		if ( cl.snap.ps.commandTime > 0 &&
+		// instead of seconds-long.
+		//
+		// Gated on non-vanilla servers only: on vanilla servers the
+		// serverTimeDelta snap can trigger a FAST-adjust on the very
+		// next snapshot (deltaDelta > 100), which can undershoot again
+		// and re-trigger the floor, creating an oscillation loop that
+		// causes the server to drop the client.
+		if ( !cl.vanillaServer &&
+			 cl.snap.ps.commandTime > 0 &&
 			 !( cl.snap.ps.pm_flags & 4096 ) && // PMF_FOLLOW -- commandTime belongs to followed player
 			 cl.serverTime <= cl.snap.ps.commandTime ) {
 			int oldSrvTime = cl.serverTime;
