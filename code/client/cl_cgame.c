@@ -1182,7 +1182,13 @@ static void CL_AdjustTimeDelta( void ) {
 		// snap.serverTime.  Snapping all the way to snap.serverTime
 		// would advance commandTime to sv.time on the server, putting
 		// the client briefly "ahead" of the snapshot timeline.
-		if ( cl.snap.ps.commandTime > 0 ) {
+		// Gated on non-vanilla servers: on vanilla servers the
+		// serverTimeDelta snap can trigger a FAST-adjust on the next
+		// snapshot which can undershoot again and re-trigger the floor,
+		// creating an oscillation loop that causes the server to drop
+		// the client.  Fall back to vanilla handling (snap.serverTime)
+		// on vanilla servers.
+		if ( !cl.vanillaServer && cl.snap.ps.commandTime > 0 ) {
 			cl.serverTime = cl.snap.ps.commandTime + 1;
 		} else {
 			cl.serverTime = cl.snap.serverTime;
