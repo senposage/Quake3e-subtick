@@ -53,6 +53,13 @@ Build flag: compile with USE_OPENAL=1 (set in Makefile).
  */
 
 #ifdef _WIN32
+/* CONDITION_VARIABLE APIs (SleepConditionVariableCS etc.) require Vista+ */
+# if defined(_WIN32_WINNT) && _WIN32_WINNT < 0x0600
+#  undef _WIN32_WINNT
+#  define _WIN32_WINNT 0x0600
+# elif !defined(_WIN32_WINNT)
+#  define _WIN32_WINNT 0x0600
+# endif
 # include <windows.h>
 typedef HMODULE al_lib_t;
 # define AL_LoadLib(n)    LoadLibraryA(n)
