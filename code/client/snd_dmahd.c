@@ -328,8 +328,8 @@ static int dmaHD_GetSampleRaw_8bitMono(int index, int samples, byte* data)
     /* Negative indices arise from the warm-up pre-loop (idx_smp starts at
      * -4*stepscale); wrap them up to the end of the source buffer so the
      * filter primes from near-silence.  Indices that reach or exceed
-     * 'samples' — from the Hermite/cubic x+1,x+2 lookahead or the
-     * no-interpolation round-up — must NOT wrap back to sample[0] (the
+     * 'samples' -- from the Hermite/cubic x+1,x+2 lookahead or the
+     * no-interpolation round-up -- must NOT wrap back to sample[0] (the
      * attack peak): that wraparound is the root cause of the click/pop at
      * the boundary.  Return silence (0) instead. */
     if (index < 0) index += samples;
@@ -521,7 +521,7 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
         lp_last = lp_data;
     }
 
-    /* --- End-of-buffer boundary — defensive fade ----------------------------
+    /* --- End-of-buffer boundary -- defensive fade ----------------------------
      * ROOT CAUSE (now fixed in dmaHD_GetSampleRaw_*):
      * Every GetSampleRaw_* variant previously wrapped out-of-bounds indices
      * modulo soundLength (correct for seamless-loop sounds, wrong for non-
@@ -529,14 +529,14 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
      * or two indices past the end of the source buffer, it silently returned
      * sample[0] (the attack peak) instead of silence.  This contaminated:
      *
-     *   • buffer[0..3]  — the warm-up pre-loop reads from negative positions
+     *   * buffer[0..3]  -- the warm-up pre-loop reads from negative positions
      *     that normalise to near soundLength; their Hermite x+2 lookahead
      *     exceeded soundLength and wrapped to 0, injecting the attack peak
-     *     into the HP filter's initial state → click at the START of each
+     *     into the HP filter's initial state -> click at the START of each
      *     sound.
      *
-     *   • buffer[outcount-1] — the last loop iteration's Hermite reads x+2
-     *     = soundLength, which wrapped to 0 → HP filter spike → click at
+     *   * buffer[outcount-1] -- the last loop iteration's Hermite reads x+2
+     *     = soundLength, which wrapped to 0 -> HP filter spike -> click at
      *     the END of each non-looping sound.
      *
      * FIXED: GetSampleRaw now returns 0 for index >= samples (silence) while
@@ -550,7 +550,7 @@ void dmaHD_ResampleSfx( sfx_t *sfx, int channels, int inrate, int inwidth, byte 
      * exactly), preventing a step discontinuity from the last non-zero
      * sample to the silence that follows when playback ends.
      * n_pad is adaptive so it covers the maximum HP filter decay at any
-     * WASAPI output rate (44100 – 192000 Hz).
+     * WASAPI output rate (44100 - 192000 Hz).
      */
     {
         /* n_pad = ceilf(2 / stepscale) + 4 covers all interpolation modes.
@@ -894,7 +894,7 @@ void dmaHD_TransferPaintBuffer(int endtime)
 
     if (clipped > 0 && dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
     {
-        Com_DPrintf(S_COLOR_YELLOW "dmaHD: paint buffer clipped %d/%d samples (mix overload — may cause distortion)\n",
+        Com_DPrintf(S_COLOR_YELLOW "dmaHD: paint buffer clipped %d/%d samples (mix overload -- may cause distortion)\n",
             clipped, totalSamples);
     }
 }
@@ -985,7 +985,7 @@ s_volume->value*256;
             sampleOffset = ltime - ch->startSample;
 
             // Unexpected negative sampleOffset means the channel's startSample is
-            // ahead of the current paint time — log it so we can investigate.
+            // ahead of the current paint time -- log it so we can investigate.
             if (sampleOffset < 0 && dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
             {
                 Com_DPrintf(S_COLOR_YELLOW "dmaHD: ch[%d] negative sampleOffset %d for %s (startSample %d paintedtime %d)\n",
@@ -1024,15 +1024,15 @@ s_volume->value*256;
 
         if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1 && activeCh > (MAX_CHANNELS / 2))
         {
-            Com_DPrintf(S_COLOR_CYAN "dmaHD: mixing %d active channels (loop: %d) — high channel load\n",
+            Com_DPrintf(S_COLOR_CYAN "dmaHD: mixing %d active channels (loop: %d) -- high channel load\n",
                 activeCh, numLoopChannels);
         }
 
-        // Peak limiter — prevents paint-buffer clipping / mix distortion when many
+        // Peak limiter -- prevents paint-buffer clipping / mix distortion when many
         // channels are simultaneously active (e.g. sustained automatic fire at high
         // sv_fps).  Algorithm: fast attack (gain snaps immediately to the level needed
         // to keep the peak within the output range), slow release (15 % per paint chunk
-        // ≈ 100-200 ms to unity at 60 fps) to avoid abrupt volume jumps between chunks.
+        // ~ 100-200 ms to unity at 60 fps) to avoid abrupt volume jumps between chunks.
         {
             int numSamples = (end - s_paintedtime) * 2; // stereo: 2 ints per sample pair
             int *p = (int *)dmaHD_paintbuffer;
@@ -1059,7 +1059,7 @@ s_volume->value*256;
                     p[i2] = (p[i2] * scale256) >> 8;
 
                 if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1)
-                    Com_DPrintf(S_COLOR_CYAN "dmaHD: peak limiter active — gain %.3f (peak %d, %d active ch)\n",
+                    Com_DPrintf(S_COLOR_CYAN "dmaHD: peak limiter active -- gain %.3f (peak %d, %d active ch)\n",
                         (double)s_dmaHD_limiterGain, peak, activeCh);
 
                 // Release: ease back 15 % of the remaining distance to 1.0 each chunk.
@@ -1517,7 +1517,7 @@ void dmaHD_Update_Mix(void)
      * sound subsystem was reinitialised (s_soundtime set back to 0 by
      * S_Base_Init / S_Base_StopAllSounds).  Without this check the function-
      * local static lastsoundtime would remain at the old large value and the
-     * mixer would silently skip every call until s_soundtime climbed back up —
+     * mixer would silently skip every call until s_soundtime climbed back up --
      * causing complete silence for several seconds after a vid_restart. */
     if ((dmaHD_lastsoundtime - s_soundtime) > (int)dma.speed)
     {
@@ -1540,11 +1540,11 @@ void dmaHD_Update_Mix(void)
 
     if (mixahead < op) mixahead = op;
 
-    // Log when the mixer needs to catch up by more than 100 ms — indicates stall/hitch
+    // Log when the mixer needs to catch up by more than 100 ms -- indicates stall/hitch
     // that may produce audible artifacts (pops, silence gaps).
     if (dmaHD_debugLevel && dmaHD_debugLevel->integer >= 1 && sane > 100)
     {
-        Com_DPrintf(S_COLOR_YELLOW "dmaHD: mix stall — %d ms since last mix (op %d samples, mixahead %d samples)\n",
+        Com_DPrintf(S_COLOR_YELLOW "dmaHD: mix stall -- %d ms since last mix (op %d samples, mixahead %d samples)\n",
             sane, op, mixahead);
     }
 

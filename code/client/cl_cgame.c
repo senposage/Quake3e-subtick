@@ -383,12 +383,12 @@ rescan:
 	// named cvar from every connected client.  We block the command (return
 	// qfalse so it never reaches the cgame) when the requested cvar:
 	//
-	//   1. Does not exist — prevents the server from detecting our custom
+	//   1. Does not exist -- prevents the server from detecting our custom
 	//      features by probing for their cvar names.
-	//   2. Is CVAR_PRIVATE — these are internal-only cvars that the QVM
+	//   2. Is CVAR_PRIVATE -- these are internal-only cvars that the QVM
 	//      cannot read anyway, but we also suppress the command itself so
 	//      the server cannot even infer existence from a missing reply.
-	//   3. Is CVAR_PROTECTED — we don't want the server reading cvars that
+	//   3. Is CVAR_PROTECTED -- we don't want the server reading cvars that
 	//      are protected from VM modification (e.g. cl_guid, cl_timeNudge).
 	//
 	// All blocked probes are logged for audit.
@@ -404,7 +404,7 @@ rescan:
 				return qfalse;
 			}
 		} else {
-			// malformed — no cvar name supplied
+			// malformed -- no cvar name supplied
 			SCR_LogNote( "SVCMD:CV_BLOCKED", "cv probe blocked: no cvar name" );
 			return qfalse;
 		}
@@ -545,28 +545,28 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		// what the vanilla QVM is attempting.
 		//
 		// Unconditionally intercepted (silently ignored):
-		//   snaps           — server controls delivery rate anyway; wrong value
+		//   snaps           -- server controls delivery rate anyway; wrong value
 		//                     here breaks our snapshot-interval logic
-		//   cg_smoothClients — purely client-side rendering preference
-		//   net_qport       — changing port mid-session breaks the netchan
-		//   rate=0          — zero rate causes server to stop sending snapshots
-		//   net_dropsim     — simulates packet drops on outgoing traffic;
+		//   cg_smoothClients -- purely client-side rendering preference
+		//   net_qport       -- changing port mid-session breaks the netchan
+		//   rate=0          -- zero rate causes server to stop sending snapshots
+		//   net_dropsim     -- simulates packet drops on outgoing traffic;
 		//                     a server setting this would cause us to shed our
 		//                     own packets, making us appear to time out
-		//   cl_packetdelay  — adds artificial send latency; could push ping
+		//   cl_packetdelay  -- adds artificial send latency; could push ping
 		//                     above sv_maxPing and trigger a server ping-kick
-		//   cl_packetdup    — controls redundant command retransmission;
+		//   cl_packetdup    -- controls redundant command retransmission;
 		//                     a server zeroing this removes loss mitigation,
 		//                     while a server setting it high floods the server
-		//   cl_timeout      — lowering this lets the server trigger our own
+		//   cl_timeout      -- lowering this lets the server trigger our own
 		//                     timeout watchdog at will
-		//   in_mouse        — disabling mouse input is pure sabotage
-		//   cl_noOOBDisconnect — already CVAR_PROTECTED, but explicit here
+		//   in_mouse        -- disabling mouse input is pure sabotage
+		//   cl_noOOBDisconnect -- already CVAR_PROTECTED, but explicit here
 		//                        for clarity: a server must not be able to
 		//                        disarm our OOB-disconnect guard
 		//
 		// Also blocked by Cvar_SetSafe for CVAR_PROTECTED/PRIVATE cvars
-		// (e.g. com_maxfps, cl_timeNudge) — those are logged as QVM:SET_BLOCKED.
+		// (e.g. com_maxfps, cl_timeNudge) -- those are logged as QVM:SET_BLOCKED.
 		if ( Q_stricmp( (const char *)VMA(1), "snaps"            ) == 0
 			|| Q_stricmp( (const char *)VMA(1), "cg_smoothClients" ) == 0
 			|| Q_stricmp( (const char *)VMA(1), "net_qport"        ) == 0
@@ -648,13 +648,13 @@ static intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 				|| Q_stricmp( tok, "exit"       ) == 0
 				|| Q_stricmp( tok, "exec"       ) == 0 ) {
 				/* Dangerous: log at level 1 so it always appears in the log.
-				   Block execution — the server should not be able to force
+				   Block execution -- the server should not be able to force
 				   these through the cgame console-command channel. */
 				SCR_LogNote( "QVM:CONSOLECMD_BLOCKED",
 					va( "dangerous cmd blocked: \"%s\"", cmd ) );
 				Com_Printf( S_COLOR_YELLOW
 					"WARNING: server tried to inject dangerous console command"
-					" via cgame — blocked: \"%s\"\n", cmd );
+					" via cgame -- blocked: \"%s\"\n", cmd );
 				return 0;
 			}
 
@@ -1015,27 +1015,27 @@ void CL_InitCGame( void ) {
 	//   bit 0 = Patch 2: frameInterpolation clamp fix (safe on any server)
 	//   bit 1 = Patch 3: nextSnap null-pointer crash fix (safe on any server)
 	//   bit 2 = Patch 1: TR_INTERPOLATE velocity extrapolation / TR_LINEAR
-	//           Requires server-side trTime anchor — only safe on our custom
+	//           Requires server-side trTime anchor -- only safe on our custom
 	//           server.  Auto-suppressed on vanilla servers via
 	//           cl_qvmPatchVanilla + cl_urt43serverIsVanilla.
 	//
-	// cl_urt43cgPatches  — used when connected to our custom server (default 7)
-	// cl_qvmPatchVanilla — used when connected to a vanilla server   (default 3)
+	// cl_urt43cgPatches  -- used when connected to our custom server (default 7)
+	// cl_qvmPatchVanilla -- used when connected to a vanilla server   (default 3)
 	Cvar_Get( "cl_urt43cgPatches", "7", CVAR_ARCHIVE | CVAR_PROTECTED | CVAR_PRIVATE );
 	Cvar_SetDescription2( "cl_urt43cgPatches",
 		"QVM patch bitmask applied when connected to a custom (Quake3e-urt) server. "
 		"Bit 0 = Patch2 (frameInterpolation clamp), "
 		"bit 1 = Patch3 (null-snapshot crash fix), "
-		"bit 2 = Patch1 (TR_LINEAR velocity extrapolation — requires server-side trTime anchor). "
+		"bit 2 = Patch1 (TR_LINEAR velocity extrapolation -- requires server-side trTime anchor). "
 		"Default 7 (all patches). "
 		"On vanilla servers cl_qvmPatchVanilla is used instead." );
 	Cvar_Get( "cl_qvmPatchVanilla", "3", CVAR_ARCHIVE | CVAR_PRIVATE );
 	Cvar_SetDescription2( "cl_qvmPatchVanilla",
 		"QVM patch bitmask applied when connected to a vanilla UrT server "
-		"(server lacks sv_snapshotFps — no server-side trTime anchor for TR_LINEAR). "
+		"(server lacks sv_snapshotFps -- no server-side trTime anchor for TR_LINEAR). "
 		"Bit 0 = Patch2 (frameInterpolation clamp), "
-		"bit 1 = Patch3 (null-snapshot crash fix — prevents CG_Error crash on first frame), "
-		"bit 2 = Patch1 (TR_LINEAR — unsafe on vanilla servers, leave unset). "
+		"bit 1 = Patch3 (null-snapshot crash fix -- prevents CG_Error crash on first frame), "
+		"bit 2 = Patch1 (TR_LINEAR -- unsafe on vanilla servers, leave unset). "
 		"Default 3 (Patches 2+3 safe on any server; Patch1/bit2 requires server-side trTime anchor). "
 		"On custom servers cl_urt43cgPatches is used instead." );
 
@@ -1149,7 +1149,7 @@ static void CL_AdjustTimeDelta( void ) {
 
 	// Scale thresholds proportionally to the measured snapshot interval so the
 	// system reacts at the same number-of-snapshots equivalent across all rates.
-	// At 20Hz (snapshotMsec=50): resetTime=500, fastAdjust=100 — same as vanilla.
+	// At 20Hz (snapshotMsec=50): resetTime=500, fastAdjust=100 -- same as vanilla.
 	// At 60Hz (snapshotMsec=16): resetTime=500 (floor), fastAdjust=50 (floor).
 	// Disabled on vanilla servers and when the server forbids adaptive timing.
 	if ( cl_adaptiveTiming->integer && !cl.serverForbidsAdaptiveTiming ) {
@@ -1431,7 +1431,7 @@ void CL_SetCGameTime( void ) {
 
 		// commandTime floor: ensure usercmds are never sent "in the past".
 		//
-		// After a FAST adjust overcorrects (e.g. 150ms OS hitch →
+		// After a FAST adjust overcorrects (e.g. 150ms OS hitch ->
 		// serverTimeDelta averaged to -125 instead of correct -50),
 		// cl.serverTime can land well below the server's commandTime.
 		// Every usercmd is then skipped (serverTime < commandTime) and
@@ -1444,7 +1444,7 @@ void CL_SetCGameTime( void ) {
 		// cl.serverTime AND serverTimeDelta so recovery is instant
 		// instead of seconds-long.
 		if ( cl.snap.ps.commandTime > 0 &&
-			 !( cl.snap.ps.pm_flags & 4096 ) && // PMF_FOLLOW — commandTime belongs to followed player
+			 !( cl.snap.ps.pm_flags & 4096 ) && // PMF_FOLLOW -- commandTime belongs to followed player
 			 cl.serverTime <= cl.snap.ps.commandTime ) {
 			int oldSrvTime = cl.serverTime;
 			int oldDelta = cl.serverTimeDelta;
@@ -1465,11 +1465,11 @@ void CL_SetCGameTime( void ) {
 
 		// NOTE: serverTime safety cap REMOVED.  It was clamping outgoing
 		// usercmd.serverTime at snap.serverTime in CL_FinishMove, but the
-		// clamp caused usercmd coalescing → server skips → ping=999 → kick.
+		// clamp caused usercmd coalescing -> server skips -> ping=999 -> kick.
 		// FTWGL runs with zero protection and no issues on vanilla servers.
 		// CL_AdjustTimeDelta keeps cl.serverTime close enough on its own.
 
-		// Periodic timing state dump — captures the full picture every 5s
+		// Periodic timing state dump -- captures the full picture every 5s
 		// so we can see exactly what the timing loop is doing over time.
 		{
 			static int timingLastDump;
@@ -1525,7 +1525,7 @@ void CL_SetCGameTime( void ) {
 		if ( cl_adaptiveTiming->integer && !cl.serverForbidsAdaptiveTiming ) {
 			// Scale the detection window with the measured snapshot interval.
 			// Evaluated in 1/4ms units so slowFrac state is visible.
-			// At 20Hz: thresh=16ms (vs hardcoded 5ms) → better equilibrium on vanilla.
+			// At 20Hz: thresh=16ms (vs hardcoded 5ms) -> better equilibrium on vanilla.
 			int extrapolateThresh = cl.snapshotMsec / 3;
 			if ( extrapolateThresh <  3 ) extrapolateThresh =  3;
 			if ( extrapolateThresh > 16 ) extrapolateThresh = 16;

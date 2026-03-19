@@ -390,7 +390,7 @@ int S_OGG_CodecReadStream(snd_stream_t *stream, int bytes, void *buffer)
 		// read some bytes from the OGG codec
 		c = ov_read((OggVorbis_File *) stream->ptr, bufPtr, bytesLeft, IsBigEndian, OGG_SAMPLEWIDTH, 1, &BS);
 
-		// OV_HOLE means a gap or correctable error in the bitstream — retry
+		// OV_HOLE means a gap or correctable error in the bitstream -- retry
 		if (c == OV_HOLE)
 		{
 			continue;

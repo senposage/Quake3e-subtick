@@ -922,10 +922,10 @@ contain a snapshot; missing snapshots force delta-invalidation, which the
 QVM lagometer shows as black bars.  Level 1.
 
 Fields:
-  dropped  — netchan gap (packets lost in this delivery)
-  seq      — clc.serverMessageSequence (sequence number of the packet we DID receive)
-  ping     — cl.snap.ping at the moment of detection
-  snapMs   — cl.snapshotMsec (helps judge how many snap intervals were lost)
+  dropped  -- netchan gap (packets lost in this delivery)
+  seq      -- clc.serverMessageSequence (sequence number of the packet we DID receive)
+  ping     -- cl.snap.ping at the moment of detection
+  snapMs   -- cl.snapshotMsec (helps judge how many snap intervals were lost)
 ========================
 */
 void SCR_LogPacketDrop( int dropped, int seq ) {
@@ -989,7 +989,7 @@ OOB command the server sends so we can see what leads up to a disconnect.
 Level 2.
 
 Fields:
-  cmd  — tokenised command token (first word of the OOB string)
+  cmd  -- tokenised command token (first word of the OOB string)
 ========================
 */
 void SCR_LogOOBPacket( const char *cmd ) {
@@ -1020,15 +1020,15 @@ can correlate it with the sequence of events in the surrounding log.
 Level 1.
 
 Fields:
-  honored      — 1 if Com_Error was called; 0 if packet was ignored
-  snapT        — cl.snap.serverTime
-  svrT         — cl.serverTime
-  ping         — cl.snap.ping
-  relSeq       — clc.reliableSequence  (last reliable cmd we sent)
-  relAck       — clc.reliableAcknowledge (last ack from server)
-  relWnd       — relSeq - relAck (fill level of our reliable window)
-  silenceMs    — ms since last packet from server at arrival time
-  sessionCount — running total of OOB disconnects seen this session
+  honored      -- 1 if Com_Error was called; 0 if packet was ignored
+  snapT        -- cl.snap.serverTime
+  svrT         -- cl.serverTime
+  ping         -- cl.snap.ping
+  relSeq       -- clc.reliableSequence  (last reliable cmd we sent)
+  relAck       -- clc.reliableAcknowledge (last ack from server)
+  relWnd       -- relSeq - relAck (fill level of our reliable window)
+  silenceMs    -- ms since last packet from server at arrival time
+  sessionCount -- running total of OOB disconnects seen this session
 ========================
 */
 void SCR_LogOOBDisconnect( qboolean honored ) {
@@ -1083,10 +1083,10 @@ can correlate userinfo changes with server reactions (e.g. auth re-checks
 that may precede spurious disconnects).  Level 2.
 
 Fields:
-  name   — player name
-  authc  — auth-code field (should be "0" in this fork; server may react)
-  authl  — auth-level field
-  snaps  — requested snapshot rate
+  name   -- player name
+  authc  -- auth-code field (should be "0" in this fork; server may react)
+  authl  -- auth-level field
+  snaps  -- requested snapshot rate
 ========================
 */
 void SCR_LogUserinfoSend( const char *info ) {

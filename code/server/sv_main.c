@@ -1192,7 +1192,7 @@ static void SV_CheckTimeouts( void ) {
 		}
 		// Ghost-client guard: a fully in-game client whose process was killed
 		// stops sending packets immediately (OS closes the socket).  With the
-		// default sv_timeout of 200 s the normal timeout fires far too late —
+		// default sv_timeout of 200 s the normal timeout fires far too late --
 		// the 128-slot reliable command buffer can fill up with broadcast
 		// prints in seconds, causing a noisy "Server command overflow" drop.
 		// Kick them cleanly after 10 s of silence so the slot is freed well
@@ -1327,14 +1327,14 @@ void SV_TrackCvarChanges( void )
 		if ( sv.gameTimeResidual >= newGameMsec )
 			sv.gameTimeResidual = newGameMsec - 1;
 		sv_gameHz->modified = qfalse;
-		Com_DPrintf( "sv_gameHz changed to %d — gameTimeResidual clamped\n", sv_gameHz->integer );
+		Com_DPrintf( "sv_gameHz changed to %d -- gameTimeResidual clamped\n", sv_gameHz->integer );
 	}
 
 	// When sv_antiwarp is enabled, force QVM g_antiwarp off to prevent double injection.
 	if ( sv_antiwarp->modified ) {
 		if ( sv_antiwarp->integer ) {
 			Cvar_Set( "g_antiwarp", "0" );
-			Com_Printf( "sv_antiwarp enabled — forcing g_antiwarp 0\n" );
+			Com_Printf( "sv_antiwarp enabled -- forcing g_antiwarp 0\n" );
 		}
 		sv_antiwarp->modified = qfalse;
 	}
@@ -1349,7 +1349,7 @@ void SV_TrackCvarChanges( void )
 	if ( sv_antilag && sv_antilag->modified ) {
 		if ( sv_antilag->integer ) {
 			Cvar_Set( "g_antilag", "0" );
-			Com_Printf( "sv_antilag enabled — forcing g_antilag 0\n" );
+			Com_Printf( "sv_antilag enabled -- forcing g_antilag 0\n" );
 		}
 		sv_antilag->modified = qfalse;
 	}
@@ -1378,7 +1378,7 @@ void SV_TrackCvarChanges( void )
 				if ( sv.gameTimeResidual >= newFrameMsec )
 					sv.gameTimeResidual = newFrameMsec - 1;
 			}
-			Com_DPrintf( "sv_fps changed to %d — timeResidual clamped\n", sv_fps->integer );
+			Com_DPrintf( "sv_fps changed to %d -- timeResidual clamped\n", sv_fps->integer );
 		}
 
 		sv_fps->modified = qfalse;
@@ -1486,7 +1486,7 @@ void SV_Frame( int msec ) {
 	sv.timeResidual += msec;
 
 	// Safety cap: allow at most 2 ticks of catch-up per Com_Frame so normal OS
-	// scheduling jitter is absorbed gracefully (one late frame → double-tick to
+	// scheduling jitter is absorbed gracefully (one late frame -> double-tick to
 	// recover). sv_fps change burst protection is handled precisely in
 	// SV_TrackCvarChanges; this is a backstop for extreme lag (debugger pause,
 	// system suspend, map load, etc.) that would otherwise fire dozens of ticks
@@ -1561,7 +1561,7 @@ void SV_Frame( int msec ) {
 		//
 		// sv_gameHz > 0 (e.g. 20): GAME_RUN_FRAME fires every (1000/sv_gameHz) ms.
 		// sv_gameHz <= 0 (disabled): effective rate = sv_fps. GAME_RUN_FRAME fires
-		//   every engine tick — sv.gameTime == sv.time always.
+		//   every engine tick -- sv.gameTime == sv.time always.
 		{
 			int _gameHz = (sv_gameHz && sv_gameHz->integer > 0) ? sv_gameHz->integer : sv_fps->integer;
 			int _gameMsec;
@@ -1579,8 +1579,8 @@ void SV_Frame( int msec ) {
 				// Runs before GAME_RUN_FRAME so the QVM sees fresh ClientThink calls.
 				// Uses gameMsec instead of hardcoded 50ms, works at any sv_fps / sv_gameHz.
 				//
-				// Mode 1: constant — keep last inputs indefinitely (QVM-style).
-				// Mode 2: decay — extrapolate for sv_antiwarpExtra ms,
+				// Mode 1: constant -- keep last inputs indefinitely (QVM-style).
+				// Mode 2: decay -- extrapolate for sv_antiwarpExtra ms,
 				//   then linearly decay inputs over sv_antiwarpDecay ms,
 				//   then coast to stop via Pmove friction.
 				if ( sv_antiwarp && sv_antiwarp->integer ) {
@@ -1607,7 +1607,7 @@ void SV_Frame( int msec ) {
 						awGap = sv.gameTime - awCl->awLastThinkTime;
 						if ( awGap > awTol ) {
 							awCl->lastUsercmd.serverTime += _gameMsec;
-							// Cap so injected serverTime never outruns real time —
+							// Cap so injected serverTime never outruns real time --
 							// without this, a long lag spike inflates serverTime
 							// so that real usercmds are silently dropped on resume.
 							if ( awCl->lastUsercmd.serverTime > sv.gameTime )
@@ -1652,7 +1652,7 @@ void SV_Frame( int msec ) {
 		// Ring buffer feeds both sv_bufferMs (position delay) and sv_velSmooth
 		// (velocity smoothing).
 		//
-		// Runs unconditionally every sv_fps tick — NOT gated on _gameFrameRan.
+		// Runs unconditionally every sv_fps tick -- NOT gated on _gameFrameRan.
 		// sv_bufferMs delays positions by N wall-clock ms (sv.time).  It needs
 		// one entry per sv_fps tick so that a "give me position from T-bufferMs"
 		// lookup always finds a tightly-bracketed pair.  When sv_gameHz > 0,

@@ -865,7 +865,7 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 				SCR_LogNote( "UI:SET_BLOCKED",
 					va( "\"%s\" = \"%s\" (protected)",
 						cvarName, cvarValue ) );
-				// fall through — Cvar_SetSafe will refuse it
+				// fall through -- Cvar_SetSafe will refuse it
 			}
 		}
 #endif
@@ -873,7 +873,7 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_CVAR_VARIABLEVALUE:
-		// Always filter CVAR_PRIVATE — matches existing VARIABLESTRINGBUFFER
+		// Always filter CVAR_PRIVATE -- matches existing VARIABLESTRINGBUFFER
 		// behaviour and prevents the auth QVM reading private cvars as floats.
 		{
 			const char *cvarName = (const char *)VMA(1);
@@ -908,7 +908,7 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 				SCR_LogNote( "UI:SETVALUE_BLOCKED",
 					va( "\"%s\" = \"%g\" (protected)",
 						cvarName, VMF(2) ) );
-				// fall through — Cvar_SetValueSafe will refuse it
+				// fall through -- Cvar_SetValueSafe will refuse it
 			}
 		}
 #endif
@@ -941,7 +941,7 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 	case UI_CVAR_INFOSTRINGBUFFER:
 		// Log all calls under cl_authSecure so info-dump attempts by the
 		// auth QVM are visible in the session log.  The call itself is
-		// always allowed — the UI needs this to display server/client info.
+		// always allowed -- the UI needs this to display server/client info.
 		VM_CHECKBOUNDS( uivm, args[2], args[3] );
 #ifdef USE_AUTH
 		if ( cl_authSecure && cl_authSecure->integer ) {
@@ -989,7 +989,7 @@ static intptr_t CL_UISystemCalls( intptr_t *args ) {
 						va( "dangerous cmd blocked: \"%s\"", uiCmd ) );
 					Com_Printf( S_COLOR_YELLOW
 						"WARNING: UI QVM tried to inject dangerous command"
-						" — blocked: \"%s\"\n", uiCmd );
+						" -- blocked: \"%s\"\n", uiCmd );
 					return 0;
 				}
 

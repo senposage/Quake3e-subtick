@@ -224,23 +224,23 @@ static int SV_Antilag_GetClientFireTime( int shooterNum ) {
     //
     //   T0        positions recorded into shadow history (after game frame at tick T0)
     //   T0        snapshot built and sent; messageSent = Sys_Milliseconds()
-    //             shadow[T0] == snapshot[T0]  ← guaranteed by recording order
+    //             shadow[T0] == snapshot[T0]  <- guaranteed by recording order
     //   T0+RTT/2  client receives snapshot; latest server time in client = T0
-    //   T0+RTT/2  client renders target at T0 − snapshotMsec because the Q3/URT
+    //   T0+RTT/2  client renders target at T0 - snapshotMsec because the Q3/URT
     //             client interpolates one snapshot interval behind its latest
-    //             received snapshot (cl_interp ≈ snapshotMsec)
+    //             received snapshot (cl_interp ~ snapshotMsec)
     //   T0+RTT/2  client fires; sends usercmd
     //   T0+RTT    server receives usercmd; messageAcked = Sys_Milliseconds()
-    //             cl->ping  = messageAcked − messageSent = RTT  (server-measured)
+    //             cl->ping  = messageAcked - messageSent = RTT  (server-measured)
     //             cl->snapshotMsec = 1000/snapHz  (per-client, from sv_fps/sv_snapshotFps)
-    //             sv.time  ≈ T0 + RTT
+    //             sv.time  ~ T0 + RTT
     //
-    //   Target position the client was aiming at: shadow[T0 − snapshotMsec]
-    //   fireTime = sv.time − ping − snapshotMsec
-    //            = (T0 + RTT) − RTT − snapshotMsec
-    //            = T0 − snapshotMsec  ✓
+    //   Target position the client was aiming at: shadow[T0 - snapshotMsec]
+    //   fireTime = sv.time - ping - snapshotMsec
+    //            = (T0 + RTT) - RTT - snapshotMsec
+    //            = T0 - snapshotMsec  [ok]
     //
-    // Limitation — dropped/late snapshots:
+    // Limitation -- dropped/late snapshots:
     //   If a snapshot was dropped in transit the client interpolates across a
     //   two-snapshot gap, effectively increasing cl_interp by snapshotMsec.
     //   The server cannot detect this without client-reported data, so the
@@ -270,7 +270,7 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
         if ( i == shooterNum )                              continue;
         if ( cl->state != CS_ACTIVE )                       continue;
         // Bots ARE included in the shadow rewind.
-        // The human shooter sees all entities — including bots — through the same
+        // The human shooter sees all entities -- including bots -- through the same
         // snapshot/interpolation pipeline.  A shooter with 100 ms ping is aiming
         // at the bot's position from ~(ping + snapshotMsec) ms ago, just as they
         // would be for a human target.  Excluding bots produced a systematic miss
@@ -283,7 +283,7 @@ static int SV_Antilag_RewindAll( int shooterNum, int targetTime ) {
         // and commute correctly:
         //   1. QVM FIFO may move entities (including any bot if FIFO touches it)
         //   2. Engine saves the post-FIFO state
-        //   3. Engine applies shadow rewind → trace → restores to post-FIFO state
+        //   3. Engine applies shadow rewind -> trace -> restores to post-FIFO state
         //   4. QVM FIFO restores to original
         // The trace always sees shadow-recorded positions; entities end up back at
         // original.  No conflict.
@@ -401,7 +401,7 @@ void SV_Antilag_RecordPositions( void ) {
             sv_antilagMaxMs->modified = qfalse;
             sv_antilag_lastFpsValue = currentFps;
             Com_Memset( sv_shadowHistory, 0, sizeof( sv_shadowHistory ) );
-            Com_Printf( "SV_Antilag: reconfigured — shadow Hz=%d, historySlots=%d (history flushed)\n",
+            Com_Printf( "SV_Antilag: reconfigured -- shadow Hz=%d, historySlots=%d (history flushed)\n",
                 1000 / sv_shadowTickMs, sv_shadowHistorySlots );
         }
     }
@@ -496,7 +496,7 @@ qboolean SV_Antilag_InterceptTrace(
     if ( passEntityNum < 0 || passEntityNum >= sv.maxclients )
         return qfalse;
 
-    // Skip movement traces — only intercept weapon traces (no CONTENTS_PLAYERCLIP)
+    // Skip movement traces -- only intercept weapon traces (no CONTENTS_PLAYERCLIP)
     if ( contentmask & CONTENTS_PLAYERCLIP )
         return qfalse;
 
