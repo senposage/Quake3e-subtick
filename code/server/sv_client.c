@@ -2283,7 +2283,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 	cl->awLastThinkTime = sv.gameTime;
 
 	// Multi-step pmove: break large usercmd deltas into steps of sv_pmoveMsec
-	// so physics never exceeds the max step size. Bots excluded — they use
+	// so physics never exceeds the max step size. Bots excluded -- they use
 	// fixed-rate steps from level.time.
 	if ( sv_pmoveMsec && sv_pmoveMsec->integer > 0
 		&& cl->netchan.remoteAddress.type != NA_BOT ) {
@@ -2305,7 +2305,7 @@ void SV_ClientThink (client_t *cl, usercmd_t *cmd) {
 			if ( cl->state != CS_ACTIVE )
 				return;
 			if ( SV_GameClientNum( clNum )->commandTime == prevCmdTime ) {
-				// QVM didn't consume the command — no-Pmove state
+				// QVM didn't consume the command -- no-Pmove state
 				cl->lastUsercmd.serverTime = realTime;
 				goto single_call;
 			}

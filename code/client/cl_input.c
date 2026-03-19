@@ -578,8 +578,8 @@ static void CL_FinishMove( usercmd_t *cmd ) {
 	cmd->serverTime = cl.serverTime;
 
 	// REMOVED: usercmd serverTime clamp (was capping cmd->serverTime
-	// at snap.serverTime).  The clamp caused usercmd coalescing —
-	// multiple cmds per snapshot with identical serverTime — which
+	// at snap.serverTime).  The clamp caused usercmd coalescing --
+	// multiple cmds per snapshot with identical serverTime -- which
 	// the server skips (SV_UserMove: serverTime <= lastUsercmd).
 	// This slowed commandTime advancement, QVM computed ping=999,
 	// and the server kicked.  FTWGL ships with zero protection here
@@ -609,7 +609,7 @@ static void CL_FinishMove( usercmd_t *cmd ) {
 		if ( ucmdDelta < ucmdMinDelta ) ucmdMinDelta = ucmdDelta;
 		if ( ucmdDelta > ucmdMaxDelta ) ucmdMaxDelta = ucmdDelta;
 
-		// Log every skip immediately — these are the dangerous ones
+		// Log every skip immediately -- these are the dangerous ones
 		if ( ucmdDelta <= 0 ) {
 			char buf[256];
 			Com_sprintf( buf, sizeof(buf),
@@ -977,7 +977,7 @@ void CL_SendCmd( void ) {
 
 /*
 ============
-CL_TimeRegress — debug: jump cl.serverTime backward to provoke server reaction
+CL_TimeRegress -- debug: jump cl.serverTime backward to provoke server reaction
 ============
 */
 static void CL_TimeRegress_f( void ) {

@@ -497,7 +497,7 @@ void CL_SystemInfoChanged( qboolean onlyGame ) {
 		if ( !Q_stricmp( key, "sv_pure" ) || !Q_stricmp( key, "sv_serverid" ) || !Q_stricmp( key, "sv_fps" ) ) {
 			continue;
 		}
-		// Never let a remote server change dedicated — CVAR_LATCH + modified
+		// Never let a remote server change dedicated -- CVAR_LATCH + modified
 		// triggers CL_Shutdown in Com_Frame.  The non-STANDALONE cvar filter
 		// below would also block it, but this is belt-and-suspenders.
 		if ( !Q_stricmp( key, "dedicated" ) ) {
@@ -950,7 +950,7 @@ static void CL_ParseCommandString( msg_t *msg ) {
 		const char *text;
 		Cmd_TokenizeString( s );
 		if ( !Q_stricmp( Cmd_Argv(0), "disconnect" ) ) {
-			SCR_LogDisconnect( Cmd_Argc() > 1 ? Cmd_Argv( 1 ) : "(no reason — early disconnect)" );
+			SCR_LogDisconnect( Cmd_Argc() > 1 ? Cmd_Argv( 1 ) : "(no reason -- early disconnect)" );
 			text = ( Cmd_Argc() > 1 ) ? va( "Server disconnected: %s", Cmd_Argv( 1 ) ) : "Server disconnected.";
 			Cvar_Set( "com_errorMessage", text );
 			Com_Printf( "%s\n", text );
@@ -1032,7 +1032,7 @@ void CL_ParseServerMessage( msg_t *msg ) {
 	SCR_NetMonitorAddIncoming( msg->cursize, clc.netchan.dropped );
 
 	/* Log netchan drops immediately: each dropped server packet may contain
-	   a snapshot; missing snapshots cause delta-invalidation → black bars on
+	   a snapshot; missing snapshots cause delta-invalidation -> black bars on
 	   the lagometer and potential timing instability. */
 	if ( clc.netchan.dropped > 0 && !clc.demoplaying ) {
 		SCR_LogPacketDrop( clc.netchan.dropped, clc.serverMessageSequence );

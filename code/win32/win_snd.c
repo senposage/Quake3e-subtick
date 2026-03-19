@@ -476,7 +476,7 @@ static qboolean SNDDMA_InitWASAPI( void )
 		}
 		else
 		{
-			// GetMixFormat unavailable – safe fallback: 48 kHz 32-bit float.
+			// GetMixFormat unavailable - safe fallback: 48 kHz 32-bit float.
 			dma.speed      = 48000;
 			dma.samplebits = 32;
 			initFormat( &desiredFormat, dma.channels, dma.speed, dma.samplebits );
@@ -538,7 +538,7 @@ static qboolean SNDDMA_InitWASAPI( void )
 			}
 			else if ( ValidFormat( &desiredFormat, WAVE_FORMAT_PCM, &PcmSubformatGuid ) )
 			{
-				// 32-bit integer PCM container – e.g. 24-valid-bits-in-32 (common on
+				// 32-bit integer PCM container - e.g. 24-valid-bits-in-32 (common on
 				// some DACs/interfaces).  Not float; the transfer path will write
 				// samples MSB-aligned in the 32-bit container.
 				isfloat = qfalse;

@@ -534,11 +534,11 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 	// ENTITYNUM_WORLD uses a wider window (100 ms) to throttle the rate at which
 	// impact/casing sounds accumulate.  The server emits these events proportionally
 	// to sv_fps, so without a longer window:
-	//   sv_fps 60: same sfx re-triggers every ~2 frames (33 ms) → pool saturates fast
-	//   sv_fps 20: same sfx triggers every frame (50 ms) → pool fills steadily
+	//   sv_fps 60: same sfx re-triggers every ~2 frames (33 ms) -> pool saturates fast
+	//   sv_fps 20: same sfx triggers every frame (50 ms) -> pool fills steadily
 	// 100 ms forces at least 2 frames between re-triggers at sv_fps 20, and at
 	// least 6 frames at sv_fps 60, significantly reducing accumulation at both rates.
-	// Perceptual impact is minimal — automatic weapons fire at ~10 rounds/sec
+	// Perceptual impact is minimal -- automatic weapons fire at ~10 rounds/sec
 	// (100 ms between shots), so every round's impact is still audible.
 	{
 	int dedup_samples = (entityNum == ENTITYNUM_WORLD) ?
@@ -571,7 +571,7 @@ static void S_Base_StartSound( const vec3_t origin, int entityNum, int entchanne
 	}
 
 	// In multiplayer all bullet impacts/casings share ENTITYNUM_WORLD, so many
-	// different impact sounds (ric1, ric2, concrete1, brass1, …) can each hold up
+	// different impact sounds (ric1, ric2, concrete1, brass1, ...) can each hold up
 	// to `allowed` channels simultaneously, exhausting the pool.  Enforce a hard
 	// cap on the *total* channels owned by the world entity (1/8 of the pool).
 	if ( entityNum == ENTITYNUM_WORLD ) {
