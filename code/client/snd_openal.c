@@ -484,6 +484,28 @@ static vec3_t s_al_entity_velocities[MAX_GENTITIES];
 static vec3_t s_al_entity_prevOrigins[MAX_GENTITIES];
 static int    s_al_entity_prevMs[MAX_GENTITIES];
 
+/* Deferred-playback queue.
+ * When S_AL_StartSound / S_AL_StartLocalSound is called while a sound's
+ * async worker job is still in flight (r->inMemory == qfalse), the call
+ * would be silently dropped.  Instead we queue it here and replay it from
+ * S_AL_DrainDeferredQueue() on the next frame(s) after the buffer has been
+ * committed.  Entries older than S_AL_DEFER_TTL_MS are discarded. */
+#define S_AL_DEFER_MAX     16
+#define S_AL_DEFER_TTL_MS  1000
+
+typedef struct {
+    sfxHandle_t sfx;
+    vec3_t      origin;
+    qboolean    hasOrigin;  /* qfalse when caller passed NULL origin */
+    int         entnum;
+    int         entchannel; /* doubles as channelNum for isLocal calls */
+    int         queueMs;
+    qboolean    used;
+    qboolean    isLocal;    /* qtrue = came from S_AL_StartLocalSound */
+} alDeferredPlay_t;
+
+static alDeferredPlay_t s_al_deferred[S_AL_DEFER_MAX];
+
 typedef struct {
     qboolean available;       /* ALC_EXT_EFX present and procs loaded */
     ALuint   reverbEffect;    /* AL_EFFECT_EAXREVERB (or AL_EFFECT_REVERB fallback) */
@@ -2959,12 +2981,25 @@ static void S_AL_StopSource( int idx )
             fileHz = s_al_sfx[src->sfx].fileRate;
         }
 
-        Com_Printf(S_COLOR_CYAN
-            "[alDbg] stop  %-40s  played %d / %d smp (%.0f%%)  "
-            "file=%d Hz  device=%d Hz\n",
-            name, offset, total,
-            (total > 0) ? (100.0f * offset / total) : 0.0f,
-            fileHz, (int)s_al_deviceFreq);
+        /* AL_SAMPLE_OFFSET is in device-rate samples; soundLength is in
+         * file-rate samples.  Normalise offset to file-rate before computing
+         * the percentage so resampled sounds (e.g. 11025 Hz -> 48000 Hz)
+         * don't falsely report > 100% completion. */
+        {
+            float pct;
+            if (fileHz > 0 && s_al_deviceFreq > 0 && fileHz != (int)s_al_deviceFreq)
+                pct = (total > 0)
+                      ? (100.0f * (float)offset * fileHz
+                         / ((float)total * (float)s_al_deviceFreq))
+                      : 0.0f;
+            else
+                pct = (total > 0) ? (100.0f * offset / total) : 0.0f;
+            Com_Printf(S_COLOR_CYAN
+                "[alDbg] stop  %-40s  played %d / %d smp (%.0f%%)  "
+                "file=%d Hz  device=%d Hz\n",
+                name, offset, total, pct,
+                fileHz, (int)s_al_deviceFreq);
+        }
     }
 
     qalSourceStop(s_al_src[idx].source);
@@ -3619,6 +3654,33 @@ static void S_AL_TriggerTinnitus( void )
     s_al_tinnitusLastPlay = now;
 }
 
+/* Queue a deferred-play entry for a sound whose async load is still pending.
+ * The queue is drained by S_AL_DrainDeferredQueue() each frame after
+ * S_AL_CommitCompletedJobs() has made newly-loaded buffers available. */
+static void S_AL_QueueDeferredPlay( sfxHandle_t sfx, const vec3_t origin,
+                                    int entnum, int entchannel, qboolean isLocal )
+{
+    int nowMs = Com_Milliseconds();
+    int i, slot = -1, oldest = 0;
+
+    /* Find a free slot; if none, evict the oldest entry. */
+    for (i = 0; i < S_AL_DEFER_MAX; i++) {
+        if (!s_al_deferred[i].used) { slot = i; break; }
+        if (s_al_deferred[i].queueMs < s_al_deferred[oldest].queueMs)
+            oldest = i;
+    }
+    if (slot < 0) slot = oldest;
+
+    s_al_deferred[slot].sfx        = sfx;
+    s_al_deferred[slot].hasOrigin  = (origin != NULL);
+    if (origin) VectorCopy(origin, s_al_deferred[slot].origin);
+    s_al_deferred[slot].entnum     = entnum;
+    s_al_deferred[slot].entchannel = entchannel;
+    s_al_deferred[slot].queueMs    = nowMs;
+    s_al_deferred[slot].used       = qtrue;
+    s_al_deferred[slot].isLocal    = isLocal;
+}
+
 static void S_AL_StartSound( const vec3_t origin, int entnum,
                               int entchannel, sfxHandle_t sfx )
 {
@@ -3630,7 +3692,13 @@ static void S_AL_StartSound( const vec3_t origin, int entnum,
 
     if (!s_al_started || sfx < 0 || sfx >= s_al_numSfx) return;
     r = &s_al_sfx[sfx];
-    if (!r->inMemory || r->defaultSound || !r->buffer) return;
+    if (!r->inMemory) {
+        /* Async worker job still in flight -- queue for replay next frame. */
+        if (!r->defaultSound)
+            S_AL_QueueDeferredPlay(sfx, origin, entnum, entchannel, qfalse);
+        return;
+    }
+    if (r->defaultSound || !r->buffer) return;
 
     /* Determine the sound's world origin as early as possible so we can
      * apply a distance-based rejection before allocating any slot.
@@ -3970,7 +4038,13 @@ static void S_AL_StartLocalSound( sfxHandle_t sfx, int channelNum )
 
     if (!s_al_started || sfx < 0 || sfx >= s_al_numSfx) return;
     r = &s_al_sfx[sfx];
-    if (!r->inMemory || r->defaultSound || !r->buffer) return;
+    if (!r->inMemory) {
+        /* Async worker job still in flight -- queue for replay next frame. */
+        if (!r->defaultSound)
+            S_AL_QueueDeferredPlay(sfx, NULL, ENTITYNUM_NONE, channelNum, qtrue);
+        return;
+    }
+    if (r->defaultSound || !r->buffer) return;
 
     srcIdx = S_AL_GetFreeSource();
     if (srcIdx < 0) return;
@@ -4162,6 +4236,10 @@ static void S_AL_StopAllSounds( void )
     s_al_numBspSpeakers  = 0;
     s_al_normCacheCount  = 0;
     s_al_normCacheWritten = qfalse;
+
+    /* Discard any pending deferred-play entries -- they belong to the
+     * previous map/session and must not carry over. */
+    Com_Memset(s_al_deferred, 0, sizeof(s_al_deferred));
 }
 
 
@@ -5829,6 +5907,40 @@ static void S_AL_ReverbReset_f( void )
     Com_Printf("S_AL: reverb state reset -- will snap on next probe cycle.\n");
 }
 
+/* Replay any deferred-play entries whose buffers are now ready.
+ * Called each frame from S_AL_Update after S_AL_CommitCompletedJobs. */
+static void S_AL_DrainDeferredQueue( void )
+{
+    int i, nowMs = Com_Milliseconds();
+
+    for (i = 0; i < S_AL_DEFER_MAX; i++) {
+        alDeferredPlay_t *d = &s_al_deferred[i];
+        alSfxRec_t       *r;
+
+        if (!d->used) continue;
+
+        /* Discard expired entries so they never play out-of-context. */
+        if (nowMs - d->queueMs > S_AL_DEFER_TTL_MS) {
+            d->used = qfalse;
+            continue;
+        }
+
+        if (d->sfx < 0 || d->sfx >= s_al_numSfx) { d->used = qfalse; continue; }
+        r = &s_al_sfx[d->sfx];
+
+        if (!r->inMemory) continue; /* still loading -- wait */
+
+        d->used = qfalse;
+        if (r->defaultSound || !r->buffer) continue; /* load failed */
+
+        if (d->isLocal)
+            S_AL_StartLocalSound(d->sfx, d->entchannel);
+        else
+            S_AL_StartSound(d->hasOrigin ? d->origin : NULL,
+                            d->entnum, d->entchannel, d->sfx);
+    }
+}
+
 static void S_AL_Update( int msec )
 {
     int   i;
@@ -5840,6 +5952,10 @@ static void S_AL_Update( int msec )
     /* Upload any buffers that were decoded + resampled by worker threads
      * since the last frame.  This is cheap when the queue is empty. */
     S_AL_CommitCompletedJobs();
+
+    /* Replay any StartSound/StartLocalSound calls that were made while their
+     * buffers were still being processed by the async worker pool. */
+    S_AL_DrainDeferredQueue();
 
     /* Handle mute */
     masterGain = s_al_muted ? 0.0f : (s_volume ? s_volume->value : 0.8f);
@@ -6337,12 +6453,21 @@ static void S_AL_Update( int msec )
                     total  = s_al_sfx[s_al_src[i].sfx].soundLength;
                     fileHz = s_al_sfx[s_al_src[i].sfx].fileRate;
                 }
-                Com_Printf(S_COLOR_GREEN
-                    "[alDbg] done  %-40s  played %d / %d smp (%.0f%%)  "
-                    "file=%d Hz  device=%d Hz\n",
-                    name, offset, total,
-                    (total > 0) ? (100.0f * offset / total) : 0.0f,
-                    fileHz, (int)s_al_deviceFreq);
+                {
+                    float pct;
+                    if (fileHz > 0 && s_al_deviceFreq > 0 && fileHz != (int)s_al_deviceFreq)
+                        pct = (total > 0)
+                              ? (100.0f * (float)offset * fileHz
+                                 / ((float)total * (float)s_al_deviceFreq))
+                              : 0.0f;
+                    else
+                        pct = (total > 0) ? (100.0f * offset / total) : 0.0f;
+                    Com_Printf(S_COLOR_GREEN
+                        "[alDbg] done  %-40s  played %d / %d smp (%.0f%%)  "
+                        "file=%d Hz  device=%d Hz\n",
+                        name, offset, total, pct,
+                        fileHz, (int)s_al_deviceFreq);
+                }
             }
             qalSourcei(s_al_src[i].source, AL_BUFFER, 0);
             s_al_src[i].isPlaying = qfalse;
