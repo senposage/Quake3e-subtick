@@ -2749,16 +2749,19 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
     src->isBspSpeaker    = qfalse;  /* set by UpdateLoops for non-global BSP loops */
 
     /* Classify into volume category.
-     * isLocal + entnum==0 means StartLocalSound (hit markers, kill confirmations,
-     * menu audio) -- give these their own SRC_CAT_UI knob so they can be tuned
-     * independently of own-weapon / breath sounds (SRC_CAT_LOCAL).
+     * isLocal + entnum==ENTITYNUM_NONE means StartLocalSound (hit markers, kill
+     * confirmations, menu audio) -- give these their own SRC_CAT_UI knob so they
+     * can be tuned independently of own-weapon / breath sounds (SRC_CAT_LOCAL).
+     * ENTITYNUM_NONE is used as the sentinel (not 0) because entity 0 is a valid
+     * player entity: using 0 would misroute all own-player sounds to SRC_CAT_UI
+     * whenever the local player happens to be entity 0.
      * Own-entity sounds (entnum == s_al_listener_entnum) are SRC_CAT_LOCAL even
      * when s_alLocalSelf=0 (3D spatialized mode) so that s_alVolSelf always
      * controls own-player audio regardless of the spatialization setting.
      * Ambient (loop) sources are classified before the own-entity check so that
      * a loop entity that happens to share the listener's entity number is still
      * correctly routed to SRC_CAT_AMBIENT -> s_alVolEnv. */
-    if (isLocal && entnum == 0)
+    if (isLocal && entnum == ENTITYNUM_NONE)
         src->category = SRC_CAT_UI;
     else if (isLocal && entchannel == CHAN_WEAPON)
         src->category = S_AL_IsSoundSuppressed(sfx, entnum)
@@ -4051,7 +4054,7 @@ static void S_AL_StartLocalSound( sfxHandle_t sfx, int channelNum )
 
     vol = S_AL_GetMasterVol();
     S_AL_SrcSetup(srcIdx, sfx, NULL, qfalse,
-                  0, channelNum, vol, qtrue /* local */,
+                  ENTITYNUM_NONE, channelNum, vol, qtrue /* local */,
                   qfalse /* not ambient */);
     r->lastTimeUsed = Com_Milliseconds();
     qalSourcePlay(s_al_src[srcIdx].source);
