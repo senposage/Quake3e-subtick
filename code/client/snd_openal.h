@@ -1,6 +1,6 @@
 /*
 ===========================================================================
-FTWGL: Urban Terror — OpenAL Soft backend public interface.
+FTWGL: Urban Terror -- OpenAL Soft backend public interface.
 ===========================================================================
 */
 

@@ -1582,27 +1582,27 @@ VM_URT43_CgamePatches
 Apply runtime memory patches to the official UrbanTerror 4.3 cgame QVM.
 
 The effective patch bitmask is chosen automatically based on server type:
-  • Custom server (has sv_snapshotFps in serverinfo): cl_urt43cgPatches  (default 7)
-  • Vanilla server (no sv_snapshotFps):               cl_qvmPatchVanilla (default 3)
+  * Custom server (has sv_snapshotFps in serverinfo): cl_urt43cgPatches  (default 7)
+  * Vanilla server (no sv_snapshotFps):               cl_qvmPatchVanilla (default 3)
 cl_urt43serverIsVanilla (CVAR_TEMP) bridges the detection from CL_ParseServerInfo.
 
 Bitmask layout (shared by both cvars):
 
-  Bit 0 (1): Patch 2 — fix frameInterpolation clamp bounds.
+  Bit 0 (1): Patch 2 -- fix frameInterpolation clamp bounds.
              The QVM's existing clamp is wrong: lower threshold is 0.1f instead
              of 0.0f (clips valid small fractions), and the upper clamp value is
              ~0.99f instead of 1.0f.  Two constant-value fixes at instr 0xa688
              and 0xa692.
-             Safe on any server — no server-side dependency.
+             Safe on any server -- no server-side dependency.
 
-  Bit 1 (2): Patch 3 — prevent CG_InterpolateEntityPosition crash when
+  Bit 1 (2): Patch 3 -- prevent CG_InterpolateEntityPosition crash when
              cg.nextSnap == NULL.  The QVM calls CG_Error() (fatal crash) when
              the next snapshot pointer is NULL during high-latency spikes.
              Replace the 5-instruction error path with CONST+JUMP to the
              function's PUSH+LEAVE so it returns silently instead.
-             Safe on any server — no server-side dependency.
+             Safe on any server -- no server-side dependency.
 
-  Bit 2 (4): Patch 1 — BG_EvaluateTrajectory TR_INTERPOLATE uses velocity
+  Bit 2 (4): Patch 1 -- BG_EvaluateTrajectory TR_INTERPOLATE uses velocity
              extrapolation.  The switch-table entry for trType==TR_INTERPOLATE
              (case 1) currently falls through to TR_STATIONARY (VectorCopy only).
              Redirect it to the TR_LINEAR case so entities use velocity-based
@@ -1632,7 +1632,7 @@ Target QVM: UrbanTerror 4.3 official binary
 #define URT43_INSTR_TR_LINEAR_CASE      0x3ab15  /* velocity extrapolation handler     */
 /* Dead CG_Error block at the end of BG_EvaluateTrajectory (instr 0x3b434-0x3b43e,
    11 slots reachable only when trType < 0 or > 11).  We repurpose it as a
-   trTime-guard handler for TR_INTERPOLATE — see Patch 1 below. */
+   trTime-guard handler for TR_INTERPOLATE -- see Patch 1 below. */
 #define URT43_INSTR_TR_GUARD_CASE       0x3b434
 /* Frame layout of BG_EvaluateTrajectory (frame_size = 0x154):
    arg0 (trajectory*) lives at LOCAL[frame_size + 0x8] = LOCAL[0x15c].
@@ -1653,7 +1653,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	 * cl_urt43serverIsVanilla is a CVAR_TEMP set by CL_ParseServerInfo each
 	 * time a gamestate is received.  It is 1 for vanilla servers (no
 	 * sv_snapshotFps in serverinfo) and 0 for our custom server.
-	 * When unset (local game, demo playback) it defaults to 0 → custom path. */
+	 * When unset (local game, demo playback) it defaults to 0 -> custom path. */
 	isVanilla  = ( Cvar_VariableIntegerValue( "cl_urt43serverIsVanilla" ) != 0 );
 	patchCvar  = isVanilla ? "cl_qvmPatchVanilla" : "cl_urt43cgPatches";
 	cgPatches  = Cvar_VariableIntegerValue( patchCvar );
@@ -1767,7 +1767,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	   Patch 1 (bit 2): BG_EvaluateTrajectory TR_INTERPOLATE -> TR_LINEAR
 	   with trTime == 0 guard (widest coverage).
 
-	   Step A — instruction guard (0x3b434–0x3b43e):
+	   Step A -- instruction guard (0x3b434-0x3b43e):
 	   BG_EvaluateTrajectory contains a dead CG_Error block at 0x3b434
 	   (reached only when trType < 0 or > 11, which never happens in
 	   normal play).  We overwrite it with a 9-instruction guard:
@@ -1778,7 +1778,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	     ADD                   ; &trajectory->trTime
 	     LOAD4                 ; trTime value
 	     CONST  0              ; 0
-	     EQ     TR_STATIONARY  ; if trTime==0 → VectorCopy (safe, no extrapolation)
+	     EQ     TR_STATIONARY  ; if trTime==0 -> VectorCopy (safe, no extrapolation)
 	     CONST  TR_LINEAR      ; else fall through to velocity extrapolation
 	     JUMP
 
@@ -1786,7 +1786,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 	   BG_PlayerStateToEntityState never writes it for snap=qfalse), any
 	   future entity type that forgets trTime, etc.
 
-	   Step B — data-segment redirect:
+	   Step B -- data-segment redirect:
 	   The switch jump table entry for TR_INTERPOLATE (case 1) is updated
 	   from TR_STATIONARY_CASE (0x3ab0c) to TR_GUARD_CASE (0x3b434) so
 	   that TR_INTERPOLATE entities flow through the guard instead of
@@ -1830,7 +1830,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 
 			/* Step A: write the trTime==0 guard into the dead CG_Error block.
 			   LOCAL 0x15c / LOAD4 / CONST 4 / ADD / LOAD4 / CONST 0 /
-			   EQ→TR_STATIONARY / CONST TR_LINEAR / JUMP / IGNORE / IGNORE */
+			   EQ->TR_STATIONARY / CONST TR_LINEAR / JUMP / IGNORE / IGNORE */
 			buf[URT43_INSTR_TR_GUARD_CASE + 0].op    = OP_LOCAL;
 			buf[URT43_INSTR_TR_GUARD_CASE + 0].value = URT43_BGEVALTRAJ_ARG_TRAJECTORY;
 			buf[URT43_INSTR_TR_GUARD_CASE + 1].op    = OP_LOAD4;
@@ -1877,7 +1877,7 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 		Com_DPrintf( S_COLOR_YELLOW "  [Patch1] DISABLED by cvar (bit 2 not set)\n" );
 	}
 
-	/* Summary line — always visible */
+	/* Summary line -- always visible */
 	Com_Printf( S_COLOR_CYAN "UrT43 cgame patch: applied=0x%x skipped=0x%x%s\n",
 		applied, skipped,
 		applied ? "" : " (no patches applied)" );
