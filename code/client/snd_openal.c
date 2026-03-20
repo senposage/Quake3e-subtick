@@ -661,7 +661,7 @@ static cvar_t *s_alVolSuppressedWeapon;    /* own suppressed-weapon sounds [0..1
 static cvar_t *s_alVolEnemySuppressedWeapon; /* enemy suppressed-weapon sounds [0..10] */
 static cvar_t *s_alSuppressedEnemyRangeMax;  /* dist at which enemy suppressed boost drops to zero */
 static cvar_t *s_alVolSelf;      /* own player/weapon volume multiplier [0..1.5] */
-static cvar_t *s_alVolOther;     /* other entity/player volume multiplier [0..1.0] */
+static cvar_t *s_alVolEnemy;     /* enemy entity/player volume multiplier [0..1.0] */
 static cvar_t *s_alVolEnv;       /* looping ambient volume multiplier [0..1.0] */
 static cvar_t *s_alVolUI;        /* hit/kill/UI sound multiplier [0..1.0] */
 static cvar_t *s_alVolWeapon;    /* own weapon-fire volume multiplier [0..10] */
@@ -2293,7 +2293,7 @@ static float S_AL_GetCategoryVol( alSrcCat_t cat )
         break;
     case SRC_CAT_WORLD:
     default:
-        v    = s_alVolOther  ? s_alVolOther->value  : 1.0f;
+        v    = s_alVolEnemy  ? s_alVolEnemy->value  : 1.0f;
         ref  = 0.70f;  maxV = 2.0f;   /* anti-cheat cap */
         break;
     case SRC_CAT_EXTRAVOL:
@@ -6371,7 +6371,7 @@ static void S_AL_Update( int msec )
      * S_AL_UpdateLoops always writes their gain last. */
     {
         static float lastVolSelf    = -1.f;
-        static float lastVolOther   = -1.f;
+        static float lastVolEnemy   = -1.f;
         static float lastVolEnv     = -1.f;
         static float lastVolUI      = -1.f;
         static float lastVolWeapon  = -1.f;
@@ -6380,7 +6380,7 @@ static void S_AL_Update( int msec )
         static float lastVolESupWpn = -1.f;
         static float lastVolExtraVol = -1.f;
         float vSelf     = S_AL_GetCategoryVol(SRC_CAT_LOCAL);
-        float vOther    = S_AL_GetCategoryVol(SRC_CAT_WORLD);
+        float vEnemy    = S_AL_GetCategoryVol(SRC_CAT_WORLD);
         float vEnv      = S_AL_GetCategoryVol(SRC_CAT_AMBIENT);
         float vUI       = S_AL_GetCategoryVol(SRC_CAT_UI);
         float vWeapon   = S_AL_GetCategoryVol(SRC_CAT_WEAPON);
@@ -6389,7 +6389,7 @@ static void S_AL_Update( int msec )
         float vESupWpn  = S_AL_GetCategoryVol(SRC_CAT_WORLD_SUPPRESSED);
         float vExtraVol = S_AL_GetCategoryVol(SRC_CAT_EXTRAVOL);
 
-        if (vSelf      != lastVolSelf     || vOther    != lastVolOther    ||
+        if (vSelf      != lastVolSelf     || vEnemy    != lastVolEnemy    ||
             vEnv       != lastVolEnv      || vUI       != lastVolUI       ||
             vWeapon    != lastVolWeapon   || vImpact   != lastVolImpact   ||
             vSupWpn    != lastVolSupWpn   || vESupWpn  != lastVolESupWpn  ||
@@ -6416,7 +6416,7 @@ static void S_AL_Update( int msec )
                     (s_al_src[j].master_vol / 255.f) * catGain);
             }
             lastVolSelf     = vSelf;
-            lastVolOther    = vOther;
+            lastVolEnemy    = vEnemy;
             lastVolEnv      = vEnv;
             lastVolUI       = vUI;
             lastVolWeapon   = vWeapon;
@@ -7040,8 +7040,8 @@ static void S_AL_SoundInfo( void )
         s_alVolSelf   ? s_alVolSelf->value   : 1.0f, 1.00f);
     Com_Printf("    s_alVolWeapon %.2f  (own weapon fire,            cvar ref 1.0 = gain %.2f)\n",
         s_alVolWeapon ? s_alVolWeapon->value : 1.0f, 1.00f);
-    Com_Printf("    s_alVolOther  %.2f  (other players/ents,         cvar ref 1.0 = gain %.2f, max 2)\n",
-        s_alVolOther  ? s_alVolOther->value  : 1.0f, 0.70f);
+    Com_Printf("    s_alVolEnemy  %.2f  (enemy players/ents,         cvar ref 1.0 = gain %.2f, max 2)\n",
+        s_alVolEnemy  ? s_alVolEnemy->value  : 1.0f, 0.70f);
     Com_Printf("    s_alVolImpact %.2f  (world impacts/brass/expl,   cvar ref 1.0 = gain %.2f, max 2)\n",
         s_alVolImpact ? s_alVolImpact->value : 1.0f, 0.55f);
     Com_Printf("    s_alVolEnv    %.2f  (ambient/looping,            cvar ref 1.0 = gain %.2f)\n",
@@ -7492,10 +7492,10 @@ qboolean S_AL_Init( soundInterface_t *si )
     Cvar_SetDescription(s_alVolSelf,
         "Own player movement / breath / general volume [0-10, ref 1.0]. "
         "Below 1.0 uses a power-2 curve (0.5 ~ -12 dB). Default 1.0.");
-    s_alVolOther = Cvar_Get("s_alVolOther", "1.0", CVAR_ARCHIVE_ND);
-    Cvar_CheckRange(s_alVolOther, "0", "2.0", CV_FLOAT);
-    Cvar_SetDescription(s_alVolOther,
-        "Other player / entity one-shot volume [0-2, ref 1.0 = applied gain 0.70]. "
+    s_alVolEnemy = Cvar_Get("s_alVolEnemy", "1.0", CVAR_ARCHIVE_ND);
+    Cvar_CheckRange(s_alVolEnemy, "0", "2.0", CV_FLOAT);
+    Cvar_SetDescription(s_alVolEnemy,
+        "Enemy player / entity one-shot volume [0-2, ref 1.0 = applied gain 0.70]. "
         "Capped at 2.0 (anti-cheat). Below 1.0 uses power-2 curve. Default 1.0.");
     s_alVolEnv = Cvar_Get("s_alVolEnv", "1.0", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alVolEnv, "0", "10.0", CV_FLOAT);

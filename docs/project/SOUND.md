@@ -417,7 +417,7 @@ All volume cvars use a **0–10 scale** where **1.0 = reference** (the historica
 |------|---------|----------|-----|-------------|
 | `s_alVolSelf` | `1.0` | 1.00 | 10 | Own player movement, breath, general entity sounds |
 | `s_alVolWeapon` | `1.0` | 1.00 | 10 | Own weapon fire (CHAN_WEAPON from listener entity) — split from movement so weapon loudness is tunable independently |
-| `s_alVolOther` | `1.0` | 0.70 | 2 | Other players/entities. Capped at 2× (anti-cheat — prevents wallhack-level amplification) |
+| `s_alVolEnemy` | `1.0` | 0.70 | 2 | Enemy players/entities. Capped at 2× (anti-cheat — prevents wallhack-level amplification) |
 | `s_alVolImpact` | `1.0` | 0.55 | 2 | World entity impacts: bullet hits, brass casings, explosions. Often disproportionately loud; capped at 2× (anti-cheat) |
 | `s_alVolEnv` | `1.0` | 0.30 | 10 | Looping ambient/environmental sounds |
 | `s_alVolUI` | `1.0` | 0.80 | 10 | Hit-markers, kill-confirmations, menu sounds (`StartLocalSound` with entnum=0) |
@@ -1660,7 +1660,7 @@ When the OpenAL backend is active (`USE_OPENAL=1` and `libopenal.so.1` present):
 |---|---|---|
 | `s_alVolSelf` | `1.0` | Own player movement, breath, general entity sounds [0–10] |
 | `s_alVolWeapon` | `1.0` | Own weapon fire (CHAN_WEAPON from listener entity) [0–10] |
-| `s_alVolOther` | `1.0` | Other players/entities. Anti-cheat cap 2×. [0–2] |
+| `s_alVolEnemy` | `1.0` | Enemy players/entities. Anti-cheat cap 2×. [0–2] |
 | `s_alVolImpact` | `1.0` | World entity impacts (brass, explosions). Anti-cheat cap 2×. [0–2] |
 | `s_alVolEnv` | `1.0` | Looping ambient/environmental sounds [0–10] |
 | `s_alVolUI` | `1.0` | Hit-markers, kill-confirmations, menu sounds [0–10] |
