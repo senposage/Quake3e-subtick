@@ -35,8 +35,10 @@ that ship no PBR assets) is the motivating feature and is covered in detail in P
 
 Our repo (`Quake3e-urt`) has URT-specific patches on top of Quake3e that must be preserved:
 - URT auth server (`USE_AUTH`)
-- Positional VoIP + EQ normalisation (`snd_openal.c`)
 - Rankings system, TLD filter, demo recording
+
+Several features we carried in our fork are already present in the upstream base and will
+NOT be re-ported (see section 3.6).
 
 **Strategy**: Treat the rebase as a clean re-implementation rather than a git merge.
 Take upstream as the new base, migrate our patches as new additions, and implement the
@@ -144,25 +146,7 @@ The server sends player GUIDs to the auth server; the auth server responds with 
 tweaks but does NOT have URT auth. Add a new `sv_urt_auth.c` / `sv_urt_auth.h` pair
 that implements the AUTH handshake, registered in `SV_Init`.
 
-### 3.2 Positional VoIP + EQ Normalisation
-
-**Files**: `code/client/snd_openal.c` (8106 lines), `code/client/snd_main.c`
-
-**What it does** (from stored memory):
-- Routes incoming VoIP audio as a spatialized OpenAL source at the speaker's entity origin
-- Filters by team (team info from `CS_PLAYERS` configstring)
-- EQ auxiliary send: uses `eqNormFilter` at gain `1/(1 + max_band * slot_gain)` applied
-  to both direct path and EQ send, to prevent clipping when wet adds to dry
-
-**Key identifiers**: `s_openalVoipSpatial`, `eqNormFilter`, `s_al_entity_origins`,
-`SV_Team` from configstring, `CL_VoipSpatialize`.
-
-**Re-implementation note**: The upstream audio backend is `src/audio/backends/snd_backend_openal.c`.
-Port the positional VoIP and EQ normalization logic into the new audio backend.
-The upstream backend already has `s_openalVoipSpatial` and `s_openalVoipGain` cvars
-(verified in `src/audio/snd_main.c`). Add the team-gating and EQ normalization.
-
-### 3.3 Rankings System
+### 3.2 Rankings System
 
 **Files**: `code/server/sv_rankings.c`
 
@@ -172,7 +156,7 @@ queryable interface (used by the URT stats/matchmaking infrastructure).
 **Re-implementation note**: Add as `src/server/sv_urt_rankings.c`. No equivalent
 in upstream.
 
-### 3.4 TLD Filter
+### 3.3 TLD Filter
 
 **Files**: `code/server/tlds.h`
 
@@ -182,7 +166,7 @@ or player filtering on the URT server.
 **Re-implementation note**: Copy `tlds.h` directly to `src/server/tlds.h`, no
 functional change needed.
 
-### 3.5 Demo Recording (`USE_SERVER_DEMO`, `USE_URT_DEMO`)
+### 3.4 Demo Recording (`USE_SERVER_DEMO`, `USE_URT_DEMO`)
 
 **Files**: `code/server/sv_main.c`, `code/server/sv_client.c`,
 `code/client/cl_main.c`
@@ -194,7 +178,7 @@ functional change needed.
 path interfaces with `sv_snapshot.c`; ensure compatibility with upstream's snapshot
 system.
 
-### 3.6 URT Build Flags
+### 3.5 URT Build Flags
 
 **Makefile flags to carry forward into CMake**:
 - `USE_AUTH=1`
@@ -202,10 +186,25 @@ system.
 - `USE_URT_DEMO=1`
 - `CNAME=quake3e-urt`
 - `DNAME=quake3e-urt.ded`
-- `USE_OPENAL=1`
-- `USE_FTWGL=1` (if still needed with Vulkan)
 
 Add a `cmake/URT.cmake` include file that sets URT-specific compile definitions.
+
+### 3.6 Features Superseded by Upstream (Not Ported)
+
+The following features existed in our fork but are already present -- and in most cases
+better implemented -- in the upstream base. They will NOT be re-ported. Our source files
+for these are sidelined and can be deleted after the rebase is complete.
+
+| Our feature | Our file(s) | Upstream equivalent | Decision |
+|---|---|---|---|
+| Lag compensation / anti-lag | `code/server/sv_antilag.c/h` | `sv_enhanced.c` -- `SV_Unlagged_*` | Drop. Use upstream. |
+| Variable server game Hz | `code/server/sv_main.c` (`sv_gamehz`) | Upstream server tick scheduler | Drop. Use upstream. |
+| Voice chat (VoIP) | `code/client/snd_openal.c` (`s_openalVoipSpatial`) | `src/audio/snd_main.c` -- `s_openalVoipSpatial`, `s_openalVoipGain` | Drop. Use upstream. |
+| OpenAL audio backend | `code/client/snd_openal.c` (8106 lines) | `src/audio/backends/snd_backend_openal.c` | Sidelined. Adopt upstream wholesale. |
+
+The upstream audio backend provides a cleaner abstraction, EFX geometry acoustics,
+adaptive music layering, and built-in VoIP support. There is no net URT-specific logic
+in our `snd_openal.c` that is not covered by the upstream implementation.
 
 ---
 
@@ -216,28 +215,61 @@ The following require explicit integration decisions.
 
 ### 4.1 Renderer: Vulkan PBR (PRIMARY ADOPTION)
 
-The upstream Vulkan renderer replaces our `renderer2` entirely.
+The upstream Vulkan renderer replaces our `renderer2` entirely. All renderer features
+listed in the comparison table (section 2.4) are adopted wholesale by taking upstream
+as the new base. The following enhancements come for free and require no extra porting:
 
-**Key integration tasks**:
+**Rendering pipeline**:
+- Full Cook-Torrance BRDF with IBL, BRDF LUT, and multi-scatter PBR (replaces our basic metalness/roughness)
+- ORM / RMO / MOXR / ORMS packed physical-map auto-discovery (replaces our `_s` specular-only path)
+- MikkTSpace tangent-space normal maps (replaces our `_n`/`_nh` Sobel-generated normals)
+- Cascaded shadow maps (sun), spot-light atlas, point-light cubemap array (replaces CSM placeholder)
+- Weighted Blended Order-Independent Transparency
+- Screen-Space Ambient Occlusion (Halton SSAO) + Horizon-Based AO (HBAO)
+- Screen-Space Reflections (SSR)
+- Volumetric fog (froxel compute, Navier-Stokes fluid sim, temporal reprojection)
+- Sky atmosphere scattering shader
+- Procedural microfacet NDF (glint)
+- GPU compute CBT terrain tessellation
+- GPU compute vegetation wind deformation
+- Per-entity GPU occlusion queries
+
+**Post-processing**:
+- SMAA + MSAA anti-aliasing
+- ACES / Reinhard / Filmic / AgX tone mapping with eye adaptation
+- Depth of Field, motion blur, panini projection, vignette, chromatic aberration, film grain
+
+**Asset support**:
+- glTF 2.0, OBJ, MD5, morph targets (in addition to MD3 / IQM)
+- EXR (HDR), KTX2, QOI, SVG image formats (in addition to PNG / TGA / JPG / DDS)
+- BC7, KTX2 texture compression (in addition to DXT / BC1-3)
+- EXR equirectangular HDR skybox + IBL
+- SDF font rendering (`cl_sdf_font.c/h`)
+- ImGui debug inspector (`src/renderers/vulkan/inspector/`)
+
+**Key integration tasks** (URT-specific wiring only):
 - Map our `r_pbr`, `r_normalMapping`, `r_specularMapping`, `r_genNormalMaps`,
   `r_baseGloss`, `r_baseNormalX/Y`, `r_baseParallax`, `r_baseSpecular` cvars to
   their upstream equivalents (`r_pbr`, `r_pbr_packedPreferred`, etc.)
 - Ensure URT `.shader` files (in the `q3ut4/` game directory) are parseable by
   the upstream shader parser. The upstream parser supports all legacy Q3 directives.
-- See Phase 6 for the BSP-specific PBR data generation work.
+- See Phase 5 for the BSP-specific PBR data generation work.
 
-### 4.2 Audio: Refactored Backend
+### 4.2 Audio: Upstream Backend (Wholesale Adoption)
 
-The upstream audio system is in `src/audio/` with a backend abstraction.
-Our `snd_openal.c` (8106 lines) and associated files must be merged into
-the new `src/audio/backends/snd_backend_openal.c` structure.
+The upstream audio system (`src/audio/`) is a complete rewrite with a backend
+abstraction, EFX geometry acoustics, adaptive music layering, and built-in VoIP.
+Our `snd_openal.c` (8106 lines) is sidelined entirely -- there is no net
+URT-specific audio logic that is not already covered by the upstream backend.
 
-**Key integration tasks**:
-- Port URT positional VoIP (section 3.4)
-- Port EQ normalization filter (section 3.4)
-- The upstream backend already has `s_openalVoipSpatial` scaffolding -- verify
-  and extend it
-- Adaptive music (`snd_music_adaptive.c`) is new; no URT conflict
+**What we get for free**:
+- VoIP with `s_openalVoipSpatial` and `s_openalVoipGain` (upstream `snd_main.c`)
+- Geometry-based room acoustics via EFX (`snd_acoustics_efx.h`)
+- Adaptive music layers (`snd_music_adaptive.c`)
+- Cleaner backend abstraction (easier future maintenance)
+
+**Decision**: Adopt upstream audio wholesale. No porting work required.
+Delete `code/client/snd_openal.c` after rebase is confirmed stable.
 
 ### 4.3 Physics (Bullet)
 
@@ -314,10 +346,9 @@ urt/next-gen-5-rebase          <- integration branch (merge target)
   urt/phase1-build             <- CMake + CI setup
   urt/phase2-auth              <- URT auth server
   urt/phase3-server            <- rankings, demo
-  urt/phase4-audio             <- positional VoIP, EQ norm
-  urt/phase5-renderer-compat   <- shader parser, texture compat
-  urt/phase6-pbr-from-bsp      <- BSP PBR data generation (main feature)
-  urt/phase7-validation        <- test pass, CI green
+  urt/phase4-renderer-compat   <- shader parser, texture compat
+  urt/phase5-pbr-from-bsp      <- BSP PBR data generation (main feature)
+  urt/phase6-validation        <- test pass, CI green
 ```
 
 ### 5.4 File-by-file migration notes
@@ -328,7 +359,8 @@ For each URT patch file, the migration approach is:
 |---|---|
 | `sv_rankings.c` | Add as `src/server/sv_urt_rankings.c` |
 | `tlds.h` | Copy to `src/server/tlds.h` |
-| `snd_openal.c` | Port URT changes into `src/audio/backends/snd_backend_openal.c` |
+| `snd_openal.c` | Sidelined -- adopt upstream audio backend wholesale (section 3.6) |
+| `sv_antilag.c/h` | Deleted -- upstream `sv_enhanced.c` covers this (section 3.6) |
 | `cl_main.c` (auth patches) | Apply auth patches to upstream `src/client/cl_main.c` |
 | `sv_main.c` (auth) | Apply to upstream `src/server/sv_main.c` |
 | `sv_client.c` (auth + demo) | Apply to upstream `src/server/sv_client.c` |
@@ -633,30 +665,9 @@ For best visual quality, supply _n and _orm textures per PBR_TEXTURES.md.
 
 ---
 
-### Phase 4: Audio -- Positional VoIP and EQ Normalisation
+### Phase 4: Renderer Compatibility
 
-**Branch**: `urt/phase4-audio`  
-**Agent(s)**: 1  
-**Files**: `src/audio/backends/snd_backend_openal.c`, `src/audio/snd_main.c`
-
-**Tasks**:
-- [ ] Audit upstream `snd_backend_openal.c` for existing `s_openalVoipSpatial` code
-- [ ] Port URT positional VoIP from our `snd_openal.c`:
-  - Spatialize incoming VoIP packets as OpenAL sources at `s_al_entity_origins[entnum]`
-  - Gate spatialization by team (read `CS_PLAYERS+entnum` configstring, key `"t"`)
-- [ ] Port EQ normalization filter:
-  - Create `eqNormFilter` auxiliary send filter at gain `1 / (1 + max_band * slot_gain)`
-  - Apply to both direct path and EQ send to prevent clipping
-- [ ] Ensure no UTF/non-ASCII characters in any audio source file (stored convention)
-- [ ] Verify EFX acoustics (geometry-based reverb) works with URT maps
-
-**Deliverable**: Positional VoIP works in URT; EQ does not clip.
-
----
-
-### Phase 5: Renderer Compatibility
-
-**Branch**: `urt/phase5-renderer-compat`  
+**Branch**: `urt/phase4-renderer-compat`  
 **Agent(s)**: 1  
 **Files**: `src/renderers/vulkan/tr_shader.c`, `src/renderers/vulkan/tr_init.c`,
 `src/renderers/common/tr_image*.c`
@@ -676,9 +687,9 @@ For best visual quality, supply _n and _orm textures per PBR_TEXTURES.md.
 
 ---
 
-### Phase 6: PBR-from-BSP Auto-Generation
+### Phase 5: PBR-from-BSP Auto-Generation
 
-**Branch**: `urt/phase6-pbr-from-bsp`  
+**Branch**: `urt/phase5-pbr-from-bsp`  
 **Agent(s)**: 1-2  
 **Files** (all new or modified):
 
@@ -692,13 +703,13 @@ For best visual quality, supply _n and _orm textures per PBR_TEXTURES.md.
 
 **Tasks**:
 
-**6a. Port `RGBAtoNormal` from renderer2**
+**5a. Port `RGBAtoNormal` from renderer2**
 - [ ] Copy `RGBAtoNormal`, `RGBAtoYCoCgA`, `YCoCgAtoRGBA` from our `tr_image.c`
   into `vk_pbr_autogen.c` with prefix `VKAG_` (to avoid link conflicts)
 - [ ] Write `VK_AutoGenNormalFromDiffuse(image_t*, imgFlags_t)`:
   load raw pixels, call `VKAG_RGBAtoNormal`, cache as `<name>_n`, return image
 
-**6b. Implement ORM generation**
+**5b. Implement ORM generation**
 - [ ] Write `VKAG_RGBAtoORM(pic, out, w, h, lmData, lmW, lmH)`:
   - R channel: bilinear-sample lightmap luminance at each texel's lightmap UV
   - G channel: roughness heuristic (`0.4 + 0.6*saturation - 0.3*(luma/255)`)
@@ -710,14 +721,14 @@ For best visual quality, supply _n and _orm textures per PBR_TEXTURES.md.
 - [ ] Handle the case where lightmap data is not available (entity surfaces, 2D):
   use `A=255, G=r_pbr_autoORM_roughness, B=r_pbr_autoORM_metalness`
 
-**6c. World-load integration in `tr_bsp.c`**
+**5c. World-load integration in `tr_bsp.c`**
 - [ ] Add `R_GeneratePBRMapsForWorld(world_t *world)` at end of `RE_LoadWorldMap`
 - [ ] For each world shader, check if `_n` and `_orm` already exist in cache;
   if not, call the appropriate autogen function
 - [ ] Access lightmap data: use `tr.lightmaps[lmIndex]` pixel data OR re-extract
   from the BSP raw lightmap lump (stored in `s_worldData`)
 
-**6d. Register cvars in `tr_init.c`**
+**5d. Register cvars in `tr_init.c`**
 - [ ] `r_pbr_autoNormal` (default `"1"`, CVAR_ARCHIVE | CVAR_LATCH)
 - [ ] `r_pbr_autoORM` (default `"1"`, CVAR_ARCHIVE | CVAR_LATCH)
 - [ ] `r_pbr_autoORM_roughness` (default `"0.6"`, CVAR_ARCHIVE | CVAR_LATCH)
@@ -725,7 +736,7 @@ For best visual quality, supply _n and _orm textures per PBR_TEXTURES.md.
 - [ ] `r_pbr_autoORM_useHeuristic` (default `"1"`, CVAR_ARCHIVE | CVAR_LATCH)
 - [ ] `r_pbr_autoORM_aoFromLightmap` (default `"1"`, CVAR_ARCHIVE | CVAR_LATCH)
 
-**6e. Documentation**
+**5e. Documentation**
 - [ ] Add a section to `docs/PBR_TEXTURES.md` describing the auto-gen system
 - [ ] Document the fallback chain: authored assets -> auto-gen -> flat defaults
 
@@ -735,14 +746,13 @@ for competitive play; no authored asset changes required.
 
 ---
 
-### Phase 7: Validation and CI
+### Phase 6: Validation and CI
 
-**Branch**: `urt/phase7-validation`  
+**Branch**: `urt/phase6-validation`  
 **Agent(s)**: 1  
 
 **Tasks**:
 - [ ] Load `ut4_abbey` (representative URT map) with `r_pbr 1` -- verify no shader errors
-- [ ] Verify positional VoIP: player A talks, player B hears audio localized to A's position
 - [ ] Verify auth: client connects, auth handshake completes (mock auth server OK)
 - [ ] Run full build on Linux (GCC 15+, Clang 18+), macOS, Windows
 - [ ] Run smoke tests (`scripts/smoke_test.sh` from upstream)
@@ -758,18 +768,17 @@ for competitive play; no authored asset changes required.
 | 1 | Build system | CMake, CI/CD |
 | 2 | URT auth | Networking, C server code |
 | 3 | Rankings + demo | Server I/O |
-| 4 | Audio / VoIP | OpenAL, signal processing |
-| 5 | Renderer compat | Shader systems, Q3 formats |
-| 6a | Normal map gen | Image processing, GLSL |
-| 6b | ORM gen | Image processing, PBR theory |
-| 6c | BSP integration | BSP format, renderer internals |
-| 6d | Cvar wiring | Engine plumbing |
-| 7 | Validation | QA, integration testing |
+| 4 | Renderer compat | Shader systems, Q3 formats |
+| 5a | Normal map gen | Image processing, GLSL |
+| 5b | ORM gen | Image processing, PBR theory |
+| 5c | BSP integration | BSP format, renderer internals |
+| 5d | Cvar wiring | Engine plumbing |
+| 6 | Validation | QA, integration testing |
 
-Phases 1-4 can run largely in parallel after Phase 1 produces a compilable base.
-Phase 5 should complete before Phase 6 starts (renderer must load URT shaders first).
-Phase 6 sub-tasks (6a-6d) can be split across agents in the same branch.
-Phase 7 runs last.
+Phases 1-3 can run largely in parallel after Phase 1 produces a compilable base.
+Phase 4 should complete before Phase 5 starts (renderer must load URT shaders first).
+Phase 5 sub-tasks (5a-5d) can be split across agents in the same branch.
+Phase 6 runs last.
 
 ---
 
@@ -856,12 +865,6 @@ Our existing CI scripts that call `make` must be updated to call
 - [ ] `USE_SERVER_DEMO`: server demo file created, playable
 - [ ] Rankings: kill/death increments correctly
 
-### Audio
-
-- [ ] Positional VoIP: `s_openalVoipSpatial 1`: voice comes from player's 3D position
-- [ ] Team VoIP: teammates audible, enemies not (when team filtering enabled)
-- [ ] EQ normalization: no clipping at high EQ send gain values
-
 ### Build
 
 - [ ] Linux (GCC 15+): compiles with zero errors
@@ -876,9 +879,7 @@ Our existing CI scripts that call `make` must be updated to call
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Upstream shader parser rejects URT `.shader` keywords | Medium | High | Audit all URT shader files against upstream parser before Phase 6 (Phase 5) |
-| BSP lightmap UV access is complex to implement | High | Medium | Phase 6b: implement without lightmap first (flat AO); add lightmap AO in a follow-up |
-| Anti-lag differences between our impl and upstream `sv_enhanced.c` | Medium | Medium | Diff both files carefully; write a regression test |
+| Upstream shader parser rejects URT `.shader` keywords | Medium | High | Audit all URT shader files against upstream parser before Phase 5 (Phase 4) |
 | URT auth UDP packets break over DTLS | Low | High | Test auth handshake with DTLS enabled/disabled separately |
 | ORM heuristic produces incorrect metalness for colourful textures | High | Low | Clamp metalness to 0 by default; heuristic only for desaturated surfaces |
 | Memory overhead of auto-generated maps | Medium | Medium | Auto-gen images share the normal image cache; size is proportional to texture count -- benchmark on `ut4_abbey` |
@@ -914,7 +915,3 @@ Our existing CI scripts that call `make` must be updated to call
   bullet, `->` for arrow.
 - Auth server is `authserver.urbanterror.info`; `AUTH:CL` packets come from there,
   NOT from `cls.authorizeServer` (which is `authorize.urbanterror.info`).
-- Positional VoIP: player team from `cl.gameState.stringData + stringOffsets[CS_PLAYERS+entnum]`
-  via `Info_ValueForKey(cs,"t")`; entity positions from `s_al_entity_origins[]`.
-- EQ auxiliary send: additive wet+dry causes clipping; fix is `eqNormFilter` at
-  gain `1 / (1 + max_band * slot_gain)` applied to both paths.
