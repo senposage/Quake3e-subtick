@@ -57,7 +57,7 @@
 The most important custom change. The server decouples the engine tick rate from the QVM game frame rate:
 
 ```
-sv_fps   = engine ticks/sec (default 60)  — input sampling, antilag, snapshots
+sv_fps   = engine ticks/sec (default 50)  — input sampling, antilag, snapshots
 sv_gameHz = QVM GAME_RUN_FRAME rate (default 20) — what level.time sees
 ```
 
@@ -1044,7 +1044,7 @@ typedef struct client_s {
 
 | Cvar | Default | Notes |
 |------|---------|-------|
-| `sv_fps` | 60 | Engine tick + input rate |
+| `sv_fps` | 50 | Engine tick + input rate. Must be a factor of 1000 (10,20,25,40,50,100,125). Non-factors cause truncated frame intervals and server clock drift. |
 | `sv_gameHz` | 20 | QVM GAME_RUN_FRAME rate |
 | `sv_snapshotFps` | -1 | Snapshot send rate (-1=sv_fps, 0=client snaps) |
 | `sv_pmoveMsec` | 8 | Max Pmove step size (8=125fps equivalent) |

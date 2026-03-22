@@ -386,7 +386,7 @@ static void SV_MapRestart_f( void ) {
 			// gap = sv.gameTime_now - sv.gameTime_at_restart and triggers a
 			// spurious antiwarp injection on their first active tick.  On WAN
 			// connections the round-trip from map_restart to the first usercmd
-			// is typically 50-200 ms >> awTol (16 ms), so the injection fires
+			// is typically 50-200 ms >> awTol (20 ms at sv_fps 50), so the injection fires
 			// for virtually every client on every map_restart.
 			//
 			// Using 0 activates the existing guard in the antiwarp loop:

@@ -787,12 +787,14 @@ void SV_Init( void )
 	Cvar_SetDescription( sv_rconPassword, "Password for remote server commands." );
 	sv_privatePassword = Cvar_Get ("sv_privatePassword", "", CVAR_TEMP );
 	Cvar_SetDescription( sv_privatePassword, "Set password for private clients to login with." );
-	sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
+	sv_fps = Cvar_Get ("sv_fps", "50", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
 	Cvar_CheckRange( sv_fps, "10", "125", CV_INTEGER );
 	Cvar_SetDescription( sv_fps,
 		"Engine tick rate (input sampling + snapshot dispatch rate).\n"
-		"For exact integer ms frame intervals use a factor of 1000: 10, 20, 25, 40, 50, 100, 125.\n"
-		"Non-factors (e.g. 30, 60) produce fractional ms intervals causing minor timing drift." );
+		"Must be a factor of 1000 for exact integer ms frame intervals: 10, 20, 25, 40, 50, 100, 125.\n"
+		"Non-factors (e.g. 30, 60) cause integer division truncation: 1000/60=16ms (not 16.67ms),\n"
+		"making the server run at ~62.5 Hz instead of 60 Hz, drifting server time from wall clock.\n"
+		"Default 50 = 20ms frames (exact). 40 = 25ms, 100 = 10ms, 125 = 8ms." );
 	if ( sv_fps->integer > 0 && 1000 % sv_fps->integer != 0 ) {
 		Com_Printf( S_COLOR_YELLOW "WARNING: sv_fps %d is not a factor of 1000 -- "
 			"frame interval %.2f ms is fractional. "
@@ -831,8 +833,8 @@ void SV_Init( void )
 	sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
 	Cvar_SetDescription( sv_bufferMs, "Position delay (ms) via ring buffer. 0=off, <0=auto (one snapshot interval)." );
 
-	sv_velSmooth = Cvar_Get ("sv_velSmooth", "64", CVAR_ARCHIVE );
-	Cvar_SetDescription( sv_velSmooth, "Velocity smoothing window (ms) for TR_LINEAR trDelta. Uses exponential weighted average (alpha=0.5/step): the most-recent sample always has the highest weight (e.g. ~53% of 4 samples at 60Hz/64ms), older samples decay by half per step. Wider window with EWA reduces per-tick trDelta jitter without adding directional lag. 0=off." );
+	sv_velSmooth = Cvar_Get ("sv_velSmooth", "80", CVAR_ARCHIVE );
+	Cvar_SetDescription( sv_velSmooth, "Velocity smoothing window (ms) for TR_LINEAR trDelta. Uses exponential weighted average (alpha=0.5/step): the most-recent sample always has the highest weight (e.g. ~53% of 4 samples at 50Hz/80ms), older samples decay by half per step. Wider window with EWA reduces per-tick trDelta jitter without adding directional lag. 0=off." );
 
 	sv_extrapolate = Cvar_Get ("sv_extrapolate", "0", CVAR_ARCHIVE );
 	Cvar_SetDescription( sv_extrapolate, "Legacy position prediction. 0=off." );

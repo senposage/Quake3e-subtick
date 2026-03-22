@@ -198,18 +198,19 @@ serverinfo (custom server detection), the thresholds scale with
 `cl.snapshotMsec`:
 
 ```c
-resetTime  = max(snapshotMsec * 10, 500)  // e.g. 160 ms at 60Hz, 500 ms floor
-fastAdjust = max(snapshotMsec *  2,  50)  // e.g.  32 ms at 60Hz,  50 ms floor
+resetTime  = max(snapshotMsec * 10, 500)  // e.g. 500 ms at 50Hz (floor), 100 ms at 100Hz
+fastAdjust = max(snapshotMsec *  2,  50)  // e.g.  50 ms at 50Hz (floor),  20 ms at 100Hz
 ```
 
 At 20 Hz (`snapshotMsec = 50`): `resetTime = 500`, `fastAdjust = 100` --
-identical to vanilla.  At 60 Hz: `resetTime = 160`, `fastAdjust = 32`.  At
+identical to vanilla.  At 50 Hz (default): `resetTime = 500` (floor), `fastAdjust = 50` (floor) --
+also equivalent to vanilla.  At 100 Hz: `resetTime = 100`, `fastAdjust = 20`.  At
 125 Hz: `resetTime = 80`, `fastAdjust = 16`.
 
 The slow-drift backward step is also scaled:
 
 ```c
-slowFrac -= (snapshotMsec < 30) ? 2 : 4;  // +/-0.5 ms/snap at 60Hz, 1 ms/snap at 20Hz
+slowFrac -= (snapshotMsec < 30) ? 2 : 4;  // +/-0.5 ms/snap at 50Hz (default), 1 ms/snap at 20Hz
 ```
 
 This keeps the drift rate proportional to the snapshot interval, so recovery

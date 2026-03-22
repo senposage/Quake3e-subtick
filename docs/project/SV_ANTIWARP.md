@@ -331,15 +331,15 @@ Antiwarp never fires until the client sends a real usercmd and resets
 
 ### Auto values
 
-With all defaults at `0`/`150` and `sv_fps 60` / `sv_gameHz 0`:
+With all defaults at `0`/`150` and `sv_fps 50` / `sv_gameHz 0`:
 
 | Cvar | Auto value | Source |
 |------|-----------|--------|
-| `awTol` | 16 ms | `_gameMsec` = 1000 / sv_fps = 16 ms |
-| `awExtraMs` | 16 ms | = `awTol` |
+| `awTol` | 20 ms | `_gameMsec` = 1000 / sv_fps = 20 ms |
+| `awExtraMs` | 20 ms | = `awTol` |
 | `awDecayMs` | 150 ms | `sv_antiwarpDecay` explicit |
 
-Total antiwarp window before player stops: `16 + 16 + 150 = 182 ms`.
+Total antiwarp window before player stops: `20 + 20 + 150 = 190 ms`.
 
 ---
 
@@ -388,7 +388,7 @@ sv_antilagMaxMs  200
 
 ```
 sv_gameHz            0       // sv_fps rate game frames (no sub-rate)
-sv_fps               60
+sv_fps               50
 sv_antiwarp          2       // decay mode
 sv_antiwarpDecay     150
 // g_antiwarp auto-forced to 0 by engine
@@ -398,7 +398,7 @@ sv_antiwarpDecay     150
 
 ```
 sv_gameHz            20      // REQUIRED — g_antiwarp hardcodes 50ms steps
-sv_fps               60
+sv_fps               50
 sv_antiwarp          0       // engine antiwarp off
 // set g_antiwarp 1 in your map config or game QVM
 ```
@@ -407,7 +407,7 @@ sv_antiwarp          0       // engine antiwarp off
 
 ```
 sv_gameHz            20      // REQUIRED
-sv_fps               60
+sv_fps               50
 sv_antiwarp          0       // QVM antiwarp handles it
 // g_antiwarp 1 in QVM config
 ```
@@ -428,29 +428,28 @@ sv_antiwarpDecay     150
 ## Timing Diagram
 
 ```
-sv_antiwarp 2  ·  sv_fps 60  ·  sv_gameHz 0
-awTol=16ms  awExtraMs=16ms  awDecayMs=150ms
+sv_antiwarp 2  ·  sv_fps 50  ·  sv_gameHz 0
+awTol=20ms  awExtraMs=20ms  awDecayMs=150ms
 
 Real usercmds flowing:
   t=0   ClientThink(real cmd)   awLastThinkTime=0
-  t=16  ClientThink(real cmd)   awLastThinkTime=16
-  t=32  ClientThink(real cmd)   awLastThinkTime=32
+  t=20  ClientThink(real cmd)   awLastThinkTime=20
+  t=40  ClientThink(real cmd)   awLastThinkTime=40
 
-Lag spike starts at t=32:
+Lag spike starts at t=40:
 
-  t=48   awGap=16ms → > awTol(16) → INJECT  (Phase 1, full inputs)
-                       lastUsercmd.serverTime += 16
+  t=60   awGap=20ms → not > awTol(20) → no inject yet
+  t=80   awGap=40ms → > awTol(20) → INJECT  (Phase 1, full: 40 < decayStart=40)
+                       lastUsercmd.serverTime += 20
                        ClientThink(injected)
 
-  t=64   awGap=32ms → > awTol → INJECT  (Phase 1, still full: 32 < awTol+awExtraMs=32)
-  t=80   awGap=48ms → Phase 2 starts (elapsed = 48-32 = 16ms, decay 16/150)
-         scale = 127 - (127×16/150) ≈ 113  →  inputs at ~89%
+  t=100  awGap=60ms → > awTol → INJECT  (Phase 2: elapsed = 60-40 = 20ms > awExtraMs)
+         scale = 127 - (127×20/150) ≈ 110  →  inputs at ~87%
 
-  t=100  awGap=68ms  scale ≈ 100  →  inputs at ~79%
-  t=150  awGap=118ms scale ≈ 53   →  inputs at ~42%
-  t=180  awGap=148ms scale ≈ 3    →  inputs at ~2%
+  t=120  awGap=80ms  scale ≈ 93   →  inputs at ~73%
+  t=170  awGap=130ms scale ≈ 17   →  inputs at ~13%
 
-  t=182  awGap=150ms  elapsed=150 ≥ awDecayMs → Phase 3
+  t=190  awGap=150ms  elapsed=150 ≥ awDecayMs → Phase 3
          forwardmove = rightmove = upmove = 0
          Pmove ground friction decelerates player to rest
 

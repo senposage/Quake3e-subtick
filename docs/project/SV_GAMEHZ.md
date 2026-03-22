@@ -37,7 +37,7 @@ ent->client->pers.cmd.serverTime += 50;  // assumes 50ms game frames
 
 This fires when `level.time - lastCmdTime > g_antiWarpTol` (default 50ms). It works correctly **only** when game frames are exactly 50ms (sv_gameHz 20).
 
-**At sv_gameHz 0 with sv_fps 60:** Game frames are 16ms but the injection adds 50ms — a 50ms jump fires every 16ms tick, teleporting lagging players at 3× the intended rate. **Never use QVM g_antiwarp with sv_gameHz 0 unless sv_fps is also 20.**
+**At sv_gameHz 0 with high sv_fps (e.g. 50):** Game frames are 20ms but the injection adds 50ms — a 50ms jump fires every 20ms tick, teleporting lagging players at 2.5x the intended rate. **Never use QVM g_antiwarp with sv_gameHz 0 unless sv_fps is also 20.**
 
 Engine `sv_antiwarp` eliminates this constraint by using `gameMsec` (actual frame duration) instead of a hardcoded 50ms.
 
@@ -45,7 +45,7 @@ Engine `sv_antiwarp` eliminates this constraint by using `gameMsec` (actual fram
 
 ## Position Correction at sv_gameHz 20
 
-When sv_gameHz 20 and sv_fps 60, `BG_PlayerStateToEntityState` (which stamps entity positions into snapshots) only runs at 20Hz inside `ClientEndFrame`. Three consecutive 60Hz snapshots carry identical positions for **all** players → visible stutter for any observer.
+When sv_gameHz 20 and sv_fps 50, `BG_PlayerStateToEntityState` (which stamps entity positions into snapshots) only runs at 20Hz inside `ClientEndFrame`. Two consecutive 50Hz snapshots carry identical positions for **all** players → visible stutter for any observer.
 
 ### Root cause: two distinct staleness problems
 
@@ -98,10 +98,11 @@ Per-client ring buffer provides position delay for smoothing between 20Hz update
 |--------|-----------|
 | 20     | 50ms      |
 | 40     | 25ms      |
-| 60     | 16ms      |
-| 80     | 12ms      |
+| 50     | 20ms      |
 | 100    | 10ms      |
 | 125    | 8ms       |
+
+Only factors of 1000 are listed. Non-factors (e.g. 60: 1000/60=16ms truncated, runs ~62.5Hz) cause server clock drift and should not be used.
 
 At sv_gameHz 0: not useful (adds latency for no benefit — positions already fresh).
 
@@ -132,7 +133,7 @@ At sv_gamehz > 0: the position extrapolation above ensures the `trBase` in each 
 ### UT 4.3.4 — Recommended
 ```
 sv_gameHz 0
-sv_fps 60
+sv_fps 50
 sv_antiwarp 2
 sv_antiwarpDecay 150
 sv_extrapolate 1
@@ -144,7 +145,7 @@ sv_velSmooth 32
 ### UT 4.3.4 — With QVM Antiwarp
 ```
 sv_gameHz 20
-sv_fps 60
+sv_fps 50
 sv_antiwarp 0
 g_antiwarp 1
 sv_extrapolate 1
@@ -156,7 +157,7 @@ sv_velSmooth 32
 ### UT 4.0-4.2
 ```
 sv_gameHz 20
-sv_fps 60
+sv_fps 50
 sv_antiwarp 0
 sv_extrapolate 1
 sv_smoothClients 1
