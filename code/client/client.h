@@ -121,6 +121,8 @@ typedef struct {
 	qboolean	newSnapshots;		// set on parse of any valid packet
 
 	int			snapshotMsec;		// EMA of snapshot intervals, clamped [8,100]
+	int			snapshotHz;			// exact configured snapshot rate (Hz) seeded from sv_fps/sv_snapshotFps;
+									// avoids 1000/snapshotMsec back-conversion errors at non-divisors like 60
 	float		frameInterpolation;	// current interpolation fraction for cgame
 	qboolean	vanillaServer;		// true if server lacks sv_snapshotFps (adaptive timing fully disabled)
 	qboolean	serverForbidsAdaptiveTiming;	// true if vanilla server or sv_allowClientAdaptiveTiming 0

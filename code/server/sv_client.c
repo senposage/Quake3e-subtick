@@ -1866,6 +1866,7 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 		if ( snapHz < 1 ) snapHz = 1;
 		cl->lastSnapshotTime = svs.time - 9999; // generate a snapshot immediately
 		cl->snapshotMsec = 1000 / snapHz;
+		cl->snapshotHz   = snapHz;
 		cl->rate = 0;
 		return;
 	}
@@ -1913,6 +1914,7 @@ void SV_UserinfoChanged( client_t *cl, qboolean updateUserinfo, qboolean runFilt
 		}
 		if ( snapRate < 1 ) snapRate = 1;
 		i = 1000 / snapRate;
+		cl->snapshotHz = snapRate; // exact rate -- avoids 1000/snapshotMsec back-conversion error
 	}
 
 	if ( i != cl->snapshotMsec )

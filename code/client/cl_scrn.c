@@ -1203,7 +1203,7 @@ static void SCR_NetgraphDump_f( void ) {
 	}
 
 	Com_RealTime( &t );
-	snapHz = (netMonDispSnapCount > 0) ? netMonDispSnapCount : ((cl.snapshotMsec > 0) ? (1000 / cl.snapshotMsec) : 0);
+	snapHz = (netMonDispSnapCount > 0) ? netMonDispSnapCount : (cl.snapshotHz > 0 ? cl.snapshotHz : (cl.snapshotMsec > 0 ? (1000 / cl.snapshotMsec) : 0));
 
 	Com_sprintf( line, sizeof(line),
 		"\n=== netgraph_dump  %04d-%02d-%02d %02d:%02d:%02d ===\n",
@@ -1344,7 +1344,7 @@ static void SCR_NetMonUpdate( void ) {
 			qtime_t t;
 			char    logline[256];
 			Com_RealTime( &t );
-			snapHz = (snapCount > 0) ? snapCount : ((cl.snapshotMsec > 0) ? (1000 / cl.snapshotMsec) : 0);
+			snapHz = (snapCount > 0) ? snapCount : (cl.snapshotHz > 0 ? cl.snapshotHz : (cl.snapshotMsec > 0 ? (1000 / cl.snapshotMsec) : 0));
 			Com_sprintf( logline, sizeof(logline),
 				"[%02d:%02d:%02d] STATS  snap=%dHz  ping=%d(%d..%d)ms  fI=%.3f"
 				"  dT=%d..%dms  drop=%d/s  in=%dB/s  out=%dB/s"
@@ -1364,7 +1364,7 @@ static void SCR_NetMonUpdate( void ) {
 
 		/* laggot announce: scan 30s ring buffer for worst values */
 		if ( cl_netgraph->integer && cl_laggotannounce->integer && cls.realtime - laggotLastAnnounce >= 30000 ) {
-			int  sHz = (snapCount > 0) ? snapCount : ((cl.snapshotMsec > 0) ? (1000 / cl.snapshotMsec) : 60);
+			int  sHz = (snapCount > 0) ? snapCount : (cl.snapshotHz > 0 ? cl.snapshotHz : (cl.snapshotMsec > 0 ? (1000 / cl.snapshotMsec) : 60));
 			int  extrapThresh = sHz * 3 / 4;
 			int  worstDrop = 0, worstFast = 0, worstSnapGapAvg = 0, worstSnapGapMax = 0;
 			int  worstExtrap = 0, worstFtAvg = 0, worstChoke = 0;
@@ -1464,7 +1464,7 @@ static void SCR_DrawNetMonitor( void ) {
 	tx = bx + pad;
 	ty = by + pad;
 
-	snapHz = (netMonDispSnapCount > 0) ? netMonDispSnapCount : ((cl.snapshotMsec > 0) ? (1000 / cl.snapshotMsec) : 0);
+	snapHz = (netMonDispSnapCount > 0) ? netMonDispSnapCount : (cl.snapshotHz > 0 ? cl.snapshotHz : (cl.snapshotMsec > 0 ? (1000 / cl.snapshotMsec) : 0));
 
 	/* row 1 - title */
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite,
@@ -1494,7 +1494,7 @@ static void SCR_DrawNetMonitor( void ) {
 
 	/* row 6 - drops + extrapolations + caps */
 	{
-		int nmSnapHz = (netMonDispSnapCount > 0) ? netMonDispSnapCount : ((cl.snapshotMsec > 0) ? (1000 / cl.snapshotMsec) : 60);
+		int nmSnapHz = (netMonDispSnapCount > 0) ? netMonDispSnapCount : (cl.snapshotHz > 0 ? cl.snapshotHz : (cl.snapshotMsec > 0 ? (1000 / cl.snapshotMsec) : 60));
 		int extrapYellow, extrapRed;
 		// At high fps (snapshotMsec < 30, e.g. 60Hz) the Ext equilibrium is ~snapsHz/2
 		// (design intent: stable serverTimeDelta).  Raise alert thresholds accordingly

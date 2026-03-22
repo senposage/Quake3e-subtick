@@ -471,7 +471,7 @@ void SV_Antilag_NoteSnapshot( int clientNum ) {
 
         Com_Printf( "RATE cl[%2d] %-16s | snap: obs=%.1fHz target=%dHz | pkt: %.1fHz | ping=%dms\n",
             clientNum, cl->name, obsHz,
-            1000 / ( cl->snapshotMsec > 0 ? cl->snapshotMsec : 1 ),
+            cl->snapshotHz > 0 ? cl->snapshotHz : sv_fps->integer,
             pktHz, cl->ping );
     }
 }

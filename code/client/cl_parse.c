@@ -578,26 +578,44 @@ static void CL_ParseServerInfo( void )
 	if ( len > 0 &&  clc.sv_dlURL[len-1] == '/' )
 		clc.sv_dlURL[len-1] = '\0';
 
-	// Pre-seed cl.snapshotMsec from server's sv_fps (via SERVERINFO)
-	// so adaptive timing thresholds are reasonable before the first EMA
+	// Pre-seed cl.snapshotMsec / cl.snapshotHz from server's sv_fps / sv_snapshotFps (SERVERINFO)
+	// so adaptive timing thresholds are reasonable before the first EMA measurement.
+	// cl.snapshotHz stores the exact configured rate to avoid 1000/snapshotMsec back-conversion
+	// errors at non-divisors like sv_fps=60 (1000/16=62, not 60).
+	//
+	// Vanilla-server rule: sv_snapshotFps is ABSENT on vanilla servers (that is also how
+	// cl.vanillaServer is detected below).  When absent, snapshotHz = sv_fps exactly.
+	// When present, snapshotHz = min(sv_snapshotFps, sv_fps) unless sv_snapshotFps <= 0
+	// (meaning -1=match-sv_fps or 0=per-client-snaps), in which case snapshotHz = sv_fps.
 	{
-		const char *svFpsStr = Info_ValueForKey( serverInfo, "sv_fps" );
+		const char *svFpsStr   = Info_ValueForKey( serverInfo, "sv_fps" );
+		const char *snapFpsStr = Info_ValueForKey( serverInfo, "sv_snapshotFps" );
+
+		// Vanilla detection: absence of sv_snapshotFps disables adaptive timing.
+		cl.vanillaServer = ( snapFpsStr[0] == '\0' );
+
 		if ( svFpsStr[0] ) {
 			int svFps = atoi( svFpsStr );
 			if ( svFps >= 10 && svFps <= 125 ) {
-				cl.snapshotMsec = 1000 / svFps;
-				if ( cl.snapshotMsec < 8 ) cl.snapshotMsec = 8;
+				// Effective snapshot Hz (mirrors SV_UserinfoChanged):
+				//   sv_snapshotFps absent or <= 0 (-1 = match sv_fps, 0 = per-client) -> sv_fps
+				//   sv_snapshotFps > 0                                                 -> min(snapFps, sv_fps)
+				int snapHz = svFps;
+				if ( snapFpsStr[0] ) {
+					int snapFps = atoi( snapFpsStr );
+					if ( snapFps > 0 ) {
+						snapHz = snapFps;
+						if ( snapHz > svFps ) snapHz = svFps;
+					}
+					// snapFps <= 0 (includes -1): keep svFps
+				}
+				if ( snapHz < 1 ) snapHz = 1;
+				cl.snapshotHz   = snapHz;
+				cl.snapshotMsec = 1000 / snapHz;
+				if ( cl.snapshotMsec < 8 )   cl.snapshotMsec = 8;
 				if ( cl.snapshotMsec > 100 ) cl.snapshotMsec = 100;
 			}
 		}
-	}
-
-	// Detect vanilla server: absence of sv_snapshotFps means the server does not
-	// support our adaptive timing protocol.  Adaptive timing thresholds are
-	// disabled for this connection; the serverTime safety cap still applies.
-	{
-		const char *snapFpsStr = Info_ValueForKey( serverInfo, "sv_snapshotFps" );
-		cl.vanillaServer = ( snapFpsStr[0] == '\0' );
 	}
 
 	// Bridge for vm.c: VM_URT43_CgamePatches reads this TEMP cvar to decide
