@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: re-impl
+          ref: master
 
       - name: Validate version input
         run: |
@@ -52,5 +52,6 @@ jobs:
           tag_name: ${{ inputs.version }}
           name: ${{ inputs.title || inputs.version }}
           prerelease: ${{ inputs.prerelease }}
-          target_commitish: re-impl
-          generate_release_notes: true
+          target_commitish: master
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false

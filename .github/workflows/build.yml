@@ -3,7 +3,7 @@ name: build
 on:
   pull_request:
     branches:
-      - re-impl
+      - master
     paths-ignore:
       - '**.md'
       - '*.txt'
@@ -11,7 +11,7 @@ on:
       - 'docs/*'
   push:
     branches:
-      - re-impl
+      - master
     paths-ignore:
       - '**.md'
       - '*.txt'
@@ -28,7 +28,7 @@ permissions:
 jobs:
   windows-msys32:
     name: Windows ${{ matrix.arch }}
-    if: github.event_name != 'release' || github.event.release.target_commitish == 're-impl'
+    if: github.event_name != 'release' || github.event.release.target_commitish == 'master'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -87,7 +87,7 @@ jobs:
 
   ubuntu-x86:
     name: Linux ${{ matrix.arch }}
-    if: github.event_name != 'release' || github.event.release.target_commitish == 're-impl'
+    if: github.event_name != 'release' || github.event.release.target_commitish == 'master'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -141,7 +141,7 @@ jobs:
   create-testing:
     if: >-
       always() && !cancelled() &&
-      github.ref == 'refs/heads/re-impl' &&
+      github.ref == 'refs/heads/master' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (needs.windows-msys32.result == 'success' || needs.ubuntu-x86.result == 'success')
     needs: [windows-msys32, ubuntu-x86]
@@ -173,7 +173,7 @@ jobs:
     if: >-
       always() && !cancelled() &&
       github.event_name == 'release' &&
-      github.event.release.target_commitish == 're-impl' &&
+      github.event.release.target_commitish == 'master' &&
       (needs.windows-msys32.result == 'success' || needs.ubuntu-x86.result == 'success')
     needs: [windows-msys32, ubuntu-x86]
     runs-on: ubuntu-latest
@@ -225,7 +225,7 @@ jobs:
     if: >-
       always() && !cancelled() &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      github.ref == 'refs/heads/re-impl'
+      github.ref == 'refs/heads/master'
     needs: [windows-msys32, ubuntu-x86]
     runs-on: ubuntu-latest
     permissions:
