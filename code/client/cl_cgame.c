@@ -1500,7 +1500,7 @@ void CL_SetCGameTime( void ) {
 				int silenceMs = (clc.lastPacketTime > 0) ?
 					cls.realtime - clc.lastPacketTime : -1;
 				Com_sprintf( buf, sizeof(buf),
-					"srvT=%d snapT=%d cmdTime=%d dT=%d "
+					"srvT=%d snapT=%d cmdTime=%d srvDelta=%d "
 					"overSnap=[%d,%d] extrap=%d realtime=%d "
 					"silenceMs=%d snapMs=%d seqNum=%d",
 					cl.serverTime, cl.snap.serverTime,
@@ -1531,7 +1531,7 @@ void CL_SetCGameTime( void ) {
 			}
 		}
 
-		SCR_NetMonitorAddTimeDelta( cl.serverTimeDelta );
+		SCR_NetMonitorAddTimeDelta( cl.serverTime - cl.snap.serverTime );
 
 		// note if we are almost past the latest frame (without timeNudge),
 		// so we will try and adjust back a bit when the next snapshot arrives.

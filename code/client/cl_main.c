@@ -3233,7 +3233,7 @@ void CL_PacketEvent( const netadr_t *from, msg_t *msg ) {
 		if ( gap > 500 && clc.lastPacketTime > 0 ) {
 			char buf[256];
 			Com_sprintf( buf, sizeof(buf),
-				"gap=%dms seq=%d snapT=%d srvT=%d dT=%d cmdTime=%d",
+				"gap=%dms seq=%d snapT=%d srvT=%d srvDelta=%d cmdTime=%d",
 				gap, clc.serverMessageSequence,
 				cl.snap.serverTime, cl.serverTime,
 				cl.serverTimeDelta, cl.snap.ps.commandTime );

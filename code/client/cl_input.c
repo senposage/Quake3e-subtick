@@ -613,7 +613,7 @@ static void CL_FinishMove( usercmd_t *cmd ) {
 		if ( ucmdDelta <= 0 ) {
 			char buf[256];
 			Com_sprintf( buf, sizeof(buf),
-				"cmdT=%d snapCmdTime=%d delta=%d snapT=%d dT=%d",
+				"cmdT=%d snapCmdTime=%d delta=%d snapT=%d srvDelta=%d",
 				cmd->serverTime, cl.snap.ps.commandTime,
 				ucmdDelta, cl.snap.serverTime, cl.serverTimeDelta );
 			SCR_LogNote( "UCMD_SKIP", buf );
