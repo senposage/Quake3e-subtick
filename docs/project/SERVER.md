@@ -364,7 +364,7 @@ Zeroes all ring buffers for all clients. Called on cvar change or map load.
 
 #### SV_SmoothRecordAll() [CUSTOM]
 
-Called from `SV_Frame` when `(sv_extrapolate || sv_smoothClients) AND (sv_bufferMs != 0 OR sv_velSmooth > 0)`.
+Called from `SV_Frame` when `(sv_extrapolate || sv_smoothClients) AND (sv_bufferMs != 0 OR sv_velSmooth != 0)`.
 
 Records one slot per active client. For bots: velocity-extrapolates from entity position. For real players: reads directly from `ps->origin`.
 
@@ -376,7 +376,7 @@ Walks ring buffer backward from `head`, finds two entries bracketing `targetTime
 
 #### SV_SmoothGetAverageVelocity(clientNum, windowMs, outVelocity) [CUSTOM]
 
-Exponential weighted average of velocity entries within the last `windowMs` milliseconds. The most-recent sample carries weight 1.0; each older step is multiplied by 0.5 (half-life = 1 sample). At `sv_velSmooth=64` / `sv_fps=60` this yields ~4 samples with weights ≈ 53 % / 26 % / 13 % / 7 %, so the latest velocity dominates while enough history is present to suppress per-tick physics noise.
+Exponential weighted average of velocity entries within the last `windowMs` milliseconds. The most-recent sample carries weight 1.0; each older step is multiplied by 0.5 (half-life = 1 sample). At `sv_velSmooth=-1` (auto=80ms) / `sv_fps=50` this yields ~4 samples with weights ≈ 53 % / 26 % / 13 % / 7 %, so the latest velocity dominates while enough history is present to suppress per-tick physics noise.
 
 **Why exponential instead of uniform:** a uniform sliding window gives every sample equal weight. As the window slides by one tick the dropped oldest sample and the newly added current sample can differ substantially (e.g. opposite directions during a turn), flipping `trDelta` noticeably between consecutive snapshots. The exponential weighting makes each new snapshot's `trDelta` a smooth continuation of the previous one, eliminating the trajectory kink at every snapshot boundary that manifests as blur/micro-stutter for fast-moving players.
 
@@ -451,7 +451,7 @@ for each entity (0 to sv.num_entities):
         if deadZone:
             es->pos.trType  = TR_LINEAR
             es->pos.trBase  = origin
-            es->pos.trDelta = (sv_velSmooth > 0) ? SV_SmoothGetAverageVelocity(...) : vel
+            es->pos.trDelta = (sv_velSmooth != 0) ? SV_SmoothGetAverageVelocity(...) : vel
             es->pos.trTime  = sv.time
         // else: stay TR_INTERPOLATE with anchored position
 
@@ -1051,7 +1051,7 @@ typedef struct client_s {
 | `sv_extrapolate` | 1 | Engine-side position extrapolation |
 | `sv_smoothClients` | 1 | TR_LINEAR trajectory mode |
 | `sv_bufferMs` | 0 | Ring buffer delay (0=off, -1=auto, 1-100=manual ms) |
-| `sv_velSmooth` | 64 | Velocity smoothing window (ms); EWA alpha=0.5/step |
+| `sv_velSmooth` | -1 | Velocity smoothing window (ms); EWA alpha=0.5/step. -1=auto (4*frameMsec), 0=off |
 | `sv_busyWait` | 0 | Spin-wait last N ms per frame |
 | `sv_antiwarp` | 0 | Engine antiwarp (0=off, 1=constant, 2=decay) |
 | `sv_antiwarpTol` | 0 | Antiwarp tolerance ms (0=auto=gameMsec) |

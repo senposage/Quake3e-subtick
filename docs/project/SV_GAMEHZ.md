@@ -139,7 +139,7 @@ sv_antiwarpDecay 150
 sv_extrapolate 1
 sv_smoothClients 1
 sv_bufferMs 0
-sv_velSmooth 32
+sv_velSmooth -1   // auto: 80ms at sv_fps 50
 ```
 
 ### UT 4.3.4 — With QVM Antiwarp
@@ -151,7 +151,7 @@ g_antiwarp 1
 sv_extrapolate 1
 sv_smoothClients 1
 sv_bufferMs -1
-sv_velSmooth 32
+sv_velSmooth -1   // auto: 80ms at sv_fps 50
 ```
 
 ### UT 4.0-4.2

@@ -150,11 +150,12 @@ appearing in front of or behind a moving player.
 
 ### sv_velSmooth
 
-When `sv_velSmooth > 0`, the per-client position ring buffer (which also records
+When `sv_velSmooth != 0`, the per-client position ring buffer (which also records
 velocity each tick) is queried for an exponentially-smoothed average velocity
-over the last `sv_velSmooth` ms.  This eliminates the 50/50 velocity flip that
+over the last `velSmoothMs` ms.  This eliminates the 50/50 velocity flip that
 occurs at direction-change frames (one tick says +300, next says -300) and
 gives the client a smooth, continuous `trDelta` to extrapolate.
+`-1` (default) = auto: window = 4 * frameMsec (e.g. 80ms at sv_fps 50).
 
 ### sv_bufferMs
 
@@ -541,7 +542,7 @@ This is enforced at two levels:
 | Cvar | Side | Default | Description |
 |---|---|---|---|
 | `sv_smoothClients` | Server | `1` | Convert TR_INTERPOLATE player snapshots to TR_LINEAR with velocity |
-| `sv_velSmooth` | Server | `0` | EMA velocity smoothing window (ms). 0=disabled |
+| `sv_velSmooth` | Server | `-1` | EMA velocity smoothing window (ms). -1=auto (4*frameMsec). 0=disabled |
 | `sv_bufferMs` | Server | `0` | Position delay (ms). -1=auto (one snap interval). 0=disabled |
 | `cl_adaptiveTiming` | Client | `1` | Scale timing thresholds with snapshotMsec. 0=vanilla |
 | `sv_allowClientAdaptiveTiming` | Server | `1` | Allow client to use cl_adaptiveTiming (sent in serverinfo) |

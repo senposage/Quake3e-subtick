@@ -1668,7 +1668,7 @@ void SV_Frame( int msec ) {
 		// the ring buffer to game-frame rate and break bufferMs accuracy.
 		if ( ( ( sv_extrapolate && sv_extrapolate->integer ) || ( sv_smoothClients && sv_smoothClients->integer ) )
 				&& ( ( sv_bufferMs && sv_bufferMs->integer != 0 )
-				  || ( sv_velSmooth && sv_velSmooth->integer > 0 ) ) ) {
+				  || ( sv_velSmooth && sv_velSmooth->integer != 0 ) ) ) {
 			SV_SmoothRecordAll();
 		}
 

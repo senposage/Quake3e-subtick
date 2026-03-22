@@ -833,8 +833,8 @@ void SV_Init( void )
 	sv_bufferMs = Cvar_Get ("sv_bufferMs", "0", CVAR_ARCHIVE );
 	Cvar_SetDescription( sv_bufferMs, "Position delay (ms) via ring buffer. 0=off, <0=auto (one snapshot interval)." );
 
-	sv_velSmooth = Cvar_Get ("sv_velSmooth", "80", CVAR_ARCHIVE );
-	Cvar_SetDescription( sv_velSmooth, "Velocity smoothing window (ms) for TR_LINEAR trDelta. Uses exponential weighted average (alpha=0.5/step): the most-recent sample always has the highest weight (e.g. ~53% of 4 samples at 50Hz/80ms), older samples decay by half per step. Wider window with EWA reduces per-tick trDelta jitter without adding directional lag. 0=off." );
+	sv_velSmooth = Cvar_Get ("sv_velSmooth", "-1", CVAR_ARCHIVE );
+	Cvar_SetDescription( sv_velSmooth, "Velocity smoothing window (ms) for TR_LINEAR trDelta. Uses exponential weighted average (alpha=0.5/step): the most-recent sample always has the highest weight (e.g. ~53% of 4 samples at 50Hz/80ms), older samples decay by half per step. Wider window with EWA reduces per-tick trDelta jitter without adding directional lag. -1=auto (4 * frameMsec, e.g. 80ms at sv_fps 50). 0=off." );
 
 	sv_extrapolate = Cvar_Get ("sv_extrapolate", "0", CVAR_ARCHIVE );
 	Cvar_SetDescription( sv_extrapolate, "Legacy position prediction. 0=off." );

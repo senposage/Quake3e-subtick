@@ -891,7 +891,14 @@ static void SV_BuildCommonSnapshot( void )
 						}
 					} else if ( sv_smoothClients && sv_smoothClients->integer ) {
 						// TR_LINEAR mode
-						int velSmoothMs = ( sv_velSmooth && sv_velSmooth->integer > 0 ) ? sv_velSmooth->integer : 0;
+						int velSmoothMs = 0;
+						if ( sv_velSmooth && sv_velSmooth->integer != 0 ) {
+							velSmoothMs = sv_velSmooth->integer;
+							if ( velSmoothMs < 0 ) {
+								// Auto: 4 frames at current tick rate (e.g. 80ms at sv_fps 50)
+								velSmoothMs = 4 * ( 1000 / sv_fps->integer );
+							}
+						}
 						vec3_t finalVel;
 						if ( velSmoothMs > 0 ) {
 							vec3_t avgVel;
