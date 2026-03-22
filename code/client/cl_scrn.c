@@ -113,6 +113,63 @@ typedef struct {
 static laggotSample_t	laggotHistory[LAGGOT_HISTORY];
 static int		laggotHistoryIdx;
 
+// Per-snapshot laggometer graph ring buffer
+#define NM_GRAPH_BARS   48   // number of bars to display
+#define NM_GRAPH_HALF_H 16   // virtual-pixel height of each graph half (ping / quality)
+
+// Sample quality levels (bottom-half bar colour)
+#define NM_Q_EMPTY  0   // ring slot not yet filled
+#define NM_Q_OK     1   // clean snap, low jitter
+#define NM_Q_JITTER 2   // snap arrived late relative to snapshotMsec
+#define NM_Q_CHOKE  3   // rate-delayed (SNAPFLAG_RATE_DELAYED)
+#define NM_Q_DROP   4   // preceded by netchan drop(s)
+
+typedef struct {
+	short ping;     // ms 0-999; 0 if empty
+	short jitter;   // abs deviation from expected snap interval, ms
+	byte  quality;  // NM_Q_*
+} nmGraphSample_t;
+
+static nmGraphSample_t  nmGraph[NM_GRAPH_BARS];
+static int              nmGraphIdx;    // index of next write slot (0..NM_GRAPH_BARS-1)
+static int              nmGraphCount;  // valid samples (0..NM_GRAPH_BARS)
+
+// Last measured/expected interval from SCR_NetMonitorAddSnapInterval
+// used by SCR_NetMonitorRecordSnap to compute per-snap jitter
+static int  nmLastMeasured;
+static int  nmLastExpected;
+
+/*
+ * Per-frame extrapolation burst tracking (cl_netlog performance logging).
+ *
+ * Call ordering per logical tick:
+ *   Step 1  Com_EventLoop -> CL_ParseSnapshot -> SCR_NetMonitorRecordSnap
+ *   Step 3  CL_Frame start -> SCR_NetMonitorAddFrametime          (line 3485 cl_main.c)
+ *   Step 4  CL_SetCGameTime -> SCR_NetMonitorAddExtrap  (if extrapolating)
+ *
+ * nmThisFrameExtrap is raised in step 4 and consumed in step 3 of the NEXT frame,
+ * giving AddFrametime a one-frame-delayed view of whether the previous CL_SetCGameTime
+ * was in extrapolation.  RecordSnap (step 1) fires before AddFrametime so a snap arrival
+ * correctly closes any active burst before the frame-time bookkeeping runs.
+ *
+ * Burst logging is deferred: start data is saved when the burst opens and only
+ * written to the log when the burst ends with len >= 2.  Single-frame extrapolations
+ * (normal threshold behaviour near snap boundaries) are silently dropped.
+ */
+static qboolean nmThisFrameExtrap; // raised by AddExtrap, consumed by AddFrametime
+static int      nmExtrapRunLen;    // consecutive extrapolated frames in active burst
+static int      nmExtrapMaxOver;   // peak (cl.serverTime - cl.snap.serverTime) in burst
+// Saved burst-start fields for deferred log output
+static int      nmExtrapStartH, nmExtrapStartM, nmExtrapStartS;
+static int      nmExtrapStartOver;
+static float    nmExtrapStartFi;
+static int      nmExtrapStartSeq;
+static int      nmExtrapStartDt;
+
+// Forward declarations for log helpers defined later in the file
+static void SCR_OpenNetLog( void );
+static void SCR_WriteLog( const char *line );
+
 // Session log file (opened lazily when cl_netlog > 0)
 static fileHandle_t	netLogFile;
 
@@ -611,9 +668,60 @@ void SCR_NetMonitorAddFrametime( int ft ) {
 		if ( ft < netMonFtMin ) netMonFtMin = ft;
 		if ( ft > netMonFtMax ) netMonFtMax = ft;
 	}
-	// Accumulate frameInterpolation for 1-second average
+	// Accumulate frameInterpolation for 1-second average.
+	// Note: cl.frameInterpolation here reflects the previous CL_SetCGameTime call
+	// (AddFrametime runs before CL_SetCGameTime in the same CL_Frame invocation).
 	netMonFiSum   += cl.frameInterpolation;
 	netMonFiCount += 1;
+
+	// Frame spike: individual frame took > 1.5x snapshotMsec (cl_netlog >= 1).
+	// cl values here are one frame stale relative to CL_SetCGameTime but still
+	// useful for correlating OS scheduling hitches with timing state.
+	if ( cl_netlog->integer >= 1 && cl.snapshotMsec > 0
+	     && ft > cl.snapshotMsec + cl.snapshotMsec / 2 ) {
+		qtime_t t;
+		char    line[160];
+		SCR_OpenNetLog();
+		Com_RealTime( &t );
+		Com_sprintf( line, sizeof(line),
+			"[%02d:%02d:%02d] FRAME_SPIKE   ft=%dms  exp=%dms"
+			"  fI=%.3f  over=%dms  dT=%d\n",
+			t.tm_hour, t.tm_min, t.tm_sec,
+			ft, cl.snapshotMsec,
+			cl.frameInterpolation,
+			cl.serverTime - cl.snap.serverTime,
+			cl.serverTimeDelta );
+		SCR_WriteLog( line );
+	}
+
+	// Burst-end detection via interpolation (no snap arrived, extrapolation just stopped).
+	// nmThisFrameExtrap was raised by AddExtrap in step 4 of the previous frame.
+	// If it is NOT set now, any active burst has ended naturally.
+	if ( !nmThisFrameExtrap ) {
+		if ( nmExtrapRunLen >= 2 && cl_netlog->integer >= 1 ) {
+			qtime_t t;
+			char    line[192];
+			SCR_OpenNetLog();
+			// Emit deferred start line first
+			Com_sprintf( line, sizeof(line),
+				"[%02d:%02d:%02d] EXTRAP_START  over=+%dms"
+				"  fI=%.3f  seq=#%d  dT=%d  snapMs=%d\n",
+				nmExtrapStartH, nmExtrapStartM, nmExtrapStartS,
+				nmExtrapStartOver, nmExtrapStartFi,
+				nmExtrapStartSeq, nmExtrapStartDt, cl.snapshotMsec );
+			SCR_WriteLog( line );
+			Com_RealTime( &t );
+			Com_sprintf( line, sizeof(line),
+				"[%02d:%02d:%02d] EXTRAP_END    len=%d  maxOver=+%dms"
+				"  by=interp  snapMs=%d\n",
+				t.tm_hour, t.tm_min, t.tm_sec,
+				nmExtrapRunLen, nmExtrapMaxOver, cl.snapshotMsec );
+			SCR_WriteLog( line );
+		}
+		nmExtrapRunLen  = 0;
+		nmExtrapMaxOver = 0;
+	}
+	nmThisFrameExtrap = qfalse; // consumed; AddExtrap will re-raise if needed this frame
 }
 
 void SCR_NetMonitorAddSnapInterval( int measured, int expected ) {
@@ -623,6 +731,9 @@ void SCR_NetMonitorAddSnapInterval( int measured, int expected ) {
 	netMonSnapGapCount++;
 	if ( gap > netMonSnapGapMax )
 		netMonSnapGapMax = gap;
+	// cache for SCR_NetMonitorRecordSnap
+	nmLastMeasured = measured;
+	nmLastExpected = expected;
 }
 
 // Per-connection cap-hit total; resets in SCR_LogConnectInfo on each new gamestate.
@@ -641,7 +752,27 @@ void SCR_OOBIgnoredIncrement( void ) {
 }
 
 void SCR_NetMonitorAddExtrap( void ) {
+	int over = cl.serverTime - cl.snap.serverTime;
+
 	netMonExtrapCount++;
+
+	// Burst tracking: capture start state on first extrapolated frame.
+	// All fields are saved here; the log lines are emitted only when the burst
+	// ends with len >= 2 (single-frame threshold crossings are normal and suppressed).
+	if ( nmExtrapRunLen == 0 ) {
+		qtime_t t;
+		Com_RealTime( &t );
+		nmExtrapStartH   = t.tm_hour;
+		nmExtrapStartM   = t.tm_min;
+		nmExtrapStartS   = t.tm_sec;
+		nmExtrapStartOver = over;
+		nmExtrapStartFi   = cl.frameInterpolation;
+		nmExtrapStartSeq  = cl.snap.messageNum;
+		nmExtrapStartDt   = cl.serverTimeDelta;
+	}
+	nmExtrapRunLen++;
+	if ( over > nmExtrapMaxOver ) nmExtrapMaxOver = over;
+	nmThisFrameExtrap = qtrue;
 }
 
 void SCR_NetMonitorAddChoke( void ) {
@@ -684,6 +815,72 @@ void SCR_NetMonitorAddResetAdjust( void ) {
 
 void SCR_NetMonitorAddSlowAdjust( int delta ) {
 	netMonSlowCount += delta;
+}
+
+/*
+SCR_NetMonitorRecordSnap
+Called once per accepted snapshot from CL_ParseSnapshot (step 1, before CL_Frame).
+Feeds the laggometer graph ring buffer with per-snap ping and quality data.
+Quality thresholds are relative to cl.snapshotMsec (scales with sv_fps).
+Also closes any active extrapolation burst and logs it (cl_netlog >= 1, len >= 2).
+*/
+void SCR_NetMonitorRecordSnap( int ping, int dropped, qboolean choke ) {
+	nmGraphSample_t *s;
+	int jitter = 0;
+	byte quality;
+
+	// Snap arrival closes any active extrapolation burst.
+	// Log if burst was notable (len >= 2); single-frame threshold crossings are normal.
+	if ( nmExtrapRunLen >= 2 && cl_netlog->integer >= 1 ) {
+		qtime_t t;
+		char    line[192];
+		SCR_OpenNetLog();
+		// Deferred start line
+		Com_sprintf( line, sizeof(line),
+			"[%02d:%02d:%02d] EXTRAP_START  over=+%dms"
+			"  fI=%.3f  seq=#%d  dT=%d  snapMs=%d\n",
+			nmExtrapStartH, nmExtrapStartM, nmExtrapStartS,
+			nmExtrapStartOver, nmExtrapStartFi,
+			nmExtrapStartSeq, nmExtrapStartDt, cl.snapshotMsec );
+		SCR_WriteLog( line );
+		Com_RealTime( &t );
+		Com_sprintf( line, sizeof(line),
+			"[%02d:%02d:%02d] EXTRAP_SNAP   len=%d  maxOver=+%dms"
+			"  ping=%dms  dropped=%d  choke=%d  snapMs=%d\n",
+			t.tm_hour, t.tm_min, t.tm_sec,
+			nmExtrapRunLen, nmExtrapMaxOver,
+			ping, dropped, (int)choke, cl.snapshotMsec );
+		SCR_WriteLog( line );
+	}
+	if ( nmExtrapRunLen > 0 ) {
+		nmExtrapRunLen    = 0;
+		nmExtrapMaxOver   = 0;
+		nmThisFrameExtrap = qfalse; // prevent AddFrametime emitting a duplicate end event
+	}
+
+	if ( nmLastExpected > 0 ) {
+		jitter = nmLastMeasured - nmLastExpected;
+		if ( jitter < 0 ) jitter = -jitter;
+	}
+
+	// Classify quality; thresholds relative to snapshotMsec (sv_fps-scaled)
+	if ( dropped > 0 ) {
+		quality = NM_Q_DROP;
+	} else if ( choke ) {
+		quality = NM_Q_CHOKE;
+	} else if ( nmLastExpected > 0 && jitter > nmLastExpected / 2 ) {
+		quality = NM_Q_JITTER;
+	} else {
+		quality = NM_Q_OK;
+	}
+
+	s          = &nmGraph[ nmGraphIdx ];
+	s->ping    = (short)( ping < 0 ? 0 : ping > 999 ? 999 : ping );
+	s->jitter  = (short)( jitter > 999 ? 999 : jitter );
+	s->quality = quality;
+
+	nmGraphIdx = ( nmGraphIdx + 1 ) % NM_GRAPH_BARS;
+	if ( nmGraphCount < NM_GRAPH_BARS ) nmGraphCount++;
 }
 
 /* ----- session log helpers ----- */
@@ -1235,8 +1432,9 @@ static void SCR_NetgraphDump_f( void ) {
 
 /* ----- widget drawing ----- */
 
-#define NM_PING_HIGH   150
-#define NM_PING_MEDIUM  80
+#define NM_PING_HIGH    150
+#define NM_PING_MEDIUM   80
+#define NM_GRAPH_MAX_PING 300  // ping ceiling for graph bar height
 #define NM_COLS 24
 #define NM_ROWS 10
 
@@ -1423,20 +1621,31 @@ SCR_DrawNetMonitor
 
 Draws a small always-on-top overlay (virtual 640x480 coords, scaled) showing
 real-time client network/timing diagnostics.  Toggle with cl_netgraph 1.
+
+The widget has two sections:
+  - Text rows (10 rows): live numerical stats
+  - Laggometer graph (below text): 48-bar visual history
+      Top half:    ping bars  (height proportional to ping; NM_GRAPH_MAX_PING ceiling)
+      Bottom half: snap quality bars (green=ok, yellow=jitter/choke, red=drop)
+      Quality thresholds are relative to cl.snapshotMsec, so they scale with sv_fps.
 ==============
 */
 static void SCR_DrawNetMonitor( void ) {
-	static const float bgColor[4]     = { 0.0f, 0.0f, 0.0f, 0.65f };
-	static const float colorWhite[4]  = { 1.0f, 1.0f, 1.0f, 1.0f  };
-	static const float colorGreen[4]  = { 0.2f, 1.0f, 0.2f, 1.0f  };
-	static const float colorYellow[4] = { 1.0f, 1.0f, 0.2f, 1.0f  };
-	static const float colorRed[4]    = { 1.0f, 0.3f, 0.3f, 1.0f  };
+	static const float bgColor[4]      = { 0.0f, 0.0f, 0.0f, 0.65f };
+	static const float colorWhite[4]   = { 1.0f, 1.0f, 1.0f, 1.0f  };
+	static const float colorGreen[4]   = { 0.2f, 1.0f, 0.2f, 1.0f  };
+	static const float colorYellow[4]  = { 1.0f, 1.0f, 0.2f, 1.0f  };
+	static const float colorOrange[4]  = { 1.0f, 0.5f, 0.1f, 1.0f  };
+	static const float colorRed[4]     = { 1.0f, 0.3f, 0.3f, 1.0f  };
+	static const float colorDimGray[4] = { 0.25f,0.25f,0.25f,1.0f  };
+	static const float colorGraphBg[4] = { 0.0f, 0.0f, 0.0f, 0.85f };
 
 	char         line[48];
 	const float *col;
 	float        scale, charW, charH, pad;
 	float        bw, bh, bx, by, tx, ty;
-	int          snapHz;
+	float        graphH, barW, halfH;
+	int          snapHz, i;
 
 	scale = cl_netgraph_scale->value;
 	if ( scale <= 0.0f ) scale = 1.0f;
@@ -1445,8 +1654,9 @@ static void SCR_DrawNetMonitor( void ) {
 	charH = 8.0f * scale;
 	pad   = charW * 0.5f;
 
+	graphH = NM_GRAPH_HALF_H * 2.0f * scale;  // total graph area height
 	bw = NM_COLS * charW + pad * 2.0f;
-	bh = NM_ROWS * charH + pad * 2.0f;
+	bh = NM_ROWS * charH + graphH + pad * 3.0f;  // extra pad between text and graph
 
 	bx = cl_netgraph_x->value;
 	by = cl_netgraph_y->value;
@@ -1478,8 +1688,12 @@ static void SCR_DrawNetMonitor( void ) {
 		cl.snap.ping, netMonDispPingMin, netMonDispPingMax );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
-	/* row 4 - frame interpolation + client frame time */
-	col = ( netMonDispFtMax > cl.snapshotMsec ) ? colorYellow : colorGreen;
+	/* row 4 - frame interpolation + client frame time
+	   Thresholds scale with cl.snapshotMsec (sv_fps):
+	     yellow = ftMax > 1x snapshotMsec (client slower than snap rate)
+	     red    = ftMax > 2x snapshotMsec (severely behind) */
+	col = ( netMonDispFtMax > cl.snapshotMsec * 2 ) ? colorRed    :
+	      ( netMonDispFtMax > cl.snapshotMsec     ) ? colorYellow : colorGreen;
 	Com_sprintf( line, sizeof(line), "FrmI:.%02d FrmT:%d/%dms",
 		(int)( netMonDispFiAvg * 100.0f ),
 		netMonDispFtAvg, netMonDispFtMax );
@@ -1489,27 +1703,37 @@ static void SCR_DrawNetMonitor( void ) {
 	Com_sprintf( line, sizeof(line), "DeltaT:  %+dms", cl.serverTimeDelta );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 6 - drops + extrapolations + caps */
+	/* row 6 - drops + extrapolations + caps
+	   Ext equilibrium: adaptive timing keeps cl.serverTime at roughly snapshotMsec/3
+	   ahead of the snap, giving an equilibrium of ~snapHz/3.  At high snap rates
+	   (snapshotMsec < 30ms) the calibration shifts toward snapHz/2 because the
+	   faster snap cadence makes 50% extrapolation stable.  We display the equilibrium
+	   alongside the count ("Ext:26~25") so the reader can judge at a glance.
+	   Colour thresholds are 1.5x and 2x equilibrium (yellow / red). */
 	{
 		int nmSnapHz = ( cl.snapshotMsec > 0 ) ? ( 1000 / cl.snapshotMsec ) : 60;
+		int extrapEq;    // expected equilibrium count per second
 		int extrapYellow, extrapRed;
-		// At high fps (snapshotMsec < 30, e.g. 60Hz) the Ext equilibrium is ~snapsHz/2
-		// (design intent: stable serverTimeDelta).  Raise alert thresholds accordingly
-		// to avoid spurious yellow/red for normal steady-state behaviour.
-		// At low fps (snapshotMsec >= 30) equilibrium is ~snapsHz/3; keep tighter thresholds.
-		if ( cl.snapshotMsec > 0 && cl.snapshotMsec < 30 ) {
-			extrapYellow = nmSnapHz * 3 / 4; // ~1.5x the 50% equilibrium
-			extrapRed    = nmSnapHz;          // every frame = definitely broken
-		} else {
-			extrapYellow = nmSnapHz * 3 / 5; // ~1.8x the 33% equilibrium (unchanged)
-			extrapRed    = nmSnapHz * 3 / 4; // ~2.25x the 33% equilibrium (unchanged)
-		}
+
+		// High snap rate (snapshotMsec < 30ms, e.g. 40/50/100/125 Hz):
+		//   equilibrium ~= snapHz / 2  (50% of frames near snap boundary)
+		// Low snap rate  (snapshotMsec >= 30ms, e.g. 20/25 Hz):
+		//   equilibrium ~= snapHz / 3  (extrapolation threshold = snapshotMsec/3)
+		extrapEq     = ( cl.snapshotMsec > 0 && cl.snapshotMsec < 30 )
+		               ? nmSnapHz / 2 : nmSnapHz / 3;
+		extrapYellow = extrapEq * 3 / 2;   // 1.5x equilibrium
+		extrapRed    = extrapEq * 2;        // 2x equilibrium -- genuinely broken
+
 		col = ( netMonDropRate > 0 ) ? colorRed :
-		      ( netMonDispExtrapCnt > extrapRed ) ? colorRed :
+		      ( netMonDispExtrapCnt > extrapRed    ) ? colorRed    :
 		      ( netMonDispExtrapCnt > extrapYellow ) ? colorYellow : colorGreen;
+
+		// Show "Ext:actual~eq" so the reader sees equilibrium context instantly.
+		// e.g.  sv_fps 50 -> "Drop:0 Ext:26~25 Clp:0"  (26 is normal)
+		//       sv_fps 50 -> "Drop:0 Ext:48~25 Clp:0"  (48 is red = broken)
+		Com_sprintf( line, sizeof(line), "Drop:%d Ext:%d~%d Clp:%d",
+			netMonDropRate, netMonDispExtrapCnt, extrapEq, netMonDispCapHits );
 	}
-	Com_sprintf( line, sizeof(line), "Drop:%d Ext:%d Clp:%d",
-		netMonDropRate, netMonDispExtrapCnt, netMonDispCapHits );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
 	/* row 7 - bandwidth in/out */
@@ -1521,7 +1745,8 @@ static void SCR_DrawNetMonitor( void ) {
 			netMonInRate, netMonOutRate );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 8 - snap interval jitter */
+	/* row 8 - snap interval jitter
+	   Thresholds scale with cl.snapshotMsec (sv_fps). */
 	col = ( netMonDispSnapGapMax > cl.snapshotMsec ) ? colorRed :
 	      ( netMonDispSnapGapAvg > cl.snapshotMsec / 2 ) ? colorYellow : colorGreen;
 	Com_sprintf( line, sizeof(line), "SnapJitt:%d/%dms",
@@ -1534,7 +1759,8 @@ static void SCR_DrawNetMonitor( void ) {
 		cl.snap.messageNum - cl.snap.deltaNum );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
-	/* row 10 - slow-path drift + fast resets */
+	/* row 10 - slow-path drift + fast resets
+	   Slow threshold scales with snapHz (sv_fps). */
 	{
 		int slowThresh = snapHz / 10;
 		if ( slowThresh < 1 ) slowThresh = 1;
@@ -1545,10 +1771,74 @@ static void SCR_DrawNetMonitor( void ) {
 	}
 
 	re.SetColor( NULL );
+
+	/* --- Laggometer graph ---
+	   ty is now just below the last text row.  Add one half-pad separator.
+	   Top half   : ping bars (height = ping / NM_GRAPH_MAX_PING * halfH).
+	                Colour: green < NM_PING_MEDIUM, yellow < NM_PING_HIGH, red >= NM_PING_HIGH.
+	                Ping is an absolute RTT; these fixed thresholds are correct regardless of sv_fps.
+	   Bottom half: snap quality bars (full-height solid colour).
+	                Quality classification uses snapshotMsec thresholds -> scales with sv_fps.
+	   Both halves share a 1px dividing line.
+	   Bars are drawn right-to-left: rightmost = most recent snap. */
+	{
+		float gx, gy, gw;
+		float gSep;  // y of the centre dividing line
+
+		gx    = bx + pad;
+		gy    = ty + pad * 0.5f;
+		gw    = bw - pad * 2.0f;
+		halfH = NM_GRAPH_HALF_H * scale;
+		barW  = gw / NM_GRAPH_BARS;
+
+		// Graph background
+		SCR_FillRect( gx, gy, gw, graphH, colorGraphBg );
+
+		// Centre dividing line
+		gSep = gy + halfH;
+		SCR_FillRect( gx, gSep, gw, 1.0f * scale, colorDimGray );
+
+		for ( i = 0; i < nmGraphCount; i++ ) {
+			int si = ( nmGraphIdx + NM_GRAPH_BARS - 1 - i ) % NM_GRAPH_BARS;
+			nmGraphSample_t *s = &nmGraph[ si ];
+			float bx_bar = gx + gw - ( i + 1 ) * barW;
+			float barInner = barW - 1.0f * scale;
+			if ( barInner < 1.0f * scale ) barInner = 1.0f * scale;
+
+			/* bottom half: snap quality (full-height bar) */
+			switch ( s->quality ) {
+				case NM_Q_DROP:   col = colorRed;    break;
+				case NM_Q_CHOKE:  col = colorOrange; break;
+				case NM_Q_JITTER: col = colorYellow; break;
+				case NM_Q_OK:     col = colorGreen;  break;
+				default:          col = colorDimGray;break;
+			}
+			SCR_FillRect( bx_bar, gSep + 1.0f * scale,
+			              barInner, halfH - 1.0f * scale, col );
+
+			/* top half: ping bar (height proportional to ping) */
+			if ( s->ping > 0 ) {
+				float pingFrac = (float)s->ping / NM_GRAPH_MAX_PING;
+				float pingH;
+				if ( pingFrac > 1.0f ) pingFrac = 1.0f;
+				pingH = pingFrac * ( halfH - 1.0f * scale );
+				if ( pingH < 1.0f * scale ) pingH = 1.0f * scale;
+
+				col = ( s->ping >= NM_PING_HIGH   ) ? colorRed    :
+				      ( s->ping >= NM_PING_MEDIUM  ) ? colorYellow : colorGreen;
+
+				SCR_FillRect( bx_bar, gSep - pingH,
+				              barInner, pingH, col );
+			}
+		}
+
+		re.SetColor( NULL );
+	}
 }
 
 #undef NM_PING_HIGH
 #undef NM_PING_MEDIUM
+#undef NM_GRAPH_MAX_PING
 #undef NM_COLS
 #undef NM_ROWS
 

@@ -599,6 +599,7 @@ void	SCR_NetMonitorAddPing( int ping );
 void	SCR_NetMonitorAddFastAdjust( void );
 void	SCR_NetMonitorAddResetAdjust( void );
 void	SCR_NetMonitorAddSlowAdjust( int delta );
+void	SCR_NetMonitorRecordSnap( int ping, int dropped, qboolean choke );
 void	SCR_LogTimingEvent( const char *tag, int serverTimeDelta, int deltaDelta );
 void	SCR_LogSnapLate( int measured, int expected );
 void	SCR_LogPingJitter( int ping, int prevPing );

@@ -789,7 +789,16 @@ void SV_Init( void )
 	Cvar_SetDescription( sv_privatePassword, "Set password for private clients to login with." );
 	sv_fps = Cvar_Get ("sv_fps", "60", CVAR_TEMP | CVAR_PROTECTED | CVAR_SERVERINFO );
 	Cvar_CheckRange( sv_fps, "10", "125", CV_INTEGER );
-	Cvar_SetDescription( sv_fps, "Engine tick rate (input sampling + snapshot dispatch rate)." );
+	Cvar_SetDescription( sv_fps,
+		"Engine tick rate (input sampling + snapshot dispatch rate).\n"
+		"For exact integer ms frame intervals use a factor of 1000: 10, 20, 25, 40, 50, 100, 125.\n"
+		"Non-factors (e.g. 30, 60) produce fractional ms intervals causing minor timing drift." );
+	if ( sv_fps->integer > 0 && 1000 % sv_fps->integer != 0 ) {
+		Com_Printf( S_COLOR_YELLOW "WARNING: sv_fps %d is not a factor of 1000 -- "
+			"frame interval %.2f ms is fractional. "
+			"Use 10, 20, 25, 40, 50, 100, or 125 for exact timing.\n",
+			sv_fps->integer, 1000.0f / sv_fps->integer );
+	}
 
 	sv_gameHz = Cvar_Get ("sv_gameHz", "0", CVAR_ARCHIVE | CVAR_SERVERINFO );
 	Cvar_SetDescription( sv_gameHz, "QVM GAME_RUN_FRAME rate. 0=match sv_fps. 20=legacy UT 4.0-4.2 mode." );

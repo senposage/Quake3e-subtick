@@ -367,6 +367,10 @@ static void CL_ParseSnapshot( msg_t *msg ) {
 	if ( cl.snap.snapFlags & SNAPFLAG_RATE_DELAYED )
 		SCR_NetMonitorAddChoke();
 
+	// Record into the laggometer graph ring buffer (ping + quality per snap)
+	SCR_NetMonitorRecordSnap( cl.snap.ping, clc.netchan.dropped,
+		( cl.snap.snapFlags & SNAPFLAG_RATE_DELAYED ) ? qtrue : qfalse );
+
 	// Log a PING JITTER event when an alternating +N/-N pattern is confirmed
 	if ( cl.snap.ping < 999 ) {
 		static int prevPing       = -1;

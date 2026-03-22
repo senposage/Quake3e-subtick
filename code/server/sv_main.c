@@ -1379,6 +1379,12 @@ void SV_TrackCvarChanges( void )
 					sv.gameTimeResidual = newFrameMsec - 1;
 			}
 			Com_DPrintf( "sv_fps changed to %d -- timeResidual clamped\n", sv_fps->integer );
+			if ( sv_fps->integer > 0 && 1000 % sv_fps->integer != 0 ) {
+				Com_Printf( S_COLOR_YELLOW "WARNING: sv_fps %d is not a factor of 1000 -- "
+					"frame interval %.2f ms is fractional. "
+					"Use 10, 20, 25, 40, 50, 100, or 125 for exact timing.\n",
+					sv_fps->integer, 1000.0f / sv_fps->integer );
+			}
 		}
 
 		sv_fps->modified = qfalse;
