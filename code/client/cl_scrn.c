@@ -58,7 +58,7 @@ static int	netMonSnapGapSum;
 static int	netMonSnapGapCount;
 static int	netMonSnapGapMax;
 
-// Cap-hit, extrap, choke, and serverTimeDelta range tracking (reset each second)
+// Cap-hit, extrap, choke, and snap-lead range tracking (reset each second)
 static int	netMonCapHits;
 static int	netMonExtrapCount;
 static int	netMonChokeCount;
@@ -164,7 +164,6 @@ static int      nmExtrapStartH, nmExtrapStartM, nmExtrapStartS;
 static int      nmExtrapStartOver;
 static float    nmExtrapStartFi;
 static int      nmExtrapStartSeq;
-static int      nmExtrapStartDt;
 
 // Forward declarations for log helpers defined later in the file
 static void SCR_OpenNetLog( void );
@@ -685,12 +684,11 @@ void SCR_NetMonitorAddFrametime( int ft ) {
 		Com_RealTime( &t );
 		Com_sprintf( line, sizeof(line),
 			"[%02d:%02d:%02d] FRAME_SPIKE   ft=%dms  exp=%dms"
-			"  fI=%.3f  over=%dms  dT=%d\n",
+			"  fI=%.3f  over=%dms\n",
 			t.tm_hour, t.tm_min, t.tm_sec,
 			ft, cl.snapshotMsec,
 			cl.frameInterpolation,
-			cl.serverTime - cl.snap.serverTime,
-			cl.serverTimeDelta );
+			cl.serverTime - cl.snap.serverTime );
 		SCR_WriteLog( line );
 	}
 
@@ -705,10 +703,10 @@ void SCR_NetMonitorAddFrametime( int ft ) {
 			// Emit deferred start line first
 			Com_sprintf( line, sizeof(line),
 				"[%02d:%02d:%02d] EXTRAP_START  over=+%dms"
-				"  fI=%.3f  seq=#%d  dT=%d  snapMs=%d\n",
+				"  fI=%.3f  seq=#%d  snapMs=%d\n",
 				nmExtrapStartH, nmExtrapStartM, nmExtrapStartS,
 				nmExtrapStartOver, nmExtrapStartFi,
-				nmExtrapStartSeq, nmExtrapStartDt, cl.snapshotMsec );
+				nmExtrapStartSeq, cl.snapshotMsec );
 			SCR_WriteLog( line );
 			Com_RealTime( &t );
 			Com_sprintf( line, sizeof(line),
@@ -768,7 +766,6 @@ void SCR_NetMonitorAddExtrap( void ) {
 		nmExtrapStartOver = over;
 		nmExtrapStartFi   = cl.frameInterpolation;
 		nmExtrapStartSeq  = cl.snap.messageNum;
-		nmExtrapStartDt   = cl.serverTimeDelta;
 	}
 	nmExtrapRunLen++;
 	if ( over > nmExtrapMaxOver ) nmExtrapMaxOver = over;
@@ -838,10 +835,10 @@ void SCR_NetMonitorRecordSnap( int ping, int dropped, qboolean choke ) {
 		// Deferred start line
 		Com_sprintf( line, sizeof(line),
 			"[%02d:%02d:%02d] EXTRAP_START  over=+%dms"
-			"  fI=%.3f  seq=#%d  dT=%d  snapMs=%d\n",
+			"  fI=%.3f  seq=#%d  snapMs=%d\n",
 			nmExtrapStartH, nmExtrapStartM, nmExtrapStartS,
 			nmExtrapStartOver, nmExtrapStartFi,
-			nmExtrapStartSeq, nmExtrapStartDt, cl.snapshotMsec );
+			nmExtrapStartSeq, cl.snapshotMsec );
 		SCR_WriteLog( line );
 		Com_RealTime( &t );
 		Com_sprintf( line, sizeof(line),
@@ -1320,7 +1317,7 @@ Fields logged:
   reason        - server-supplied disconnect reason string
   snapT         - cl.snap.serverTime (last received snapshot time)
   svrT          - cl.serverTime (computed cgame time at disconnect)
-  dT            - cl.serverTimeDelta
+  srvDelta      - cl.serverTimeDelta (raw clock offset; cl.serverTime = cls.realtime + srvDelta)
   ping          - cl.snap.ping (note: can be 999 due to snap-timing calculation
                   failure, not necessarily a server-side negative-ping kick)
   cmdSeq        - clc.serverCommandSequence (last server command received)
@@ -1347,7 +1344,7 @@ void SCR_LogDisconnect( const char *reason ) {
 	/* Always print context to console so it is visible even without cl_netlog. */
 	Com_Printf( S_COLOR_YELLOW
 		"[DISCONNECT TRACE] reason=\"%s\""
-		" snapT=%d svrT=%d dT=%d ping=%d"
+		" snapT=%d svrT=%d srvDelta=%d ping=%d"
 		" cmdSeq=%d relSeq=%d relAck=%d relWnd=%d"
 		" snapMs=%d vanilla=%d forbids=%d"
 		" timeout=%d silence=%dms caps=%d oobIgnored=%d\n",
@@ -1364,7 +1361,7 @@ void SCR_LogDisconnect( const char *reason ) {
 	Com_RealTime( &t );
 	Com_sprintf( line, sizeof(line),
 		"[%02d:%02d:%02d] DISCONNECT  reason=\"%s\"\n"
-		"  snapT=%d  svrT=%d  dT=%d  ping=%d\n"
+		"  snapT=%d  svrT=%d  srvDelta=%d  ping=%d\n"
 		"  cmdSeq=%d  relSeq=%d  relAck=%d  relWnd=%d\n"
 		"  snapMs=%d  vanilla=%d  forbidsAdaptive=%d\n"
 		"  timeout=%d  silenceMs=%d  capHits=%d  oobIgnored=%d\n",
@@ -1410,7 +1407,7 @@ static void SCR_NetgraphDump_f( void ) {
 	Com_sprintf( line, sizeof(line), "Snapshot Rate : %d Hz  (%d ms interval EMA)\n", snapHz, cl.snapshotMsec ); SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Ping          : %d ms\n", cl.snap.ping ); SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Interp Mode   : fI=%.3f\n", cl.frameInterpolation ); SCR_WriteLog( line );
-	Com_sprintf( line, sizeof(line), "Server Time   : %d  (delta %d ms)\n", cl.snap.serverTime, cl.serverTimeDelta ); SCR_WriteLog( line );
+	Com_sprintf( line, sizeof(line), "Snap Lead     : %+d ms  (srvDelta %d ms)\n", cl.serverTime - cl.snap.serverTime, cl.serverTimeDelta ); SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Snap Seq      : #%d  (delta from #%d, gap %d)\n", cl.snap.messageNum, cl.snap.deltaNum, cl.snap.messageNum - cl.snap.deltaNum ); SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "Drop Rate     : %d pkt/s\n", netMonDropRate ); SCR_WriteLog( line );
 	Com_sprintf( line, sizeof(line), "In Rate       : %d B/s  (%.2f KB/s)\n", netMonInRate, netMonInRate / 1024.0f ); SCR_WriteLog( line );
@@ -1478,8 +1475,8 @@ static void SCR_NetMonUpdate( void ) {
 		int resetCnt   = netMonResetCount;
 		int slowCnt    = netMonSlowCount;
 		int ftMin      = netMonFtValid   ? netMonFtMin  : 0;
-		int dtMin      = netMonDtValid   ? netMonDtMin  : cl.serverTimeDelta;
-		int dtMax      = netMonDtValid   ? netMonDtMax  : cl.serverTimeDelta;
+		int dtMin      = netMonDtValid   ? netMonDtMin  : cl.serverTime - cl.snap.serverTime;
+		int dtMax      = netMonDtValid   ? netMonDtMax  : cl.serverTime - cl.snap.serverTime;
 		int snapHz;
 
 		netMonInRate      = netMonInBytes;
@@ -1699,8 +1696,8 @@ static void SCR_DrawNetMonitor( void ) {
 		netMonDispFtAvg, netMonDispFtMax );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, col, line );
 
-	/* row 5 - server time delta */
-	Com_sprintf( line, sizeof(line), "DeltaT:  %+dms", cl.serverTimeDelta );
+	/* row 5 - snap lead: how far cl.serverTime is ahead of the latest snapshot */
+	Com_sprintf( line, sizeof(line), "SnapLead: %+dms", cl.serverTime - cl.snap.serverTime );
 	NM_DrawRow( &tx, &ty, bx + pad, charW, charH, colorWhite, line );
 
 	/* row 6 - drops + extrapolations + caps
