@@ -227,6 +227,7 @@ typedef struct client_s {
 	int				ping;
 	int				rate;				// bytes / second, 0 - unlimited
 	int				snapshotMsec;		// requests a snapshot every snapshotMsec unless rate choked
+	int				snapshotHz;			// exact snapshot rate (Hz) -- avoids 1000/snapshotMsec back-conversion error at non-divisors like 60
 	qboolean		pureAuthentic;
 	qboolean		gotCP;				// TTimo - additional flag to distinguish between a bad pure checksum, and no cp command at all
 	netchan_t		netchan;
