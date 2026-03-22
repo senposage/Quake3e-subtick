@@ -1367,6 +1367,7 @@ void SV_TrackCvarChanges( void )
 		int newFrameMsec = 1000 / sv_fps->integer;
 
 		if ( fpsChanged ) {
+			sv.timeResidualFrac = 0; // reset Bresenham fraction on fps change
 			if ( sv.timeResidual < 0 )
 				sv.timeResidual = 0;
 			if ( sv.timeResidual >= newFrameMsec )
@@ -1443,6 +1444,7 @@ happen before SV_Frame is called
 */
 void SV_Frame( int msec ) {
 	int		frameMsec;
+	int		frameMsecRem;
 	int		startTime;
 	int		i;
 
@@ -1482,6 +1484,15 @@ void SV_Frame( int msec ) {
 		Com_DPrintf( "timescale adjusted to %f\n", com_timescale->value );
 		frameMsec = 1;
 	}
+
+	// Bresenham sub-frame correction: 1000/fps uses integer division which
+	// truncates the true interval (e.g. 1000/60=16 not 16.667ms).  Without
+	// correction the loop fires at 1000/16=62.5Hz instead of exactly 60Hz.
+	// frameMsecRem carries the fractional remainder into sv.timeResidualFrac
+	// so that roughly (1000%fps) frames per second use (frameMsec+1) ms,
+	// keeping the long-run average exactly at sv_fps Hz.
+	// Only applied when timescale==1 (normal server operation).
+	frameMsecRem = ( fabsf( com_timescale->value - 1.0f ) < 0.001f ) ? (1000 % sv_fps->integer) : 0;
 
 	sv.timeResidual += msec;
 
@@ -1551,10 +1562,20 @@ void SV_Frame( int msec ) {
 	// Snapshot dispatch is inside this loop so each engine tick at sv_fps rate produces
 	// its own snapshot send opportunity, preventing double-interval gaps.
 	while ( sv.timeResidual >= frameMsec ) {
+		int thisFrameMsec = frameMsec;
 		qboolean _gameFrameRan = qfalse;
-		sv.timeResidual -= frameMsec;
-		svs.time += frameMsec;
-		sv.time += frameMsec;
+
+		// Advance the Bresenham fraction: when it overflows sv_fps, use
+		// frameMsec+1 this tick so the long-run average is exactly 1000/fps ms.
+		sv.timeResidualFrac += frameMsecRem;
+		if ( sv.timeResidualFrac >= sv_fps->integer ) {
+			sv.timeResidualFrac -= sv_fps->integer;
+			thisFrameMsec++;
+		}
+
+		sv.timeResidual -= thisFrameMsec;
+		svs.time += thisFrameMsec;
+		sv.time += thisFrameMsec;
 
 		// Fire GAME_RUN_FRAME at sv_gameHz rate, independent of sv_fps.
 		// sv_fps = input sampling rate; sv_gameHz = level.time rate.
@@ -1568,7 +1589,7 @@ void SV_Frame( int msec ) {
 			if ( _gameHz < 1 )               _gameHz = 1;
 			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
 			_gameMsec = 1000 / _gameHz;
-			sv.gameTimeResidual += frameMsec;
+			sv.gameTimeResidual += thisFrameMsec;
 
 			while ( sv.gameTimeResidual >= _gameMsec ) {
 				sv.gameTimeResidual -= _gameMsec;
