@@ -1612,6 +1612,22 @@ Bitmask layout (shared by both cvars):
              never do this, leaving trTime at 0 and causing enormous dt values
              that teleport all entities every frame.  Automatically suppressed
              on vanilla servers (cl_qvmPatchVanilla default excludes bit 2).
+             Also forces cg_smoothClients=1 on the client when applied.
+             CG_CalcEntityLerpPositions (QVM instr 0x1594f) unconditionally
+             writes trType=TR_INTERPOLATE into both currentState and nextState
+             for every player entity (number < 64) when cg_smoothClients==0
+             (the default).  This discards the server's TR_LINEAR trDelta
+             velocity data and routes all player entities through the pure
+             position-lerp path (CG_InterpolateEntityPosition), which evaluates
+             BG_EvaluateTrajectory at snap->serverTime -- giving dt==0 and
+             ignoring trDelta entirely.  At sv_fps > 60 the snap-transition
+             count per render frame is irregular (1 or 2 per frame), causing
+             frameInterpolation to oscillate and player entities to jitter.
+             With cg_smoothClients=1 the trType override is skipped; TR_LINEAR
+             entities use BG_EvaluateTrajectory(cg_time) -- continuous velocity-
+             based extrapolation at the actual render time that is insensitive
+             to snap-transition timing.  The CG_CVAR_SET intercept in
+             cl_cgame.c prevents the QVM from resetting the cvar mid-session.
 
 Target QVM: UrbanTerror 4.3 official binary
   CRC32:            0x1289DB6B
@@ -1864,6 +1880,26 @@ static void VM_URT43_CgamePatches( vm_t *vm, instruction_t *buf ) {
 			Com_DPrintf( S_COLOR_CYAN "    [Patch1] APPLIED: TR_INTERPOLATE -> guard(0x%05x)"
 				" trTime==0->TR_STATIONARY else->TR_LINEAR\n",
 				URT43_INSTR_TR_GUARD_CASE );
+
+			/* Force cg_smoothClients=1 on custom servers so that
+			   CG_CalcEntityLerpPositions (instr 0x1594f) does NOT override the
+			   server's TR_LINEAR trajectory type for player entities.  Without
+			   this, the QVM writes trType=TR_INTERPOLATE into both currentState
+			   and nextState for every player entity (number < 64) when
+			   cg_smoothClients==0 (the default), silently discarding the trDelta
+			   velocity supplied by sv_smoothClients=1.  With cg_smoothClients=1
+			   that branch is skipped: TR_LINEAR entities are evaluated via
+			   BG_EvaluateTrajectory(cg_time) -- continuous velocity-based
+			   extrapolation independent of snap-transition timing, which
+			   eliminates the jitter seen at sv_fps > 60.
+			   Gated on !isVanilla: vanilla servers do not anchor trTime, so
+			   forcing cg_smoothClients=1 there would expose the raw trDelta==0
+			   path and freeze entities.  The CG_CVAR_SET intercept in cl_cgame.c
+			   prevents the QVM from resetting this value during the session. */
+			if ( !isVanilla ) {
+				Cvar_Set( "cg_smoothClients", "1" );
+				Com_DPrintf( S_COLOR_CYAN "    [Patch1] cg_smoothClients forced to 1 (custom server)\n" );
+			}
 		} else {
 			skipped |= 4;
 			Com_DPrintf( S_COLOR_YELLOW "    [Patch1] SKIP: mismatch"

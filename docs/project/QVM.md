@@ -305,11 +305,11 @@ The bridge is a `CVAR_TEMP` cvar **`cl_urt43serverIsVanilla`** set to `1` or `0`
 |---|---|---|---|---|
 | 0 (1) | **Patch 2 — frameInterpolation clamp** | The existing QVM clamp is wrong: lower threshold is `0.1f` (should be `0.0f`) and upper clamped value is `~0.99f` (should be `1.0f`). Fixes two constants at instruction indices `0xa688` and `0xa692`. Safe on any server — no server-side dependency. | ✅ enabled | ✅ enabled (`cl_qvmPatchVanilla 3`) |
 | 1 (2) | **Patch 3 — nextSnap NULL crash fix** | `CG_InterpolateEntityPosition` calls `CG_Error()` (fatal crash) when `cg.nextSnap == NULL` during lag spikes or on the first rendered frame before a second snapshot arrives. Replaces the 5-instruction error path with a `CONST`+`JUMP` early return to the function's `PUSH`+`LEAVE` (instr `0x1594d`). Safe on any server — no server-side dependency. **Required**: without this patch the game crashes every time a map loads. | ✅ enabled | ✅ enabled (`cl_qvmPatchVanilla 3`) |
-| 2 (4) | **Patch 1 — TR_INTERPOLATE velocity extrapolation** | The `BG_EvaluateTrajectory` switch-table entry for `trType == TR_INTERPOLATE` (case 1, data addr `0xdbb4`) points to the `TR_STATIONARY` handler (VectorCopy only). Redirects it to the `TR_LINEAR` handler (`instr 0x3ab15`) so velocity-based forward extrapolation is used when the next snapshot is unavailable. **Requires server-side `trTime` anchor** — vanilla servers leave `trTime = 0`, causing `(evalTime − 0) / 1000` → enormous `dt` → entity teleportation every frame. Auto-suppressed on vanilla servers via `cl_qvmPatchVanilla`. | ✅ enabled | ❌ unsafe — leave unset |
+| 2 (4) | **Patch 1 -- TR_INTERPOLATE velocity extrapolation + cg_smoothClients fix** | Redirects `BG_EvaluateTrajectory` TR_INTERPOLATE handler to TR_LINEAR for velocity-based extrapolation, and forces `cg_smoothClients=1` on custom servers to fix entity jitter at sv_fps > 60. See [Patch 1 detail](#patch-1-detail) below. **Requires server-side `trTime` anchor.** Auto-suppressed on vanilla servers. | ✅ enabled | ❌ unsafe -- leave unset |
 
 The function `VM_URT43_CgamePatches()` in `vm.c` prints verbose diagnostic output for every patch attempt (instruction opcodes and values before patching, applied/skipped result) to aid debugging if a future QVM version changes the binary layout.
 
-**Debug output example** — custom server (all patches, `cl_urt43cgPatches 7`):
+**Debug output example** -- custom server (all patches, `cl_urt43cgPatches 7`):
 ```
 VM_URT43_CgamePatches: entered (CRC=1289DB6B)
 UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x7 (custom server -> cl_urt43cgPatches)
@@ -322,11 +322,12 @@ UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x7 (custom server -
     [Patch3] APPLIED: CG_Error->early return at instr 0x1594d
   [Patch1] BG_EvaluateTrajectory TR_INTERPOLATE->TR_LINEAR:
     ...
-    [Patch1] APPLIED: TR_INTERPOLATE now uses TR_LINEAR extrapolation
+    [Patch1] APPLIED: TR_INTERPOLATE -> guard(0x3b434) trTime==0->TR_STATIONARY else->TR_LINEAR
+    [Patch1] cg_smoothClients forced to 1 (custom server)
 UrT43 cgame patch: applied=0x7 skipped=0x0
 ```
 
-**Debug output example** — vanilla server (Patches 2+3 by default, `cl_qvmPatchVanilla 3`):
+**Debug output example** -- vanilla server (Patches 2+3 by default, `cl_qvmPatchVanilla 3`):
 ```
 VM_URT43_CgamePatches: entered (CRC=1289DB6B)
 UrT43 cgame patch: CRC=1289DB6B ic=258563 dl=38055548 flags=0x3 (vanilla server -> cl_qvmPatchVanilla)
@@ -346,9 +347,61 @@ UrT43 cgame patch: applied=0x3 skipped=0x0
 > Patches 2+3 are applied even in that case, since both are safe on any server.
 
 To disable Patch 2 on vanilla servers: `cl_qvmPatchVanilla 2` (keep Patch3 only).
-To disable all patches on vanilla servers (testing only — will crash): `cl_qvmPatchVanilla 0`.
+To disable all patches on vanilla servers (testing only -- will crash): `cl_qvmPatchVanilla 0`.
 
 If the loaded QVM does not match the expected CRC/size, a `DPrintf` warning identifies the actual fingerprint so a new patch entry can be written.
+
+#### Patch 1 detail
+
+**What Patch 1 fixes (two problems):**
+
+**Problem A -- BG_EvaluateTrajectory TR_INTERPOLATE falls through to VectorCopy.**
+The QVM switch-table entry for `trType == TR_INTERPOLATE` (case 1, data addr `0xdbb4`) points to
+the same handler as `TR_STATIONARY` (VectorCopy only, instr `0x3ab0c`), so any entity on the
+TR_INTERPOLATE extrapolation path ignores velocity entirely and freezes at `trBase`.  The fix
+redirects case 1 through a guard stub (instr `0x3b434`): if `trTime == 0` it falls back to
+VectorCopy (safe -- BG_PlayerStateToEntityState never writes trTime for the predicted player
+entity); otherwise it jumps to the TR_LINEAR handler (instr `0x3ab15`) for velocity-based
+forward extrapolation.
+
+**Problem B -- CG_CalcEntityLerpPositions unconditionally overrides server trType for all player entities.**
+`CG_CalcEntityLerpPositions` (instr `0x1594f`) writes `trType = TR_INTERPOLATE` into both
+`currentState` and `nextState` for every entity with `number < 64` when `cg_smoothClients == 0`
+(the default).  This silently discards the `TR_LINEAR` trajectory type and `trDelta` velocity
+that `sv_smoothClients=1` sets server-side, and routes every player entity through
+`CG_InterpolateEntityPosition`.  That function evaluates `BG_EvaluateTrajectory` at
+`snap->serverTime` and `nextSnap->serverTime` -- not at `cg_time` -- so with the TR_LINEAR
+formula `trBase + trDelta * (atTime - trTime) / 1000`:
+
+```
+dt = snap->serverTime - trTime = snap->serverTime - sv.time = 0
+result = trBase + trDelta * 0 = trBase   // velocity ignored
+```
+
+The entity position is a pure lerp between two snapshot `trBase` values weighted by
+`frameInterpolation`.  At sv_fps > 60 (e.g. 125 Hz / 8 ms snaps) the client render loop
+(typically 60 fps / 16 ms frames) consumes either 1 or 2 snap transitions per frame depending
+on OS scheduling jitter (+-1-3 ms is normal).  This causes `frameInterpolation` to alternate
+between ~0.75 (1-transition frame) and ~1.0 (2-transition frame), making the entity oscillate
+by roughly `velocity * 8 ms` -- ~2.4 units per frame at 300 ups -- producing the visible jitter.
+
+The fix forces `cg_smoothClients = 1` after Patch 1 is applied.  With that value the trType
+override is skipped; TR_LINEAR entities fall through to `BG_EvaluateTrajectory(cg_time)`:
+
+```
+result = trBase + trDelta * (cg_time - trTime) / 1000
+```
+
+This is continuous velocity-based extrapolation evaluated at the actual render time, completely
+independent of how many snap transitions occurred since the last frame.  The `CG_CVAR_SET`
+intercept in `cl_cgame.c` prevents the QVM from resetting `cg_smoothClients` mid-session.
+
+**Vanilla-server gate:** the `cg_smoothClients` forcing is wrapped in `if (!isVanilla)`.
+Vanilla servers do not anchor `trTime`, so `trDelta` is typically 0 or stale; setting
+`cg_smoothClients=1` there would expose the raw `trDelta == 0` path (entity freezes) or a
+stale-velocity path (entity teleports).  The bit 2 exclusion in `cl_qvmPatchVanilla` already
+prevents the entire Patch 1 block from running on vanilla servers, but the explicit `!isVanilla`
+guard provides a second layer of protection if an operator manually sets `cl_qvmPatchVanilla 7`.
 
 ---
 

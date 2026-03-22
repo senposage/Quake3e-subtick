@@ -375,16 +375,26 @@ static void SV_MapRestart_f( void ) {
 			Com_Memset( &client->lastUsercmd, 0x0, sizeof( client->lastUsercmd ) );
 			client->lastUsercmd.serverTime = sv.time - 1;
 
-			// Reset antiwarp baseline to current game time.
-			// map_restart runs 4 x 100 ms warmup frames, advancing sv.gameTime by
-			// ~400 ms from the restart point.  Without this reset, awLastThinkTime
-			// still holds the pre-restart value, so awGap = sv.gameTime - old_value
-			// ~ 400 ms >> awTol on the very first post-restart tick -- antiwarp fires
-			// spuriously for every connected client before they can send a real
-			// usercmd.  Resetting to sv.gameTime makes awGap = 0 on that tick
-			// (client is treated as having just thought), so antiwarp will only
-			// engage if the client genuinely misses a frame after reconnecting.
-			client->awLastThinkTime = sv.gameTime;
+			// Reset antiwarp baseline to 0 (the "never received a real command"
+			// sentinel) so the antiwarp loop skips this client entirely until
+			// the first real usercmd arrives after the restart.
+			//
+			// The previous approach (= sv.gameTime) only covered the case where
+			// the client was already CS_ACTIVE and responded immediately.  Any
+			// client that takes longer than one game tick (gameMsec, e.g. 16 ms
+			// at 60 Hz) to transition from CS_PRIMED to CS_ACTIVE accumulates
+			// gap = sv.gameTime_now - sv.gameTime_at_restart and triggers a
+			// spurious antiwarp injection on their first active tick.  On WAN
+			// connections the round-trip from map_restart to the first usercmd
+			// is typically 50-200 ms >> awTol (16 ms), so the injection fires
+			// for virtually every client on every map_restart.
+			//
+			// Using 0 activates the existing guard in the antiwarp loop:
+			//   if ( awCl->awLastThinkTime == 0 ) continue; // never received a real command yet
+			// Antiwarp engages only after SV_ClientThink records the first real
+			// usercmd, at which point awLastThinkTime = sv.gameTime and awGap
+			// on the very next tick is exactly gameMsec (at threshold, no fire).
+			client->awLastThinkTime = 0;
 		}
 	}
 }

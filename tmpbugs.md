@@ -15,74 +15,17 @@ more closely than they are. See commit history for full rationale.
 
 ---
 
-## BUG-2 — `awLastThinkTime` not zeroed on `map_restart`
+## BUG-2 — `awLastThinkTime` not zeroed on `map_restart` — **RESOLVED**
 
-**Severity:** Low-Medium  
-**Files:** `code/server/sv_ccmds.c` (`SV_MapRestart_f`), `code/server/sv_client.c` (`SV_ClientEnterWorld`)
+**Resolution:** Reset `client->awLastThinkTime = 0` (not `sv.gameTime`) in the final
+loop of `SV_MapRestart_f` for all `CS_PRIMED+` clients.  Using `0` activates the
+existing "never received a real command yet" guard in the antiwarp loop, which
+skips the client entirely until their first real usercmd arrives after the restart.
 
-### What the code does
-
-`SV_ClientThink` (called when a real usercmd arrives from the network) sets:
-
-```c
-// sv_client.c:2265
-cl->awLastThinkTime = sv.gameTime;
-```
-
-`SV_MapRestart_f` resets `lastUsercmd` for each active client but does **not** reset `awLastThinkTime`:
-
-```c
-// sv_ccmds.c — bottom of SV_MapRestart_f
-for ( i = 0; i < sv.maxclients; i++ ) {
-    client = &svs.clients[i];
-    if ( client->state >= CS_PRIMED ) {
-        Com_Memset( &client->lastUsercmd, 0x0, sizeof( client->lastUsercmd ) );
-        client->lastUsercmd.serverTime = sv.time - 1;
-        // ← awLastThinkTime NOT reset here
-    }
-}
-```
-
-`SV_ClientEnterWorld` (also called during restart for active clients) does **not** reset `awLastThinkTime` either.
-
-### Why this matters
-
-During `SV_MapRestart_f`, four settlement game frames run:
-
-```c
-sv.gameTime = sv.time;          // sync before restart
-sv.gameTimeResidual = 0;
-SV_RestartGameProgs();
-for (i = 0; i < 3; i++) {
-    sv.time += 100; sv.gameTime += 100;   // +300 ms
-    VM_Call(gvm, GAME_RUN_FRAME, sv.gameTime);
-}
-sv.time += 100; sv.gameTime += 100;       // +100 ms more (= +400 ms total)
-VM_Call(gvm, GAME_RUN_FRAME, sv.gameTime);
-```
-
-After the restart, `sv.gameTime` is ~400 ms ahead of the last recorded `awLastThinkTime` (set at the old `sv.gameTime` before restart). On the very first real game tick after clients reconnect:
-
-```
-awGap = sv.gameTime_new - awLastThinkTime_old  ≈ 400 ms
-awTol = _gameMsec ≈ 16 ms  (auto, at sv_fps 60)
-400 >> 16 → antiwarp fires for every client
-```
-
-All connected clients get one spurious antiwarp injection on the first tick after `map_restart`. In mode 2 this means their movement inputs are immediately zeroed (since 400 ms >> `awTol + awExtraMs + awDecayMs` = 182 ms at defaults).
-
-Note: fresh map loads (`SV_SpawnServer`) are **not** affected — `svs.clients` is `memset` to zero, which zeros `awLastThinkTime`.
-
-### Proposed fix
-
-In `SV_ClientEnterWorld` (called for active clients during `map_restart`):
-
-```c
-// sv_client.c — SV_ClientEnterWorld, after client->oldServerTime = 0;
-client->awLastThinkTime = 0;   // ← add this line
-```
-
-The existing guard `if ( awCl->awLastThinkTime == 0 ) continue;` in the antiwarp loop will then correctly skip the client until the first real usercmd arrives.
+The earlier attempt (`= sv.gameTime`) only worked if the client responded within one
+game tick (16 ms at 60 Hz).  On WAN connections the round-trip from `map_restart` to
+the first usercmd is typically 50-200 ms -- larger than `awTol` -- so antiwarp still
+fired spuriously.  Using `0` removes the time dependency entirely.
 
 ---
 
