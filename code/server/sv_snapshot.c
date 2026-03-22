@@ -797,8 +797,10 @@ static void SV_BuildCommonSnapshot( void )
 		if ( sv_bufferMs && sv_bufferMs->integer != 0 ) {
 			bufMs = sv_bufferMs->integer;
 			if ( bufMs < 0 ) {
-				// Auto mode: one snapshot interval
-				bufMs = 1000 / sv_fps->integer;
+				// Auto mode: one snapshot interval.  Use ceiling division so the
+				// lookup always reaches at least the previous ring-buffer entry
+				// even when that entry was recorded on a Bresenham 17ms tick.
+				bufMs = (1000 + sv_fps->integer - 1) / sv_fps->integer;
 			}
 			if ( bufMs > 100 ) bufMs = 100;
 		}

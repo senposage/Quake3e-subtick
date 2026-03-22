@@ -1322,6 +1322,7 @@ void SV_TrackCvarChanges( void )
 		if ( _gameHz < 1 )               _gameHz = 1;
 		if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
 		newGameMsec = 1000 / _gameHz;
+		sv.gameTimeResidualFrac = 0; // reset Bresenham fraction on gameHz change
 		if ( sv.gameTimeResidual < 0 )
 			sv.gameTimeResidual = 0;
 		if ( sv.gameTimeResidual >= newGameMsec )
@@ -1374,6 +1375,7 @@ void SV_TrackCvarChanges( void )
 				sv.timeResidual = newFrameMsec - 1;
 			// When sv_gameHz <= 0 the game frame rate equals sv_fps
 			if ( sv_gameHz->integer <= 0 ) {
+				sv.gameTimeResidualFrac = 0; // reset Bresenham fraction: gameHz follows new sv_fps
 				if ( sv.gameTimeResidual < 0 )
 					sv.gameTimeResidual = 0;
 				if ( sv.gameTimeResidual >= newFrameMsec )
@@ -1586,19 +1588,30 @@ void SV_Frame( int msec ) {
 		{
 			int _gameHz = (sv_gameHz && sv_gameHz->integer > 0) ? sv_gameHz->integer : sv_fps->integer;
 			int _gameMsec;
+			int _gameMsecRem;
 			if ( _gameHz < 1 )               _gameHz = 1;
 			if ( _gameHz > sv_fps->integer ) _gameHz = sv_fps->integer;
-			_gameMsec = 1000 / _gameHz;
+			_gameMsec    = 1000 / _gameHz;
+			// Bresenham remainder: same correction as the outer sv_fps loop but
+			// applied to the inner game-tick loop so sv.gameTime advances at
+			// exactly sv_gameHz Hz (or sv_fps Hz when sv_gameHz <= 0).
+			_gameMsecRem = 1000 % _gameHz;
 			sv.gameTimeResidual += thisFrameMsec;
 
 			while ( sv.gameTimeResidual >= _gameMsec ) {
-				sv.gameTimeResidual -= _gameMsec;
-				sv.gameTime += _gameMsec;
+				int thisGameMsec = _gameMsec;
+				sv.gameTimeResidualFrac += _gameMsecRem;
+				if ( sv.gameTimeResidualFrac >= _gameHz ) {
+					sv.gameTimeResidualFrac -= _gameHz;
+					thisGameMsec++;
+				}
+				sv.gameTimeResidual -= thisGameMsec;
+				sv.gameTime += thisGameMsec;
 				_gameFrameRan = qtrue;
 
 				// --- Engine-side antiwarp: inject blank commands for lagging clients ---
 				// Runs before GAME_RUN_FRAME so the QVM sees fresh ClientThink calls.
-				// Uses gameMsec instead of hardcoded 50ms, works at any sv_fps / sv_gameHz.
+				// Uses thisGameMsec (not _gameMsec) to stay in sync with Bresenham.
 				//
 				// Mode 1: constant -- keep last inputs indefinitely (QVM-style).
 				// Mode 2: decay -- extrapolate for sv_antiwarpExtra ms,
@@ -1627,7 +1640,7 @@ void SV_Frame( int msec ) {
 
 						awGap = sv.gameTime - awCl->awLastThinkTime;
 						if ( awGap > awTol ) {
-							awCl->lastUsercmd.serverTime += _gameMsec;
+							awCl->lastUsercmd.serverTime += thisGameMsec;
 							// Cap so injected serverTime never outruns real time --
 							// without this, a long lag spike inflates serverTime
 							// so that real usercmds are silently dropped on resume.
