@@ -1,0 +1,30 @@
+name: Cleanup Copilot Sessions
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: Archive old Copilot sessions (keep last 10)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete old Copilot coding agent runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          KEEP: 10
+        run: |
+          run_ids=$(gh api "repos/$REPO/actions/workflows/239248152/runs" \
+            --paginate \
+            --jq '.workflow_runs[].id' \
+            | sort -rn \
+            | tail -n +$((KEEP + 1)))
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            echo "Deleting run $id"
+            gh api "repos/$REPO/actions/runs/$id" -X DELETE || true
+          done <<< "$run_ids"
