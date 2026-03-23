@@ -1311,6 +1311,7 @@ endif
 
 ifeq ($(USE_OPENAL),1)
     Q3OBJ += $(B)/client/snd_openal.o
+    Q3OBJ += $(B)/client/c11threads_win32.o
 endif
 
 # client binary

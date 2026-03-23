@@ -60,12 +60,13 @@ typedef HMODULE al_lib_t;
 # define AL_GetProc(h,n)  GetProcAddress(h, n)
 #else
 # include <dlfcn.h>
-# include <pthread.h>
 typedef void *al_lib_t;
 # define AL_LoadLib(n)    dlopen(n, RTLD_NOW | RTLD_LOCAL)
 # define AL_UnloadLib(h)  dlclose(h)
 # define AL_GetProc(h,n)  dlsym(h, n)
 #endif
+
+#include "../qcommon/c11threads.h"
 
 static al_lib_t al_handle = NULL;
 
@@ -595,6 +596,7 @@ static qboolean           s_al_normCacheWritten;
 
 /* Cvars */
 static cvar_t *s_alDevice;
+static cvar_t *s_alOutput;       /* output channel layout: 0=stereo, 1=quad, 2=5.1, 3=6.1, 4=7.1 */
 static cvar_t *s_alHRTF;
 static cvar_t *s_alHeadShadow;   /* rear-source gain reduction in HRTF/UHJ spatial modes */
 static cvar_t *s_alEFX;          /* 0 = skip EFX init entirely (test/debug) */
@@ -1347,12 +1349,11 @@ static void S_AL_ProcessJob( S_AL_LoadJob_t *job )
 }
 
 /* =========================================================================
- * Platform thread pool -- pthreads (Linux / macOS) or Win64 threads.
- * 32-bit Windows uses synchronous loading only (no thread pool).
+ * Thread pool -- C11 threads (c11threads shim: pthreads / Win32).
  * =========================================================================
  */
 
-/* Shared state -- always declared regardless of platform. */
+/* Shared state */
 static S_AL_LoadJob_t   *s_al_jobHead    = NULL;
 static S_AL_LoadJob_t   *s_al_jobTail    = NULL;
 static int               s_al_jobsTotal  = 0;
@@ -1362,77 +1363,25 @@ static int               s_al_numWorkers = 0;
 static S_AL_LoadJob_t   *s_al_doneHead   = NULL;
 static S_AL_LoadJob_t   *s_al_doneTail   = NULL;
 
-#ifndef _WIN32   /* pthreads */
+static mtx_t             s_al_jobMutex;
+static cnd_t             s_al_jobCond;
+static cnd_t             s_al_allDone;
+static thrd_t            s_al_workers[S_AL_POOL_MAX_THREADS];
+static mtx_t             s_al_doneMutex;
 
-static pthread_mutex_t   s_al_jobMutex   = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t    s_al_jobCond    = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t    s_al_allDone    = PTHREAD_COND_INITIALIZER;
-static pthread_t         s_al_workers[S_AL_POOL_MAX_THREADS];
-
-static pthread_mutex_t   s_al_doneMutex  = PTHREAD_MUTEX_INITIALIZER;
-
-static void *S_AL_LoadWorker( void *unused )
+static int S_AL_LoadWorker( void *unused )
 {
     (void)unused;
-    pthread_mutex_lock(&s_al_jobMutex);
+    mtx_lock(&s_al_jobMutex);
 
     for (;;) {
         S_AL_LoadJob_t *job;
 
         while (s_al_poolRunning && !s_al_jobHead)
-            pthread_cond_wait(&s_al_jobCond, &s_al_jobMutex);
+            cnd_wait(&s_al_jobCond, &s_al_jobMutex);
 
         if (!s_al_jobHead) {
-            pthread_mutex_unlock(&s_al_jobMutex);
-            return NULL;
-        }
-
-        job          = s_al_jobHead;
-        s_al_jobHead = job->next;
-        if (!s_al_jobHead) s_al_jobTail = NULL;
-        job->next    = NULL;
-        pthread_mutex_unlock(&s_al_jobMutex);
-
-        S_AL_ProcessJob(job);
-
-        pthread_mutex_lock(&s_al_doneMutex);
-        if (s_al_doneTail)
-            s_al_doneTail->next = job;
-        else
-            s_al_doneHead = job;
-        s_al_doneTail = job;
-        pthread_mutex_unlock(&s_al_doneMutex);
-
-        pthread_mutex_lock(&s_al_jobMutex);
-        s_al_jobsTotal--;
-        if (s_al_jobsTotal == 0)
-            pthread_cond_broadcast(&s_al_allDone);
-    }
-    /* unreachable */
-}
-
-#elif defined(_WIN64)   /* 64-bit Windows: CRITICAL_SECTION + CONDITION_VARIABLE (Vista+) */
-
-static CRITICAL_SECTION   s_al_jobCS;
-static CONDITION_VARIABLE s_al_jobCV;
-static CONDITION_VARIABLE s_al_allDoneCV;
-static HANDLE             s_al_workers[S_AL_POOL_MAX_THREADS];
-
-static CRITICAL_SECTION   s_al_doneCS;
-
-static DWORD WINAPI S_AL_LoadWorker( LPVOID unused )
-{
-    (void)unused;
-    EnterCriticalSection(&s_al_jobCS);
-
-    for (;;) {
-        S_AL_LoadJob_t *job;
-
-        while (s_al_poolRunning && !s_al_jobHead)
-            SleepConditionVariableCS(&s_al_jobCV, &s_al_jobCS, INFINITE);
-
-        if (!s_al_jobHead) {
-            LeaveCriticalSection(&s_al_jobCS);
+            mtx_unlock(&s_al_jobMutex);
             return 0;
         }
 
@@ -1440,41 +1389,35 @@ static DWORD WINAPI S_AL_LoadWorker( LPVOID unused )
         s_al_jobHead = job->next;
         if (!s_al_jobHead) s_al_jobTail = NULL;
         job->next    = NULL;
-        LeaveCriticalSection(&s_al_jobCS);
+        mtx_unlock(&s_al_jobMutex);
 
         S_AL_ProcessJob(job);
 
-        EnterCriticalSection(&s_al_doneCS);
+        mtx_lock(&s_al_doneMutex);
         if (s_al_doneTail)
             s_al_doneTail->next = job;
         else
             s_al_doneHead = job;
         s_al_doneTail = job;
-        LeaveCriticalSection(&s_al_doneCS);
+        mtx_unlock(&s_al_doneMutex);
 
-        EnterCriticalSection(&s_al_jobCS);
+        mtx_lock(&s_al_jobMutex);
         s_al_jobsTotal--;
         if (s_al_jobsTotal == 0)
-            WakeAllConditionVariable(&s_al_allDoneCV);
+            cnd_broadcast(&s_al_allDone);
     }
     /* unreachable */
 }
 
-#endif  /* !_WIN32 (pthreads) / _WIN64 (Win32 threads) */
-
 /* =========================================================================
- * Thread-pool management -- shared interface (platform abstracted above).
+ * Thread-pool management.
  * =========================================================================
  */
 
 /* Submit a job to the pending queue.  Called on the game thread. */
 static void S_AL_SubmitLoadJob( S_AL_LoadJob_t *job )
 {
-#ifdef _WIN64
-    EnterCriticalSection(&s_al_jobCS);
-#elif !defined(_WIN32)
-    pthread_mutex_lock(&s_al_jobMutex);
-#endif
+    mtx_lock(&s_al_jobMutex);
     job->next = NULL;
     if (s_al_jobTail)
         s_al_jobTail->next = job;
@@ -1482,13 +1425,8 @@ static void S_AL_SubmitLoadJob( S_AL_LoadJob_t *job )
         s_al_jobHead = job;
     s_al_jobTail = job;
     s_al_jobsTotal++;
-#ifdef _WIN64
-    WakeConditionVariable(&s_al_jobCV);
-    LeaveCriticalSection(&s_al_jobCS);
-#elif !defined(_WIN32)
-    pthread_cond_signal(&s_al_jobCond);
-    pthread_mutex_unlock(&s_al_jobMutex);
-#endif
+    cnd_signal(&s_al_jobCond);
+    mtx_unlock(&s_al_jobMutex);
 }
 
 /* Drain the completed-jobs queue and upload pending sounds to OpenAL.
@@ -1500,19 +1438,11 @@ static void S_AL_CommitCompletedJobs( void )
     if (!s_al_numWorkers) return;
 
     /* Atomically detach the entire done list. */
-#ifdef _WIN64
-    EnterCriticalSection(&s_al_doneCS);
-#elif !defined(_WIN32)
-    pthread_mutex_lock(&s_al_doneMutex);
-#endif
+    mtx_lock(&s_al_doneMutex);
     list          = s_al_doneHead;
     s_al_doneHead = NULL;
     s_al_doneTail = NULL;
-#ifdef _WIN64
-    LeaveCriticalSection(&s_al_doneCS);
-#elif !defined(_WIN32)
-    pthread_mutex_unlock(&s_al_doneMutex);
-#endif
+    mtx_unlock(&s_al_doneMutex);
 
     while (list) {
         alSfxRec_t *r;
@@ -1579,17 +1509,10 @@ static void S_AL_FlushAllJobs( void )
 {
     if (!s_al_numWorkers) return;
 
-#ifdef _WIN64
-    EnterCriticalSection(&s_al_jobCS);
+    mtx_lock(&s_al_jobMutex);
     while (s_al_jobsTotal > 0)
-        SleepConditionVariableCS(&s_al_allDoneCV, &s_al_jobCS, INFINITE);
-    LeaveCriticalSection(&s_al_jobCS);
-#elif !defined(_WIN32)
-    pthread_mutex_lock(&s_al_jobMutex);
-    while (s_al_jobsTotal > 0)
-        pthread_cond_wait(&s_al_allDone, &s_al_jobMutex);
-    pthread_mutex_unlock(&s_al_jobMutex);
-#endif
+        cnd_wait(&s_al_allDone, &s_al_jobMutex);
+    mtx_unlock(&s_al_jobMutex);
 
     S_AL_CommitCompletedJobs();
 }
@@ -1604,30 +1527,18 @@ static void S_AL_StartThreadPool( int n )
     s_al_poolRunning = 1;
     s_al_numWorkers  = 0;
 
-#ifdef _WIN64
-    InitializeCriticalSection(&s_al_jobCS);
-    InitializeConditionVariable(&s_al_jobCV);
-    InitializeConditionVariable(&s_al_allDoneCV);
-    InitializeCriticalSection(&s_al_doneCS);
+    mtx_init(&s_al_jobMutex, mtx_plain);
+    cnd_init(&s_al_jobCond);
+    cnd_init(&s_al_allDone);
+    mtx_init(&s_al_doneMutex, mtx_plain);
 
     for (i = 0; i < n; i++) {
-        HANDLE h = CreateThread(NULL, 0, S_AL_LoadWorker, NULL, 0, NULL);
-        if (!h) {
-            Com_Printf(S_COLOR_YELLOW "S_AL: failed to create load worker %d\n", i);
-            break;
-        }
-        s_al_workers[i] = h;
-        s_al_numWorkers++;
-    }
-#elif !defined(_WIN32)
-    for (i = 0; i < n; i++) {
-        if (pthread_create(&s_al_workers[i], NULL, S_AL_LoadWorker, NULL) != 0) {
+        if (thrd_create(&s_al_workers[i], S_AL_LoadWorker, NULL) != thrd_success) {
             Com_Printf(S_COLOR_YELLOW "S_AL: failed to create load worker %d\n", i);
             break;
         }
         s_al_numWorkers++;
     }
-#endif
 
     if (s_al_numWorkers > 0)
         Com_Printf("S_AL: async load pool: %d worker thread(s)\n", s_al_numWorkers);
@@ -1640,26 +1551,13 @@ static void S_AL_StopThreadPool( void )
     if (!s_al_numWorkers) return;
 
     /* Signal workers to exit after draining remaining work. */
-#ifdef _WIN64
-    EnterCriticalSection(&s_al_jobCS);
+    mtx_lock(&s_al_jobMutex);
     s_al_poolRunning = 0;
-    WakeAllConditionVariable(&s_al_jobCV);
-    LeaveCriticalSection(&s_al_jobCS);
-
-    for (i = 0; i < s_al_numWorkers; i++) {
-        WaitForSingleObject(s_al_workers[i], INFINITE);
-        CloseHandle(s_al_workers[i]);
-        s_al_workers[i] = NULL;
-    }
-#elif !defined(_WIN32)
-    pthread_mutex_lock(&s_al_jobMutex);
-    s_al_poolRunning = 0;
-    pthread_cond_broadcast(&s_al_jobCond);
-    pthread_mutex_unlock(&s_al_jobMutex);
+    cnd_broadcast(&s_al_jobCond);
+    mtx_unlock(&s_al_jobMutex);
 
     for (i = 0; i < s_al_numWorkers; i++)
-        pthread_join(s_al_workers[i], NULL);
-#endif
+        thrd_join(s_al_workers[i], NULL);
 
     s_al_numWorkers = 0;
 
@@ -1668,11 +1566,7 @@ static void S_AL_StopThreadPool( void )
 
     /* Discard any jobs still on the pending queue (shouldn't happen after
      * flush, but be defensive). */
-#ifdef _WIN64
-    EnterCriticalSection(&s_al_jobCS);
-#elif !defined(_WIN32)
-    pthread_mutex_lock(&s_al_jobMutex);
-#endif
+    mtx_lock(&s_al_jobMutex);
     while (s_al_jobHead) {
         S_AL_LoadJob_t *j = s_al_jobHead;
         s_al_jobHead = j->next;
@@ -1682,13 +1576,12 @@ static void S_AL_StopThreadPool( void )
     }
     s_al_jobTail   = NULL;
     s_al_jobsTotal = 0;
-#ifdef _WIN64
-    LeaveCriticalSection(&s_al_jobCS);
-    DeleteCriticalSection(&s_al_jobCS);
-    DeleteCriticalSection(&s_al_doneCS);
-#elif !defined(_WIN32)
-    pthread_mutex_unlock(&s_al_jobMutex);
-#endif
+    mtx_unlock(&s_al_jobMutex);
+
+    mtx_destroy(&s_al_jobMutex);
+    mtx_destroy(&s_al_doneMutex);
+    cnd_destroy(&s_al_jobCond);
+    cnd_destroy(&s_al_allDone);
 }
 
 
@@ -2075,16 +1968,16 @@ static void S_AL_FreeSfx( void )
  * =========================================================================
  */
 
-/* Full-scale value for master_vol: source gain = (master_vol/255)*catVol,
- * listener gain = s_volume.  Combined: s_volume * catVol (no double-apply). */
-#define S_AL_MASTER_VOL_FULL 255.0f
+/* Master volume baseline: DMA uses MASTER_VOL=127 (half of 255) as the
+ * source volume before distance attenuation.  OpenAL source gain is
+ * (master_vol/255)*catVol, so 127 gives the same base level as DMA.
+ * Using 255 made all OpenAL sources ~2x louder than DMA at every distance. */
+#define S_AL_MASTER_VOL 127.0f
 
 /* Find an existing source for (entnum, entchannel), or -1. */
 static float S_AL_GetMasterVol( void )
 {
-    /* Return full-scale so that source gain = catVol (the listener AL_GAIN
-     * is set to s_volume every frame -- applying it here too would double it). */
-    return S_AL_MASTER_VOL_FULL;
+    return S_AL_MASTER_VOL;
 }
 
 /* Return the per-category volume scalar for a source.
@@ -2855,15 +2748,23 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
          * the sporadic "suppressor" effect heard on weapons like the DE-50. */
         if (s_al_efx.available) {
             qalSourcei(sid, AL_DIRECT_FILTER, (ALint)AL_FILTER_NULL);
-            /* Also disconnect any stale reverb auxiliary send.  Without this,
-             * a local source that reuses a slot previously used for a 3D
-             * reverb-enabled sound inherits the reverb routing, adding an
-             * unwanted wet tail to own-player weapon and footstep sounds. */
-            qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
-                        (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
-            if (s_al_efx.maxSends >= 2)
+            /* Underwater: route local sources (reloads, footsteps) to the
+             * underwater reverb + chorus so they sound submerged.  Above water:
+             * null the sends to prevent stale reverb from a previous 3D use. */
+            if (s_al_inwater && src->category != SRC_CAT_UI
+                    && s_alReverb && s_alReverb->integer) {
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
-                            (ALint)AL_EFFECTSLOT_NULL, 1, (ALint)AL_FILTER_NULL);
+                            (ALint)s_al_efx.underwaterSlot, 0, (ALint)AL_FILTER_NULL);
+                if (s_al_efx.maxSends >= 2 && s_al_efx.chorusSlot)
+                    qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                                (ALint)s_al_efx.chorusSlot, 1, (ALint)AL_FILTER_NULL);
+            } else {
+                qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                            (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
+                if (s_al_efx.maxSends >= 2)
+                    qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
+                                (ALint)AL_EFFECTSLOT_NULL, 1, (ALint)AL_FILTER_NULL);
+            }
             /* EQ send -- local sources (own weapons/footsteps) get the same
              * bass/mid boost as world sources for consistent tonal balance.
              * Use eqNormFilter on the send to compensate for the additive
@@ -2890,7 +2791,7 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
             qalSourcei(sid, AL_DIRECT_CHANNELS_SOFT, AL_TRUE);
     } else {
         float maxDist = s_alMaxDist ? s_alMaxDist->value : S_AL_SOUND_MAXDIST;
-        if (maxDist < S_AL_SOUND_MAXDIST) maxDist = S_AL_SOUND_MAXDIST;
+        if (maxDist < S_AL_SOUND_FULLVOLUME + 1.0f) maxDist = S_AL_SOUND_FULLVOLUME + 1.0f;
         qalSourcei(sid, AL_SOURCE_RELATIVE, AL_FALSE);
         qalSource3f(sid, AL_POSITION, src->origin[0], src->origin[1], src->origin[2]);
         qalSourcef(sid, AL_ROLLOFF_FACTOR,      1.0f);
@@ -2902,10 +2803,13 @@ static void S_AL_SrcSetup( int idx, sfxHandle_t sfx,
         if (s_al_directChannels)
             qalSourcei(sid, AL_DIRECT_CHANNELS_SOFT, AL_FALSE);
         if (s_al_efx.available) {
-            /* Reverb send (auxiliary send 0) -- skip when reverb is disabled */
+            /* Reverb send (auxiliary send 0) -- use underwater slot when submerged
+             * so newly-started sounds match the current water state. */
             if (s_alReverb && s_alReverb->integer) {
+                ALuint slot0 = s_al_inwater ? s_al_efx.underwaterSlot
+                                            : s_al_efx.reverbSlot;
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
-                            (ALint)s_al_efx.reverbSlot, 0, (ALint)AL_FILTER_NULL);
+                            (ALint)slot0, 0, (ALint)AL_FILTER_NULL);
             } else {
                 qalSource3i(sid, AL_AUXILIARY_SEND_FILTER,
                             (ALint)AL_EFFECTSLOT_NULL, 0, (ALint)AL_FILTER_NULL);
@@ -3631,7 +3535,7 @@ static void S_AL_TriggerTinnitus( void )
     s_al_src[srcIdx].sfx         = -1;
     s_al_src[srcIdx].entnum      =  0;
     s_al_src[srcIdx].entchannel  = CHAN_LOCAL_SOUND;
-    s_al_src[srcIdx].master_vol  = S_AL_MASTER_VOL_FULL;
+    s_al_src[srcIdx].master_vol  = 255.0f;  /* raw source, gain set directly */
     s_al_src[srcIdx].isLocal     = qtrue;
     s_al_src[srcIdx].loopSound   = qfalse;
     s_al_src[srcIdx].allocTime   = now;
@@ -6301,17 +6205,22 @@ static void S_AL_Update( int msec )
             qboolean chorusActive = (s_al_inwater && s_al_efx.chorusEffect != 0);
             if (chorusActive != lastChorusActive) {
                 qalAuxiliaryEffectSlotf(s_al_efx.chorusSlot, AL_EFFECTSLOT_GAIN,
-                                        chorusActive ? 0.25f : 0.0f);
+                                        chorusActive ? 0.55f : 0.0f);
                 lastChorusActive = chorusActive;
             }
         }
 
-        /* Switch all non-local sources between normal reverb and underwater effect */
+        /* Switch ALL playing sources between normal reverb and underwater effect.
+         * Local sources (own-weapon reloads, footsteps) are now included so they
+         * get the underwater reverb tail — previously only the dry-path lowpass
+         * applied, making reloads sound identical above and below water.
+         * SRC_CAT_UI is excluded (tinnitus, hit markers, kill sounds). */
         if (s_al_inwater != lastInwater) {
             int j;
             ALuint slot = s_al_inwater ? s_al_efx.underwaterSlot : s_al_efx.reverbSlot;
             for (j = 0; j < s_al_numSrc; j++) {
-                if (!s_al_src[j].isPlaying || s_al_src[j].isLocal) continue;
+                if (!s_al_src[j].isPlaying) continue;
+                if (s_al_src[j].category == SRC_CAT_UI) continue;
                 if (s_alReverb && !s_alReverb->integer)
                     slot = (ALuint)AL_EFFECTSLOT_NULL;
                 qalSource3i(s_al_src[j].source, AL_AUXILIARY_SEND_FILTER,
@@ -6655,6 +6564,14 @@ static void S_AL_Update( int msec )
                     gainHF *= srcSuppressHF * s_al_grenadeHF * s_al_healthHF;
                 }
 
+                /* Underwater direct-path lowpass: heavy HF cut + moderate gain
+                 * reduction so sounds are muffled under water.  The aux-send
+                 * underwater reverb and chorus wobble are supplementary. */
+                if (s_al_inwater) {
+                    gainHF *= 0.08f;
+                    gain   *= 0.55f;
+                }
+
                 /* BSP speaker loop sources: skip the AL_POSITION write.
                  * S_AL_UpdateLoops writes the authoritative world position
                  * each frame (it runs after this loop); overwriting it here
@@ -6761,6 +6678,11 @@ static void S_AL_Update( int msec )
                     float combHF   = localSuppressHF * s_al_grenadeHF * s_al_healthHF;
                     float normGain = (s_al_efx.eqNormFilter && s_al_efx.eqSend >= 0)
                                      ? s_al_efx.eqCompGain : 1.0f;
+                    /* Underwater: own-player sounds get the same HF cut */
+                    if (s_al_inwater) {
+                        combHF   *= 0.08f;
+                        normGain *= 0.55f;
+                    }
                     /* Apply the filter when either condition requires attenuation.
                      * combHF < 0.97: HF suppression threshold (matches world source).
                      * normGain < 0.98: EQ compensation reduces direct path by > 2%;
@@ -6949,6 +6871,17 @@ static void S_AL_SoundInfo( void )
      * ----------------------------------------------------------------------- */
     Com_Printf("  Processing features (ON = active, OFF = bypassed):\n");
 
+    /* Output mode */
+    if (s_alOutput && s_alOutput->integer >= 1 && s_alOutput->integer <= 4) {
+        static const char *layoutNames[] = { "Quad 4.0", "5.1", "6.1", "7.1" };
+        Com_Printf("    Output            " S_COLOR_CYAN "%s" S_COLOR_WHITE
+                   "  (s_alOutput %d, LATCH)\n",
+            layoutNames[s_alOutput->integer - 1], s_alOutput->integer);
+    } else {
+        Com_Printf("    Output            " S_COLOR_WHITE "Stereo"
+                   "  (s_alOutput 0, LATCH)\n");
+    }
+
     /* HRTF -- reports actual hardware/driver state, not just the cvar */
     if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
         qboolean hrtfOn = (hrtfStatus == ALC_HRTF_ENABLED_SOFT);
@@ -7108,10 +7041,22 @@ qboolean S_AL_Init( soundInterface_t *si )
     /* Register cvars */
     s_alDevice  = Cvar_Get("s_alDevice",  "",    CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_SetDescription(s_alDevice, "OpenAL output device. Empty = system default. Type /s_devices for a numbered list of available devices. (LATCH -- requires vid_restart to take effect)");
+    s_alOutput  = Cvar_Get("s_alOutput", "0",   CVAR_ARCHIVE_ND | CVAR_LATCH);
+    Cvar_CheckRange(s_alOutput, "0", "4", CV_INTEGER);
+    Cvar_SetDescription(s_alOutput,
+        "Output channel layout. Requires vid_restart (LATCH).\n"
+        " 0 = Stereo (default) -- use s_alHRTF for HRTF/UHJ selection.\n"
+        " 1 = Quad 4.0 -- front left/right + rear left/right.\n"
+        " 2 = Surround 5.1 -- FL/FR/C/LFE/RL/RR.\n"
+        " 3 = Surround 6.1 -- FL/FR/C/LFE/RL/RR/RC.\n"
+        " 4 = Surround 7.1 -- FL/FR/C/LFE/RL/RR/SL/SR.\n"
+        "When set to 1-4, s_alHRTF and s_alDirectChannels are ignored. "
+        "Requires ALC_SOFT_output_mode extension (OpenAL Soft 1.23+).");
     s_alHRTF    = Cvar_Get("s_alHRTF",   "2",   CVAR_ARCHIVE_ND | CVAR_LATCH);
     Cvar_CheckRange(s_alHRTF, "0", "2", CV_INTEGER);
     Cvar_SetDescription(s_alHRTF,
-        "Stereo spatialization mode via OpenAL Soft. Requires vid_restart (LATCH).\n"
+        "Stereo spatialization mode via OpenAL Soft. Only active when s_alOutput 0. "
+        "Requires vid_restart (LATCH).\n"
         " 0 = Off -- plain stereo panning, no spatial processing (default).\n"
         " 1 = HRTF -- Head-Related Transfer Function binaural rendering. Best for headphones. "
         "Warning: the HRIR convolution alters frequency response and can strip bass/body from audio. "
@@ -7144,10 +7089,11 @@ qboolean S_AL_Init( soundInterface_t *si )
         "Set to 0 to route local sources through the full HRTF pipeline. "
         "Requires vid_restart (LATCH).");
     /* s_alMaxDist: default matches the vanilla dma max-audible distance.
-     * Values below 1330 are clamped to 1330 by the distance-model setup. */
+     * With AL_LINEAR_DISTANCE_CLAMPED the source reaches zero gain at this
+     * distance, matching the DMA linear falloff curve. */
     s_alMaxDist = Cvar_Get("s_alMaxDist", "1330", CVAR_ARCHIVE_ND);
-    Cvar_CheckRange(s_alMaxDist, "1330", "4096", CV_FLOAT);
-    Cvar_SetDescription(s_alMaxDist, "Maximum attenuation distance for OpenAL sound sources (game units). Matches vanilla dma range of 1330 at default.");
+    Cvar_CheckRange(s_alMaxDist, "80", "4096", CV_FLOAT);
+    Cvar_SetDescription(s_alMaxDist, "Maximum attenuation distance for OpenAL sound sources (game units). Sources reach zero gain at this distance. Default 1330 matches vanilla DMA.");
     /* Reverb is ON by default -- gives URT maps clear acoustic character. */
     s_alReverb = Cvar_Get("s_alReverb", "1", CVAR_ARCHIVE_ND);
     Cvar_CheckRange(s_alReverb, "0", "1", CV_INTEGER);
@@ -7755,42 +7701,55 @@ qboolean S_AL_Init( soundInterface_t *si )
         qalcGetString(s_al_device, ALC_DEVICE_SPECIFIER));
 
     /* -----------------------------------------------------------------------
-     * HRTF / headphone stereo setup
+     * Output mode setup -- surround (s_alOutput 1-4) or stereo (s_alOutput 0).
      *
-     * s_alHRTF 1 (HRTF): request HRTF convolution for headphone users.
-     *   Layer 1 -- ALC_SOFT_output_mode: ALC_STEREO_HRTF_SOFT
-     *   Layer 2 -- ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_TRUE
-     *   Layer 3 -- alcResetDeviceSoft:   belt-and-suspenders if still disabled
+     * s_alOutput 1-4: request multi-channel surround output.
+     *   1 = Quad 4.0,  2 = 5.1,  3 = 6.1,  4 = 7.1
+     *   HRTF is explicitly disabled -- surround and HRTF are mutually exclusive.
      *
-     * s_alHRTF 2 (UHJ): Ambisonics-based stereo -- spatial positioning without
-     *   HRTF convolution.  Preserves full bass/body in the audio signal.
-     *   Layer 1 -- ALC_SOFT_output_mode: ALC_STEREO_UHJ_SOFT
-     *   Layer 2 -- ALC_SOFT_HRTF:        ALC_HRTF_SOFT = ALC_FALSE (UHJ != HRTF)
-     *
-     * s_alHRTF 0 (default): explicitly DISABLE HRTF so that alsoft.conf or
-     *   driver defaults cannot silently re-enable it.  Without the explicit
-     *   ALC_HRTF_SOFT=ALC_FALSE request, OpenAL Soft may honour a system-wide
-     *   "hrtf = true" in alsoft.conf and run the centre-HRIR convolution on
-     *   own-player weapon sources even when the user sets s_alHRTF 0.  That
-     *   convolution is what produces the "muffled pop" on speaker setups.
-     *   ALC_STEREO_BASIC_SOFT requests plain stereo panning with no HRTF and
-     *   no surround upmix -- the correct output mode for a speaker game session.
+     * s_alOutput 0 (default): stereo -- s_alHRTF selects the stereo sub-mode:
+     *   s_alHRTF 1: ALC_STEREO_HRTF_SOFT + ALC_HRTF_SOFT = ALC_TRUE
+     *   s_alHRTF 2: ALC_STEREO_UHJ_SOFT  + ALC_HRTF_SOFT = ALC_FALSE
+     *   s_alHRTF 0: ALC_STEREO_BASIC_SOFT + ALC_HRTF_SOFT = ALC_FALSE
      * ----------------------------------------------------------------------- */
     nAttribs = 0;
-    if (s_alHRTF->integer == 1) {
-        /* Layer 1: prefer ALC_SOFT_output_mode + ALC_STEREO_HRTF_SOFT */
+    if (s_alOutput->integer >= 1 && s_alOutput->integer <= 4) {
+        /* Surround output modes */
+        static const ALCint surroundModes[] = {
+            ALC_QUAD_SOFT,          /* s_alOutput 1 */
+            ALC_SURROUND_5_1_SOFT,  /* s_alOutput 2 */
+            ALC_SURROUND_6_1_SOFT,  /* s_alOutput 3 */
+            ALC_SURROUND_7_1_SOFT,  /* s_alOutput 4 */
+        };
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
+            ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
+            ctxAttribs[nAttribs++] = surroundModes[s_alOutput->integer - 1];
+            Com_Printf("S_AL: requesting %s output mode\n",
+                s_alOutput->integer == 1 ? "Quad 4.0" :
+                s_alOutput->integer == 2 ? "Surround 5.1" :
+                s_alOutput->integer == 3 ? "Surround 6.1" : "Surround 7.1");
+        } else {
+            Com_Printf(S_COLOR_YELLOW "S_AL: ALC_SOFT_output_mode not available"
+                " -- surround output (s_alOutput %d) cannot be requested."
+                " Falling back to device default.\n", s_alOutput->integer);
+        }
+        /* Surround: explicitly disable HRTF */
+        if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
+            ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
+            ctxAttribs[nAttribs++] = ALC_FALSE;
+        }
+    } else if (s_alHRTF->integer == 1) {
+        /* Stereo HRTF mode */
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
             ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
             ctxAttribs[nAttribs++] = ALC_STEREO_HRTF_SOFT;
         }
-        /* Layer 2: ALC_SOFT_HRTF -- always include when extension present */
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_HRTF")) {
             ctxAttribs[nAttribs++] = ALC_HRTF_SOFT;
             ctxAttribs[nAttribs++] = ALC_TRUE;
         }
     } else if (s_alHRTF->integer == 2) {
-        /* UHJ mode: Ambisonics-based stereo -- spatial without HRTF convolution.
-         * Explicitly disable HRTF so it cannot be forced on by alsoft.conf. */
+        /* Stereo UHJ mode */
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
             ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
             ctxAttribs[nAttribs++] = ALC_STEREO_UHJ_SOFT;
@@ -7800,9 +7759,7 @@ qboolean S_AL_Init( soundInterface_t *si )
             ctxAttribs[nAttribs++] = ALC_FALSE;
         }
     } else {
-        /* Explicitly disable HRTF and request plain stereo output.
-         * This overrides alsoft.conf and device defaults so the user can
-         * be certain HRTF is truly off after a vid_restart. */
+        /* Stereo basic -- explicitly disable HRTF */
         if (qalcIsExtensionPresent(s_al_device, "ALC_SOFT_output_mode")) {
             ctxAttribs[nAttribs++] = ALC_OUTPUT_MODE_SOFT;
             ctxAttribs[nAttribs++] = ALC_STEREO_BASIC_SOFT;
@@ -7904,8 +7861,12 @@ qboolean S_AL_Init( soundInterface_t *si )
         }
     }
 
-    /* Log HRTF status and which dataset OpenAL Soft selected */
-    if (s_al_hrtf) {
+    /* Log output mode and HRTF status */
+    if (s_alOutput->integer >= 1 && s_alOutput->integer <= 4) {
+        static const char *layoutNames[] = { "Quad 4.0", "5.1", "6.1", "7.1" };
+        Com_Printf("S_AL: surround output: %s (s_alOutput %d)\n",
+            layoutNames[s_alOutput->integer - 1], s_alOutput->integer);
+    } else if (s_al_hrtf) {
         const ALCchar *hrtfName = NULL;
         if (qalcGetStringiSOFT)
             hrtfName = qalcGetStringiSOFT(s_al_device, ALC_HRTF_SPECIFIER_SOFT, 0);
@@ -7940,7 +7901,8 @@ qboolean S_AL_Init( soundInterface_t *si )
     s_al_directChannelsExt = qalIsExtensionPresent("AL_SOFT_direct_channels");
     s_al_directChannels    = s_al_directChannelsExt &&
                              s_alDirectChannels && s_alDirectChannels->integer &&
-                             s_alHRTF && s_alHRTF->integer == 1;
+                             s_alHRTF && s_alHRTF->integer == 1 &&
+                             !(s_alOutput && s_alOutput->integer >= 1);
     Com_Printf("S_AL: AL_SOFT_direct_channels: %s%s\n",
                s_al_directChannelsExt ? "available" : "not available",
                (s_al_directChannelsExt && !s_al_directChannels)
