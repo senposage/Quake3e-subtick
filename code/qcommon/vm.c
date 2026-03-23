@@ -1582,8 +1582,8 @@ VM_URT43_CgamePatches
 Apply runtime memory patches to the official UrbanTerror 4.3 cgame QVM.
 
 The effective patch bitmask is chosen automatically based on server type:
-  * Custom server (has sv_snapshotFps in serverinfo): cl_urt43cgPatches  (default 7)
-  * Vanilla server (no sv_snapshotFps):               cl_qvmPatchVanilla (default 3)
+  * Custom server (has sv_snapshotFps in serverinfo): cl_urt43cgPatches  (default 0)
+  * Vanilla server (no sv_snapshotFps):               cl_qvmPatchVanilla (default 0)
 cl_urt43serverIsVanilla (CVAR_TEMP) bridges the detection from CL_ParseServerInfo.
 
 Bitmask layout (shared by both cvars):

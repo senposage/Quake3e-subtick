@@ -1019,24 +1019,24 @@ void CL_InitCGame( void ) {
 	//           server.  Auto-suppressed on vanilla servers via
 	//           cl_qvmPatchVanilla + cl_urt43serverIsVanilla.
 	//
-	// cl_urt43cgPatches  -- used when connected to our custom server (default 7)
-	// cl_qvmPatchVanilla -- used when connected to a vanilla server   (default 3)
-	Cvar_Get( "cl_urt43cgPatches", "7", CVAR_ARCHIVE | CVAR_PROTECTED | CVAR_PRIVATE );
+	// cl_urt43cgPatches  -- used when connected to our custom server (default 0)
+	// cl_qvmPatchVanilla -- used when connected to a vanilla server   (default 0)
+	Cvar_Get( "cl_urt43cgPatches", "0", CVAR_ARCHIVE | CVAR_PROTECTED | CVAR_PRIVATE );
 	Cvar_SetDescription2( "cl_urt43cgPatches",
 		"QVM patch bitmask applied when connected to a custom (Quake3e-urt) server. "
 		"Bit 0 = Patch2 (frameInterpolation clamp), "
 		"bit 1 = Patch3 (null-snapshot crash fix), "
 		"bit 2 = Patch1 (TR_LINEAR velocity extrapolation -- requires server-side trTime anchor). "
-		"Default 7 (all patches). "
+		"Default 0 (no patches). "
 		"On vanilla servers cl_qvmPatchVanilla is used instead." );
-	Cvar_Get( "cl_qvmPatchVanilla", "3", CVAR_ARCHIVE | CVAR_PRIVATE );
+	Cvar_Get( "cl_qvmPatchVanilla", "0", CVAR_ARCHIVE | CVAR_PRIVATE );
 	Cvar_SetDescription2( "cl_qvmPatchVanilla",
 		"QVM patch bitmask applied when connected to a vanilla UrT server "
 		"(server lacks sv_snapshotFps -- no server-side trTime anchor for TR_LINEAR). "
 		"Bit 0 = Patch2 (frameInterpolation clamp), "
 		"bit 1 = Patch3 (null-snapshot crash fix -- prevents CG_Error crash on first frame), "
 		"bit 2 = Patch1 (TR_LINEAR -- unsafe on vanilla servers, leave unset). "
-		"Default 3 (Patches 2+3 safe on any server; Patch1/bit2 requires server-side trTime anchor). "
+		"Default 0 (no patches). "
 		"On custom servers cl_urt43cgPatches is used instead." );
 
 	cgvm = VM_Create( VM_CGAME, CL_CgameSystemCalls, CL_DllSyscall, interpret );

@@ -352,7 +352,7 @@ The `CG_CVAR_SET` intercept in `cl_cgame.c` (line 571) prevents the QVM from
 resetting `cg_smoothClients` mid-session.
 
 **Requires server-side `trTime` anchor** -- see Layer 1.  Auto-suppressed on
-vanilla servers via `cl_qvmPatchVanilla` (default `3` excludes bit 2).
+vanilla servers via `cl_qvmPatchVanilla` (default `0` excludes bit 2).
 
 ---
 
@@ -430,7 +430,7 @@ from the origin.
 **Fix:** `sv_snapshot.c` anchors `trTime = sv.time` unconditionally for all
 `TR_INTERPOLATE` client entities, even when `sv_smoothClients = 0`.  Patch 1 is
 automatically suppressed on vanilla servers via `cl_qvmPatchVanilla` (bit 2 not
-set in default `3`).  The `!isVanilla` gate in `VM_URT43_CgamePatches` also
+set in default `0`).  The `!isVanilla` gate in `VM_URT43_CgamePatches` also
 prevents `cg_smoothClients=1` from being forced on vanilla servers.
 
 ### FM-2: Crash on map load / after lag spike
@@ -440,8 +440,8 @@ prevents `cg_smoothClients=1` from being forced on vanilla servers.
 **Path:** Patch 3 not applied, or not in the patch bitmask.
 
 **Fix:** Patch 3 (bit 1) replaces the `CG_Error` path with an early return.
-Default bitmasks (`cl_urt43cgPatches 7` and `cl_qvmPatchVanilla 3`) both include
-bit 1, so it is active on all server types.
+Default bitmasks (`cl_urt43cgPatches 0` and `cl_qvmPatchVanilla 0`) both exclude
+bit 1 by default, so Patch 3 is not applied unless explicitly enabled.
 
 ### FM-3: Player jitter at sv_fps > 60 (~2 units/frame at 300 ups)
 
@@ -522,7 +522,7 @@ On vanilla URT servers (`sv_snapshotFps` absent from serverinfo):
 
 - `cl_adaptiveTiming` is disabled (`cl.serverForbidsAdaptiveTiming` via
   `sv_allowClientAdaptiveTiming`).
-- QVM patch bitmask: `cl_qvmPatchVanilla` (default `3` = bits 0+1 = Patches 2+3).
+- QVM patch bitmask: `cl_qvmPatchVanilla` (default `0` = no patches).
 - Patch 1 (bit 2) is NOT applied: vanilla servers do not anchor `trTime`, so
   the TR_LINEAR formula would compute `dt = cg.time - 0 = enormous` and
   teleport all entities.
@@ -531,7 +531,7 @@ On vanilla URT servers (`sv_snapshotFps` absent from serverinfo):
   stale/zero `trDelta`, freezing them in place.
 
 This is enforced at two levels:
-1. `cl_qvmPatchVanilla` default excludes bit 2.
+1. `cl_qvmPatchVanilla` default excludes bit 2 (default is `0`).
 2. The `if (!isVanilla)` guard in `VM_URT43_CgamePatches` prevents the
    `cg_smoothClients` force even if someone sets `cl_qvmPatchVanilla 7`.
 
@@ -546,8 +546,8 @@ This is enforced at two levels:
 | `sv_bufferMs` | Server | `0` | Position delay (ms). -1=auto (one snap interval). 0=disabled |
 | `cl_adaptiveTiming` | Client | `1` | Scale timing thresholds with snapshotMsec. 0=vanilla |
 | `sv_allowClientAdaptiveTiming` | Server | `1` | Allow client to use cl_adaptiveTiming (sent in serverinfo) |
-| `cl_urt43cgPatches` | Client | `7` | QVM patch bitmask for custom servers (bits 0+1+2 = all three patches) |
-| `cl_qvmPatchVanilla` | Client | `3` | QVM patch bitmask for vanilla servers (bits 0+1 = Patches 2+3 only) |
+| `cl_urt43cgPatches` | Client | `0` | QVM patch bitmask for custom servers (0=disabled by default) |
+| `cl_qvmPatchVanilla` | Client | `0` | QVM patch bitmask for vanilla servers (0=disabled by default) |
 | `cl_urt43serverIsVanilla` | Client | *(CVAR_TEMP)* | Bridge set by CL_ParseServerInfo; chooses which bitmask cvar to use |
 | `sv_antiwarp` | Server | `0` | Engine antiwarp mode. 1=constant, 2=decay |
 | `sv_antiwarpTol` | Server | `0` | Antiwarp tolerance (ms). 0=auto (one game frame) |
