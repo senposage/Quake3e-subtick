@@ -1,0 +1,402 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: senposage <onemoar@gmail.com>
+Date: Sun, 23 Mar 2026 00:00:00 -0400
+Subject: [PATCH] feat: sv_smoothClients -- TR_LINEAR trajectory for smoother
+ player rendering
+
+Server-side snapshot rewriting that converts TR_INTERPOLATE player entities
+to TR_LINEAR with position + velocity data.  The client extrapolates forward
+between snapshots instead of snapping between discrete positions, producing
+smooth continuous motion at any sv_fps.
+
+New cvars:
+  sv_smoothClients 0|1  -- enable TR_LINEAR trajectory rewriting (default 1)
+  sv_velSmooth <ms>     -- EWA velocity smoothing window (default -1=auto)
+                           -1 = 4 * frameMsec (e.g. 80 ms at sv_fps 50)
+                            0 = off (raw per-tick velocity)
+
+The velocity smoothing uses a per-client ring buffer (32 slots) with
+exponential weighted average: the most-recent sample dominates (~53%
+weight at 50 Hz / 80 ms window), older samples decay by half per step.
+This eliminates per-tick trDelta jitter that manifests as blur or
+micro-stutter for fast-moving players, without adding directional lag.
+
+Implementation:
+  - Ring buffer records origin + velocity each sv_fps tick
+  - SV_SmoothRecordAll() called after GAME_RUN_FRAME in SV_Frame
+  - Snapshot entity loop rewrites TR_INTERPOLATE -> TR_LINEAR for
+    player entities with speed > ~10 ups (DotProduct > 100)
+  - Idle players keep TR_INTERPOLATE with anchored trTime
+  - Bots are excluded (they work correctly with TR_INTERPOLATE)
+  - SV_SmoothClearClient() called on disconnect to prevent stale data
+  - trTime anchored for all TR_INTERPOLATE client entities (needed for
+    cgame QVM patches that redirect TR_INTERPOLATE -> TR_LINEAR)
+  - es->origin synced to es->pos.trBase (fixes spot-shadow divergence)
+
+Files modified:
+  server.h      -- cvar externs + function prototypes
+  sv_main.c     -- cvar definitions + SV_SmoothRecordAll call
+  sv_init.c     -- cvar registration + SV_SmoothInit call
+  sv_client.c   -- SV_SmoothClearClient on drop
+  sv_snapshot.c -- ring buffer + snapshot entity rewriting
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ code/server/server.h      |   8 ++
+ code/server/sv_client.c   |   3 +
+ code/server/sv_init.c     |  12 +++
+ code/server/sv_main.c     |  11 +++
+ code/server/sv_snapshot.c | 201 +++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 235 insertions(+)
+
+diff --git a/code/server/server.h b/code/server/server.h
+index 91b5097a..00000001 100644
+--- a/code/server/server.h
++++ b/code/server/server.h
+@@ -282,6 +282,8 @@ extern	server_t		sv;					// cleared each map
+ extern	vm_t			*gvm;				// game virtual machine
+
+ extern	cvar_t	*sv_fps;
++extern	cvar_t	*sv_smoothClients;
++extern	cvar_t	*sv_velSmooth;
+ extern	cvar_t	*sv_timeout;
+ extern	cvar_t	*sv_zombietime;
+ extern	cvar_t	*sv_rconPassword;
+@@ -396,6 +398,12 @@ void SV_SendClientSnapshot( client_t *client );
+ void SV_InitSnapshotStorage( void );
+ void SV_IssueNewSnapshot( void );
+
++//
++// sv_snapshot.c -- smooth ring buffer
++//
++void SV_SmoothInit( void );
++void SV_SmoothClearClient( int clientNum );
++void SV_SmoothRecordAll( void );
+
+ int SV_RemainingGameState( void );
+
+diff --git a/code/server/sv_client.c b/code/server/sv_client.c
+index df65e1cd..00000002 100644
+--- a/code/server/sv_client.c
++++ b/code/server/sv_client.c
+@@ -874,6 +874,9 @@ void SV_DropClient( client_t *drop, const char *reason ) {
+ 	// Free all allocated data on the client structure
+ 	SV_FreeClient( drop );
+
++	// Clear smooth position history so next client on this slot starts fresh
++	SV_SmoothClearClient( drop - svs.clients );
++
+ 	// tell everyone why they got dropped
+ 	if ( reason ) {
+ 		SV_SendServerCommand( NULL, "print \"%s" S_COLOR_WHITE " %s\n\"", name, reason );
+diff --git a/code/server/sv_init.c b/code/server/sv_init.c
+index af9d9305..00000003 100644
+--- a/code/server/sv_init.c
++++ b/code/server/sv_init.c
+@@ -468,6 +468,7 @@ void SV_SpawnServer( const char *mapname, qboolean killBots ) {
+
+ 	// initialize snapshot storage
+ 	SV_InitSnapshotStorage();
++	SV_SmoothInit();
+
+ 	// toggle the server bit so clients can detect that a
+ 	// server has changed
+@@ -762,6 +763,13 @@ void SV_Init( void )
+ 	sv_fps = Cvar_Get ("sv_fps", "20", CVAR_TEMP );
+ 	Cvar_CheckRange( sv_fps, "10", "125", CV_INTEGER );
+ 	Cvar_SetDescription( sv_fps, "Set the max frames per second the server sends the client." );
++
++	sv_smoothClients = Cvar_Get( "sv_smoothClients", "1", CVAR_ARCHIVE );
++	Cvar_SetDescription( sv_smoothClients, "Write TR_LINEAR trajectory data (position + velocity) into snapshots for player entities, enabling smoother client-side rendering between snapshots." );
++
++	sv_velSmooth = Cvar_Get( "sv_velSmooth", "-1", CVAR_ARCHIVE );
++	Cvar_SetDescription( sv_velSmooth, "Velocity smoothing window (ms) for TR_LINEAR trDelta.  Uses exponential weighted average (alpha=0.5/step): the most-recent sample has the highest weight, older samples decay by half per step.  -1=auto (4 * frameMsec).  0=off.  Requires sv_smoothClients 1." );
++
+ 	sv_timeout = Cvar_Get( "sv_timeout", "200", CVAR_TEMP );
+ 	Cvar_CheckRange( sv_timeout, "4", NULL, CV_INTEGER );
+ 	Cvar_SetDescription( sv_timeout, "Seconds without any message before automatic client disconnect." );
+@@ -822,6 +830,10 @@ void SV_Init( void )
+ 	Cvar_SetGroup( sv_minRate, CVG_SERVER );
+ 	Cvar_SetGroup( sv_maxRate, CVG_SERVER );
+ 	Cvar_SetGroup( sv_fps, CVG_SERVER );
++	Cvar_SetGroup( sv_smoothClients, CVG_SERVER );
++	Cvar_SetGroup( sv_velSmooth, CVG_SERVER );
++
++	// force initial check
+
+ 	// force initial check
+ 	SV_TrackCvarChanges();
+diff --git a/code/server/sv_main.c b/code/server/sv_main.c
+index 5b469610..00000004 100644
+--- a/code/server/sv_main.c
++++ b/code/server/sv_main.c
+@@ -27,6 +27,8 @@ server_t		sv;					// local server
+ vm_t			*gvm = NULL;		// game virtual machine
+
+ cvar_t	*sv_fps;				// time rate for running non-clients
++cvar_t	*sv_smoothClients;		// TR_LINEAR trajectory for smoother client rendering
++cvar_t	*sv_velSmooth;			// velocity smoothing window (ms, -1=auto, 0=off)
+ cvar_t	*sv_timeout;			// seconds without any message
+ cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
+ cvar_t	*sv_rconPassword;		// password for remote server commands
+@@ -1390,6 +1392,15 @@ void SV_Frame( int msec ) {
+ 		VM_Call( gvm, 1, GAME_RUN_FRAME, sv.time );
+ 	}
+
++	// Record positions into smooth ring buffer for sv_smoothClients / sv_velSmooth.
++	// Runs after GAME_RUN_FRAME so positions are up-to-date.
++	// Ring buffer only needed when sv_velSmooth is active (EWA needs history);
++	// raw-velocity mode (sv_velSmooth 0) reads ps->velocity directly.
++	if ( sv_smoothClients && sv_smoothClients->integer
++			&& sv_velSmooth && sv_velSmooth->integer != 0 ) {
++		SV_SmoothRecordAll();
++	}
++
+ 	if ( com_speeds->integer ) {
+ 		time_game = Sys_Milliseconds () - startTime;
+ 	}
+diff --git a/code/server/sv_snapshot.c b/code/server/sv_snapshot.c
+index e790ab25..00000005 100644
+--- a/code/server/sv_snapshot.c
++++ b/code/server/sv_snapshot.c
+@@ -23,6 +23,130 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ #include "server.h"
+
+
++/*
++=============================================================================
++
++Per-client position ring buffer for sv_velSmooth.
++
++Records player origin + velocity each server frame.  Used to compute
++exponential-weighted-average velocity (sv_velSmooth) for TR_LINEAR trDelta,
++which eliminates per-tick velocity jitter that manifests as blur or
++micro-stutter for fast-moving players.
++
++=============================================================================
++*/
++
++#define SV_SMOOTH_MAX_SLOTS 32
++
++typedef struct {
++	vec3_t      origin;
++	vec3_t      velocity;
++	int         serverTime;
++	qboolean    valid;
++} svSmoothPos_t;
++
++typedef struct {
++	svSmoothPos_t slots[SV_SMOOTH_MAX_SLOTS];
++	int           head;
++	int           count;
++} svSmoothHistory_t;
++
++static svSmoothHistory_t sv_smoothHistory[MAX_CLIENTS];
++
++
++void SV_SmoothInit( void ) {
++	Com_Memset( sv_smoothHistory, 0, sizeof( sv_smoothHistory ) );
++}
++
++
++void SV_SmoothClearClient( int clientNum ) {
++	if ( clientNum >= 0 && clientNum < MAX_CLIENTS )
++		Com_Memset( &sv_smoothHistory[clientNum], 0, sizeof( sv_smoothHistory[0] ) );
++}
++
++
++static void SV_SmoothRecord( int clientNum ) {
++	svSmoothHistory_t *hist;
++	svSmoothPos_t *slot;
++	int idx;
++
++	if ( clientNum < 0 || clientNum >= sv.maxclients )
++		return;
++
++	hist = &sv_smoothHistory[clientNum];
++	idx = ( hist->head % SV_SMOOTH_MAX_SLOTS + SV_SMOOTH_MAX_SLOTS ) % SV_SMOOTH_MAX_SLOTS;
++	slot = &hist->slots[idx];
++
++	if ( svs.clients[clientNum].netchan.remoteAddress.type == NA_BOT ) {
++		sharedEntity_t *gent = SV_GentityNum( clientNum );
++		VectorCopy( gent->s.pos.trBase, slot->origin );
++		VectorCopy( gent->s.pos.trDelta, slot->velocity );
++	} else {
++		playerState_t *ps = SV_GameClientNum( clientNum );
++		VectorCopy( ps->origin, slot->origin );
++		VectorCopy( ps->velocity, slot->velocity );
++	}
++
++	slot->serverTime = sv.time;
++	slot->valid = qtrue;
++
++	hist->head++;
++	if ( hist->count < SV_SMOOTH_MAX_SLOTS )
++		hist->count++;
++}
++
++
++void SV_SmoothRecordAll( void ) {
++	int i;
++	for ( i = 0; i < sv.maxclients; i++ ) {
++		if ( svs.clients[i].state == CS_ACTIVE ) {
++			SV_SmoothRecord( i );
++		}
++	}
++}
++
++
++/*
++=============
++SV_SmoothGetAverageVelocity
++
++Compute exponential-weighted-average velocity over the last windowMs.
++Each step back in time halves the weight, keeping the most-recent sample
++dominant.  This eliminates the trajectory kink at snapshot boundaries
++that a uniform sliding window would cause.
++=============
++*/
++static qboolean SV_SmoothGetAverageVelocity( int clientNum, int windowMs,
++		vec3_t outVelocity ) {
++	svSmoothHistory_t *hist;
++	int i, idx;
++	int cutoff;
++	float weight, totalWeight;
++	vec3_t weightedSum;
++
++	if ( clientNum < 0 || clientNum >= sv.maxclients )
++		return qfalse;
++
++	hist = &sv_smoothHistory[clientNum];
++	if ( hist->count == 0 )
++		return qfalse;
++
++	cutoff = sv.time - windowMs;
++	VectorClear( weightedSum );
++	totalWeight = 0.0f;
++	weight = 1.0f;
++
++	for ( i = 0; i < hist->count; i++ ) {
++		idx = ( ( hist->head - 1 - i ) % SV_SMOOTH_MAX_SLOTS + SV_SMOOTH_MAX_SLOTS ) % SV_SMOOTH_MAX_SLOTS;
++
++		if ( !hist->slots[idx].valid )
++			continue;
++		if ( hist->slots[idx].serverTime < cutoff )
++			break;
++
++		weightedSum[0] += hist->slots[idx].velocity[0] * weight;
++		weightedSum[1] += hist->slots[idx].velocity[1] * weight;
++		weightedSum[2] += hist->slots[idx].velocity[2] * weight;
++		totalWeight += weight;
++		weight *= 0.5f;
++	}
++
++	if ( totalWeight < 1e-6f )
++		return qfalse;
++
++	outVelocity[0] = weightedSum[0] / totalWeight;
++	outVelocity[1] = weightedSum[1] / totalWeight;
++	outVelocity[2] = weightedSum[2] / totalWeight;
++
++	return qtrue;
++}
++
++
+ /*
+ =============================================================================
+
+@@ -571,8 +695,85 @@ static void SV_BuildCommonSnapshot( void )
+ 	for ( i = 0 ; i < count ; i++, index = (index+1) % svs.numSnapshotEntities ) {
+ 		//index %= svs.numSnapshotEntities;
+ 		svs.snapshotEntities[ index ] = list[ i ]->s;
+-		sf->ents[ i ] = &svs.snapshotEntities[ index ];
++
++		/*
++		 * sv_smoothClients: rewrite TR_INTERPOLATE player entities to TR_LINEAR.
++		 *
++		 * The game QVM writes player entity state with TR_INTERPOLATE, which
++		 * tells the client "just lerp between snapshots."  At higher sv_fps the
++		 * client-side interpolation window shrinks and discrete position snaps
++		 * become visible as jitter.
++		 *
++		 * TR_LINEAR tells the client: "here is position AND velocity --
++		 * extrapolate forward."  This produces smooth continuous motion
++		 * regardless of tick rate.
++		 *
++		 * Velocity is optionally smoothed via sv_velSmooth (exponential weighted
++		 * average over the ring buffer) to eliminate per-tick jitter in trDelta.
++		 */
++		if ( sv_smoothClients && sv_smoothClients->integer ) {
++			entityState_t *es = &svs.snapshotEntities[ index ];
++			if ( es->number < sv.maxclients
++					&& es->pos.trType == TR_INTERPOLATE
++					&& svs.clients[ es->number ].netchan.remoteAddress.type != NA_BOT ) {
++				playerState_t *ps = SV_GameClientNum( es->number );
++				vec3_t origin, velocity, finalVel;
++				int velSmoothMs = 0;
++
++				VectorCopy( ps->origin, origin );
++				VectorCopy( ps->velocity, velocity );
++
++				/* Resolve smoothed velocity */
++				if ( sv_velSmooth && sv_velSmooth->integer != 0 ) {
++					velSmoothMs = sv_velSmooth->integer;
++					if ( velSmoothMs < 0 ) {
++						/* Auto: 4 frames at current tick rate */
++						velSmoothMs = 4 * ( 1000 / sv_fps->integer );
++					}
++				}
++				if ( velSmoothMs > 0 ) {
++					vec3_t avgVel;
++					if ( SV_SmoothGetAverageVelocity( es->number, velSmoothMs, avgVel ) ) {
++						VectorCopy( avgVel, finalVel );
++					} else {
++						VectorCopy( velocity, finalVel );
++					}
++				} else {
++					VectorCopy( velocity, finalVel );
++				}
++
++				if ( DotProduct( finalVel, finalVel ) > 100.0f ) {
++					/* Moving: stamp TR_LINEAR with position + smoothed velocity */
++					VectorCopy( origin, es->pos.trBase );
++					VectorCopy( finalVel, es->pos.trDelta );
++					es->pos.trType = TR_LINEAR;
++					es->pos.trTime = sv.time;
++				} else {
++					/* Idle: keep TR_INTERPOLATE but anchor position + time */
++					VectorCopy( origin, es->pos.trBase );
++					VectorCopy( finalVel, es->pos.trDelta );
++					es->pos.trTime = sv.time;
++				}
++
++				/* Sync es->origin to resolved trBase so client code that reads
++				   currentState.origin directly sees the same position. */
++				VectorCopy( es->pos.trBase, es->origin );
++			}
++		}
++
++		/* Anchor trTime for TR_INTERPOLATE client entities unconditionally.
++		   BG_PlayerStateToEntityState (game QVM) never writes pos.trTime for
++		   TR_INTERPOLATE -- it stays at 0 or stale.  Cgame QVM patches that
++		   redirect TR_INTERPOLATE -> TR_LINEAR need a valid trTime or the
++		   formula  trBase + trDelta * (evalTime - trTime) / 1000  produces
++		   an enormous dt, teleporting entities every frame.
++		   With trTime == sv.time:
++		     - Normal interpolation: dt = 0 at snap time -> returns trBase
++		     - Extrapolation: dt = cg.time - serverTime -> correct forward move */
++		{
++			entityState_t *es = &svs.snapshotEntities[ index ];
++			if ( es->number < sv.maxclients
++					&& es->pos.trType == TR_INTERPOLATE ) {
++				es->pos.trTime = sv.time;
++			}
++		}
++
++		sf->ents[ i ] = &svs.snapshotEntities[ index ];
+ 	}
+ }
+
+
+--
+2.53.0.windows.1
